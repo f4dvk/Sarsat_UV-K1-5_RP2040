@@ -1,0 +1,30 @@
+# build trees
+rp2040/build/
+rp2040/build2/
+rp2040/build-*/
+build/
+
+# host test artefacts (compiled executables have no extension)
+rp2040/test/host/test_*
+!rp2040/test/host/test_*.c
+rp2040/test/host/fgb_bits.csv
+
+# python
+__pycache__/
+*.pyc
+
+# editor / OS
+*.o
+*.elf
+*.uf2
+*.bin
+*.hex
+*.dis
+.vscode/
+.DS_Store
+
+# ...but keep the delivered firmware images
+!firmware/**/bin/*.bin
+!firmware/**/bin/*.packed.bin
+!rp2040/bin/
+!rp2040/bin/*.uf2

@@ -1,0 +1,58 @@
+--- "/home/stephane/T\303\251l\303\251chargements/uvk5cec-0.3q/app/uart.c"	2024-01-19 14:43:30.000000000 +0100
++++ app/uart.c	2026-09-02 19:46:07.519502679 +0200
+@@ -22,6 +22,12 @@
+ #ifdef ENABLE_FMRADIO
+ 	#include "app/fm.h"
+ #endif
++#ifdef ENABLE_SARSAT
++	#include "app/sarsat.h"
++#endif
++#ifdef ENABLE_APRS
++	#include "app/aprs.h"
++#endif
+ #include "app/uart.h"
+ #include "board.h"
+ #include "bsp/dp32g030/dma.h"
+@@ -159,7 +165,7 @@
+ static uint16_t gUART_WriteIndex;
+ static bool     bIsEncrypted = true;
+ 
+-static void SendReply(void *pReply, uint16_t Size)
++void SendReply(void *pReply, uint16_t Size)
+ {
+ 	Header_t Header;
+ 	Footer_t Footer;
+@@ -615,10 +621,32 @@
+ 		case 0x0601:
+ 			CMD_0601_ReadBK4819Reg(UART_Command.Buffer);
+ 			break;
+-		
++
+ 		case 0x0602:
+ 			CMD_0602_WriteBK4819Reg(UART_Command.Buffer);
+ 			break;
+ #endif
++
++#ifdef ENABLE_SARSAT
++		case 0x06C0:   // SARSAT_CLEAR
++		case 0x06C1:   // SARSAT_TEXT  {line:u8, invert:u8, ascii...}
++		case 0x06C2:   // SARSAT_BEACON
++		case 0x06C3:   // SARSAT_LEVEL (telemetry, no reply)
++		case 0x06CF:   // SARSAT_HELLO {proto_ver:u8}
++			SARSAT_HandleUART(UART_Command.Header.ID,
++			                  UART_Command.Buffer + sizeof(Header_t),
++			                  UART_Command.Header.Size);
++			break;
++#endif
++
++#ifdef ENABLE_APRS
++		case 0x06D2:   // APRS RX raw text from the RP2040
++		case 0x06D3:   // APRS RX structured decode from the RP2040
++		case 0x06D5:   // APRS GPS fix from the RP2040
++			APRS_HandleUART(UART_Command.Header.ID,
++			                UART_Command.Buffer + sizeof(Header_t),
++			                UART_Command.Header.Size);
++			break;
++#endif
+ 	}
+ }

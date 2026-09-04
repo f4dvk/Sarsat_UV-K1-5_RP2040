@@ -1,0 +1,42 @@
+--- "/home/stephane/Téléchargements/uvk5cec-0.3q/radio.c"	2024-01-19 14:43:30.000000000 +0100
++++ radio.c	2026-09-04 07:00:00.000000000 +0200
+@@ -50,7 +50,8 @@
+ 
+ #ifdef ENABLE_BYP_RAW_DEMODULATORS
+ 	[MODULATION_BYP]="BYP",
+-	[MODULATION_RAW]="RAW"
++	[MODULATION_RAW]="RAW",
++	[MODULATION_DISCRI]="DSC"
+ #endif
+ };
+ 
+@@ -880,11 +881,27 @@
+ #endif
+ 	}
+ 
+-	BK4819_SetAF(mod);
++	BK4819_SetAF(mod);   // MODULATION_DISCRI falls through default -> BK4819_AF_FM
+ 
+-	BK4819_SetRegValue(afDacGainRegSpec, 0xF);
++	/* Sarsat_UV-K1-5_RP2040: honour gEeprom.DAC_GAIN (the C-Board AF-gain
++	 * override sets it) instead of forcing the AF DAC gain to max. */
++	BK4819_SetRegValue(afDacGainRegSpec, gEeprom.DAC_GAIN & 0xF);
+ 	BK4819_WriteRegister(BK4819_REG_3D, modulation == MODULATION_USB ? 0 : 0x2AAB);
++#ifdef ENABLE_BYP_RAW_DEMODULATORS
++	/* MODULATION_DISCRI = flat FM discriminator: drop REG_2B RX de-emphasis /
++	 * HPF300 / LPF3k (bits 10:8); every other mode restores the stock audio
++	 * filtering (nothing else in this firmware writes REG_2B). */
++	{
++		uint16_t r2b = BK4819_ReadRegister(BK4819_REG_2B);
++		r2b = (modulation == MODULATION_DISCRI) ? (uint16_t)(r2b |  (7u << 8))
++		                                        : (uint16_t)(r2b & ~(7u << 8));
++		BK4819_WriteRegister(BK4819_REG_2B, r2b);
++	}
++	BK4819_SetRegValue(afcDisableRegSpec,
++		modulation != MODULATION_FM && modulation != MODULATION_DISCRI);
++#else
+ 	BK4819_SetRegValue(afcDisableRegSpec, modulation != MODULATION_FM);
++#endif
+ 
+ 	RADIO_SetupAGC(modulation == MODULATION_AM, false);
+ }

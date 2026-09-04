@@ -1,0 +1,62 @@
+--- "/home/stephane/Téléchargements/uvk5cec-0.3q/Makefile"	2024-01-19 14:43:30.000000000 +0100
++++ Makefile	2026-09-04 06:00:00.000000000 +0200
+@@ -43,10 +43,16 @@
+ ENABLE_COPY_CHAN_TO_VFO       ?= 1
+ ENABLE_SPECTRUM               ?= 1
+ ENABLE_REDUCE_LOW_MID_TX_POWER?= 0
+-ENABLE_BYP_RAW_DEMODULATORS   ?= 0
++ENABLE_BYP_RAW_DEMODULATORS   ?= 1
+ ENABLE_BLMIN_TMP_OFF          ?= 0
+ ENABLE_SCAN_RANGES            ?= 1
+ 
++# ---- Sarsat_UV-K1-5_RP2040 : COSPAS-SARSAT 406 screen fed by the RP2040 C-Board
++ENABLE_SARSAT                 ?= 1
++ENABLE_APRS                   ?= 1
++# alternate main screen: stock | moto | id91
++MAIN_SCREEN                   ?= stock
++
+ # ---- DEBUGGING ----
+ ENABLE_AM_FIX_SHOW_DATA       ?= 0
+ ENABLE_AGC_SHOW_DATA          ?= 0
+@@ -142,6 +148,13 @@
+ ifeq ($(ENABLE_SPECTRUM), 1)
+ OBJS += app/spectrum.o
+ endif
++ifeq ($(ENABLE_SARSAT),1)
++OBJS += app/sarsat.o
++endif
++ifeq ($(ENABLE_APRS),1)
++OBJS += app/aprs.o
++OBJS += app/ax25.o
++endif
+ OBJS += app/scanner.o
+ ifeq ($(ENABLE_UART),1)
+ 	OBJS += app/uart.o
+@@ -221,7 +234,7 @@
+ # can set own version string here (max 7 chars)
+ 
+ # CHANGE VERSION TYPE
+-VERSION_STRING ?= CEC_0.1c
++VERSION_STRING ?= CEC3qSAR
+ 
+ 
+ ASFLAGS = -c -mcpu=cortex-m0
+@@ -364,6 +377,18 @@
+ ifeq ($(ENABLE_BYP_RAW_DEMODULATORS),1)
+ 	CFLAGS  += -DENABLE_BYP_RAW_DEMODULATORS
+ endif
++ifeq ($(ENABLE_SARSAT),1)
++	CFLAGS  += -DENABLE_SARSAT
++endif
++ifeq ($(ENABLE_APRS),1)
++	CFLAGS  += -DENABLE_APRS
++endif
++ifeq ($(MAIN_SCREEN),moto)
++	CFLAGS  += -DMAIN_SCREEN_MOTO
++endif
++ifeq ($(MAIN_SCREEN),id91)
++	CFLAGS  += -DMAIN_SCREEN_ID91
++endif
+ ifeq ($(ENABLE_BLMIN_TMP_OFF),1)
+ 	CFLAGS  += -DENABLE_BLMIN_TMP_OFF
+ endif

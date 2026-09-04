@@ -1,0 +1,10 @@
+--- "/home/stephane/Téléchargements/uvk5cec-0.3q/radio.h"	2024-01-19 14:43:30.000000000 +0100
++++ radio.h	2026-09-04 07:00:00.000000000 +0200
+@@ -63,6 +63,7 @@
+ #ifdef ENABLE_BYP_RAW_DEMODULATORS
+ 	MODULATION_BYP,
+ 	MODULATION_RAW,
++	MODULATION_DISCRI,   // flat FM discriminator (REG_2B de-emphasis/HPF/LPF bypassed)
+ #endif
+ 
+ 	MODULATION_UKNOWN

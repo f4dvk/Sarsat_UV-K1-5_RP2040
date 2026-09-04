@@ -1,0 +1,33 @@
+--- "/home/stephane/T\303\251l\303\251chargements/uvk5cec-0.3q/ui/status.c"	2024-01-19 14:43:30.000000000 +0100
++++ ui/status.c	2026-09-04 09:40:00.000000000 +0200
+@@ -33,6 +33,9 @@
+ #include "ui/helper.h"
+ #include "ui/ui.h"
+ #include "ui/status.h"
++#ifdef ENABLE_APRS
++	#include "app/aprs.h"
++#endif
+ 
+ void UI_DisplayStatus()
+ {
+@@ -129,6 +132,20 @@
+ 	x += sizeof(BITMAP_VOX) + 1;
+ #endif
+ 
++#ifdef ENABLE_APRS
++	// GPS: solid = fix locked, blink = module present but searching, nothing
++	// = no GPS module on the C-Board.
++	{
++		extern uint32_t millis10(void);
++		const uint8_t gps = APRS_GpsState();
++		if (gps == 2 || (gps == 1 && (millis10() % 80) < 40)) {
++			static const uint8_t BITMAP_GPS[5] = { 0x04, 0x0A, 0x15, 0x0A, 0x04 };
++			memcpy(line + x, BITMAP_GPS, sizeof(BITMAP_GPS));
++		}
++		if (gps) { x += 6; if (x > x1) x1 = x; }
++	}
++#endif
++
+ 	x = MAX(x1, 61u);
+ 
+ 	// KEY-LOCK indicator

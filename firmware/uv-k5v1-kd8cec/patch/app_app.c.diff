@@ -1,0 +1,57 @@
+--- "/home/stephane/T\303\251l\303\251chargements/uvk5cec-0.3q/app/app.c"	2024-01-19 14:43:30.000000000 +0100
++++ app/app.c	2026-09-04 08:20:00.000000000 +0200
+@@ -37,6 +37,12 @@
+ #include "app/main.h"
+ #include "app/menu.h"
+ #include "app/scanner.h"
++#ifdef ENABLE_SARSAT
++	#include "app/sarsat.h"
++#endif
++#ifdef ENABLE_APRS
++	#include "app/aprs.h"
++#endif
+ #ifdef ENABLE_UART
+ 	#include "app/uart.h"
+ #endif
+@@ -452,7 +458,11 @@
+ 	AUDIO_AudioPathOn();
+ 	gEnableSpeaker = true;
+ 
+-	if (gSetting_backlight_on_tx_rx & BACKLIGHT_ON_TR_RX) {
++	if ((gSetting_backlight_on_tx_rx & BACKLIGHT_ON_TR_RX)
++#ifdef ENABLE_APRS
++	    && !APRS_QuietBacklight()   // 144.8 APRS: light only on a decoded frame
++#endif
++	   ) {
+ 		BACKLIGHT_TurnOn();
+ 	}
+ 
+@@ -924,6 +934,9 @@
+ 			|| gScanStateDir != SCAN_OFF
+ 			|| gCssBackgroundScan
+ 			|| gScreenToDisplay != DISPLAY_MAIN
++#ifdef ENABLE_APRS
++			|| APRS_KeepAwake()          // 144-148 MHz: keep the RX up for the C-Board
++#endif
+ #ifdef ENABLE_FMRADIO
+ 			|| gFmRadioMode
+ #endif
+@@ -1134,6 +1147,18 @@
+ 	}
+ #endif
+ 
++#ifdef ENABLE_SARSAT
++	if (gSarsatShowRequest) {
++		gSarsatShowRequest = false;
++		APP_RunSarsat();   /* self-guards; re-arms if the radio is busy */
++	}
++#endif
++#ifdef ENABLE_APRS
++	APRS_TimeSlice();
++	if (gAprsShowRequest)
++		APP_RunAprs();     /* auto-popup: opens to RX view, self-timed/guarded */
++#endif
++
+ 	if (gReducedService)
+ 		return;
+ 
