@@ -1282,3 +1282,55 @@ tick principal normalement, par le mini-squelch de `APP_RunAprs()` pendant
 le popup -- donc elle ne peut pas se figer. Build vert, 0 warning.
 **Non testé sur l'air** (à confirmer, mais cause démontrée par les
 commentaires de l'énumération et le blocage du tick).
+
+
+### AFC désactivée sur la bande APRS (TEST, K1/K5V3 uniquement)
+
+Remonté : « la première trame n'est pas décodée s'il n'y a pas eu de
+réception récente ». Analyse (les deux firmwares comparés) :
+- Le seul « économiseur » périodique est `FUNCTION_POWER_SAVE`/`gRxIdleMode`
+  (= BATTERY_SAVE), déjà inhibé sur 144-148 MHz par `APRS_KeepAwake()`.
+  Réserve : `aprs_on_band()` ne regarde que `gEeprom.RX_VFO` → en Dual Watch
+  il peut évaluer le mauvais VFO. Le Dual Watch lui-même fait rater des
+  salves (écoute à temps partiel + « parking » sur le VFO après une RX).
+- **AFC** : `RADIO_SetModulation()` active l'AFC en `MODULATION_FM` sur les
+  **deux** firmwares (REG_73 bit 4 = 0). Sur le K1/K5V3 elle est coupée en
+  mode « RAW »/DSC (`BK4819_EnterRaw()`) ; sur le V1 elle reste active même
+  en « DSC » (`MODULATION_DISCRI`, `radio.c.diff` la traite comme FM). En
+  FM, canal au repos → l'AFC dérive sur le bruit → première salve décalée
+  en fréquence → trame ratée ; l'AFC se recale ensuite. Même mécanisme que
+  celui **confirmé sur l'air pour le SARSAT** (corrigé là par
+  `BK4819_SetRegValue(afcDisableRegSpec, true)` dans `APP_RunSarsat()`).
+
+**Essayé puis retiré (K1/K5V3 seul, V1 toujours intouché)** : une
+`APRS_DisableAfc()` réassénée à chaque tick de `APRS_TimeSlice()` posait
+REG_73 bit 4 (AFC disable) dès que le VFO RX était dans 144-148 MHz — même
+schéma que `APRS_ApplySquelch()`, sans toucher squelch ni gain.
+
+**Résultat sur l'air : aucune amélioration** (« pas mieux »). Deux logs
+RP2040 successifs (RAW puis FM, `clip=0.0%`, gain AF calé, `env` stable
+~400-480k) montrent des trames toujours lisibles (`src=F4DVK`, `F8BEC-9`,
+`F8KCS-3`…) mais **toujours `BAD`** : 2-4 erreurs de bits dispersées par
+trame, à des positions différentes sur les 3 chaînes de slicer, et sur
+certains octets « chauds » les **trois** chaînes divergent (désaccord
+triple = l'audio est réellement corrompu à cet instant, pas un artefact de
+slicer). Les erreurs sont donc **dans le domaine RF** — le discriminateur
+du K1/BK4829 est plus bruité que celui du V1/BK4819 pour les mêmes signaux
+sur ce banc — et non une dérive de LO. Cohérent avec le constat de
+l'utilisateur : « l'UV-K1 est plus sensible aux perturbations HF », « quand
+je m'écarte ça fonctionne ». `APRS_DisableAfc()` **supprimée sur demande** ;
+l'AFC repasse à son comportement `MODULATION_FM` d'origine (active), comme
+le V1. Build vert, 0 warning : `FLASH 116048/120832 o (96,04 %)`. `.bin` +
+`sha256.txt` régénérés.
+
+**Épilogue (confirmé par l'utilisateur) : c'était un défaut matériel de son
+montage C-Board.** Le même RP2040 avec les mêmes binaires décode normalement
+sur un autre exemplaire. La chaîne de démodulation RP2040 (BPF, limiteur
+dur, slicer à suivi de crêtes, LPF 13 taps, 3 slicers, PLL, HDLC, FCS) est
+restée octet pour octet identique au commit initial ; le seul ajout
+RP2040 depuis (`aprs_try_fix_cross()`) est purement additif (réparation
+post-échec FCS). Le passage des 3 pads GP26/GP27/GP28 en mode analogique
+(`CFG_ADC_SHORTED_MASK = 0x07`, inchangé depuis l'origine) est correct pour
+le montage court-circuité — il **évite** que les buffers logiques de
+GP27/GP28 chargent le nœud audio, il ne peut pas dégrader le décodage.
+Rien à corriger côté firmware.

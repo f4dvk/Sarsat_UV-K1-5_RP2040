@@ -679,6 +679,14 @@ void APRS_ApplySquelch(void)
         BK4819_WriteRegister(BK4819_REG_4E, want);
 }
 
+/* NB: a TEST that kept the BK4829 AFC forced OFF on 144-148 MHz used to live
+ * here (APRS_DisableAfc(), reasserted every tick like APRS_ApplySquelch()).
+ * It mirrored the fix confirmed on air for the SARSAT screen, but on air it
+ * made no difference to APRS decoding -- the residual bit errors were shown
+ * to be RF-domain (noisier discriminator on this bench), not an LO drift --
+ * so it was removed on the user's request. The AFC is back to its stock
+ * MODULATION_FM behaviour (enabled), same as the V1 port. */
+
 static int16_t rd16(const uint8_t *p) { return (int16_t)(p[0] | (p[1] << 8)); }
 static int32_t rd32(const uint8_t *p)
 {
