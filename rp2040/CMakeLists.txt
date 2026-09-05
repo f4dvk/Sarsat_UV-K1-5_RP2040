@@ -32,6 +32,7 @@ add_executable(sarsat_rp2040
     src/quansheng_frame.c
     src/aprs_rx.c
     src/aprs_parse.c
+    src/aprs_digi.c
     src/gps_nmea.c
 )
 

@@ -30,7 +30,7 @@ cp "$HERE/patch/ax25.c"   app/ax25.c
 cp "$HERE/patch/ax25.h"   app/ax25.h
 
 # 3. apply the source hooks
-for d in app_uart.c app_app.c app_main.c settings.c radio.h radio.c ui_main.c ui_status.c Makefile; do
+for d in app_uart.c app_app.c app_main.c settings.c radio.h radio.c ui_main.c ui_status.c misc.h Makefile; do
     f="${d/_//}"
     patch -p0 --forward "$f" < "$HERE/patch/${d}.diff"
 done

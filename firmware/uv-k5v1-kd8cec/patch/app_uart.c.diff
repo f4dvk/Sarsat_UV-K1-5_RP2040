@@ -22,7 +22,7 @@
  {
  	Header_t Header;
  	Footer_t Footer;
-@@ -615,10 +621,32 @@
+@@ -615,10 +621,33 @@
  		case 0x0601:
  			CMD_0601_ReadBK4819Reg(UART_Command.Buffer);
  			break;
@@ -49,6 +49,7 @@
 +		case 0x06D2:   // APRS RX raw text from the RP2040
 +		case 0x06D3:   // APRS RX structured decode from the RP2040
 +		case 0x06D5:   // APRS GPS fix from the RP2040
++		case 0x06D6:   // APRS digipeat TX request from the RP2040
 +			APRS_HandleUART(UART_Command.Header.ID,
 +			                UART_Command.Buffer + sizeof(Header_t),
 +			                UART_Command.Header.Size);

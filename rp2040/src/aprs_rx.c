@@ -120,6 +120,52 @@ static bool ax25_looks_like_ui(const uint8_t *d, int len)
     return false;
 }
 
+bool aprs_try_fix_cross(aprs_rx_t *r, int chain, uint8_t *d, int len)
+{
+    enum { MAX_DIFF = 5 };   /* 2^5 = 32 combinations to try, still cheap */
+
+    for (int j = 0; j < APRS_RX_SLICERS; j++) {
+        if (j == chain || !r->last_cand[j].valid)
+            continue;
+        if (r->last_cand[j].len != len)
+            continue;
+        /* all 3 chains advance on the same sample clock (independent PLL
+         * per chain, but fed the same audio) -- a stale candidate from a
+         * much earlier, unrelated burst must not be mistaken for a sibling
+         * decode of *this* frame. ~50 ms is generous slack for PLL jitter
+         * between chains while still well inside one HDLC frame. */
+        if ((r->now - r->last_cand[j].at) > (uint32_t)(APRS_RX_SAMPLE_RATE_HZ / 20))
+            continue;
+
+        const uint8_t *other = r->last_cand[j].data;
+        int diff_pos[MAX_DIFF];
+        int nd = 0;
+        bool too_many = false;
+        for (int i = 0; i < len; i++) {
+            if (d[i] == other[i])
+                continue;
+            if (nd == MAX_DIFF) { too_many = true; break; }
+            diff_pos[nd++] = i;
+        }
+        if (too_many || nd == 0)
+            continue;                  /* not a close enough match to bother */
+
+        uint8_t merged[APRS_RX_MAX_FRAME];
+        memcpy(merged, d, (size_t)len);
+        for (uint32_t mask = 1; mask < (1u << nd); mask++) {
+            for (int k = 0; k < nd; k++)
+                merged[diff_pos[k]] = (mask & (1u << k)) ? other[diff_pos[k]]
+                                                          : d[diff_pos[k]];
+            if (aprs_fcs_residue(merged, len) == 0x0F47 &&
+                ax25_looks_like_ui(merged, len - 2)) {
+                memcpy(d, merged, (size_t)len);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 #define APRS_DIAG(FR, L, RES, UI) \
     do { if (r->fcb) r->fcb(r->fcb_user, (FR), (L), chain, (RES), (UI)); } while (0)
 
@@ -153,9 +199,20 @@ static void aprs_output(aprs_rx_t *r, aprs_chan_t *c)
                 else
                     c->data[i] ^= (uint8_t)(1u << b);
             }
+        if (!ok)
+            ok = aprs_try_fix_cross(r, chain, c->data, len);
         if (ok)
             r->n_fixed++;
     }
+
+    /* cache this chain's best-effort bytes (post any repair) so a sibling
+     * chain that finishes moments later -- or earlier; completion order
+     * between the independently-PLL'd chains isn't guaranteed -- can try
+     * cross-channel repair (aprs_try_fix_cross()) against it. */
+    r->last_cand[chain].len   = len;
+    r->last_cand[chain].at    = r->now;
+    r->last_cand[chain].valid = true;
+    memcpy(r->last_cand[chain].data, c->data, (size_t)len);
 
     const int ui = ax25_looks_like_ui(c->data, len - 2);
 

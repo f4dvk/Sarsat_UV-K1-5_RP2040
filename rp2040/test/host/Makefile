@@ -27,7 +27,7 @@ PORT_SRCS := $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406.c \
 APRS_DIR := ../../../firmware/uv-k5v1-kd8cec/patch
 
 .PHONY: all parity check clean
-all: test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_gps
+all: test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_gps test_aprs_digi
 
 test_decode: hexmain.c $(PORT_SRCS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -54,6 +54,9 @@ test_aprs_parse: test_aprs_parse.c $(SRC_DIR)/aprs_parse.c $(APRS_DIR)/ax25.c
 test_gps: test_gps.c $(SRC_DIR)/gps_nmea.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+test_aprs_digi: test_aprs_digi.c $(SRC_DIR)/aprs_digi.c $(APRS_DIR)/ax25.c
+	$(CC) $(CFLAGS) -I$(APRS_DIR) -o $@ $^ $(LDLIBS)
+
 parity: test_decode
 	@./run_parity.sh "$(UPSTREAM)"
 
@@ -64,6 +67,7 @@ check: all parity
 	@./test_aprs_rx
 	@./test_aprs_parse
 	@./test_gps
+	@./test_aprs_digi
 
 clean:
-	rm -f test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_aprs_wav test_gps fgb_bits.csv
+	rm -f test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_aprs_wav test_gps test_aprs_digi fgb_bits.csv

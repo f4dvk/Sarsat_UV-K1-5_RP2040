@@ -127,6 +127,66 @@ static int fix_case(void)
     return ok ? 0 : 1;
 }
 
+/* direct test of the cross-channel repair: two independent chains, each
+ * individually still FCS-bad (2 bit errors on one, 1 on the other), whose
+ * errors don't land in the same byte -- aprs_try_fix_cross() should combine
+ * them into the correct frame even though aprs_try_fix() (single-bit) alone
+ * cannot fix either one. */
+static int cross_fix_case(void)
+{
+    ax25_addr_t src = { "F4DVK", 9 }, dst = { "APZSAR", 0 };
+    ax25_addr_t digi[1] = { { "WIDE2", 1 } };
+    const char *info = "!4237.50N/00121.30E>cross-fix test frame content";
+    uint8_t f[AX25_MAX_FRAME];
+    int flen = ax25_build_ui(f, &dst, &src, digi, 1, info, (int)strlen(info));
+
+    if (aprs_fcs_residue(f, flen) != 0x0F47) {
+        printf("  cross-channel repair  FCS-base FAIL\n");
+        return 1;
+    }
+
+    /* all 3 positions sit well inside the info field (address+ctl+pid is
+     * dst 7 + src 7 + digi 7 + ctl 1 + pid 1 = 23 bytes), so corrupting them
+     * can't confuse ax25_looks_like_ui()'s address-block parsing. */
+    const int posA1 = 30, posA2 = 40, posB = 35;
+
+    uint8_t a[AX25_MAX_FRAME];                 /* chain A: 2 bad bits */
+    memcpy(a, f, (size_t)flen);
+    a[posA1] ^= 0x04;
+    a[posA2] ^= 0x10;
+
+    uint8_t b[AX25_MAX_FRAME];                 /* chain B: 1 bad bit, at a
+                                                 * position A got right */
+    memcpy(b, f, (size_t)flen);
+    b[posB] ^= 0x02;
+
+    aprs_rx_t rx;
+    memset(&rx, 0, sizeof rx);
+    rx.last_cand[1].len   = flen;
+    rx.last_cand[1].at    = 0;
+    rx.last_cand[1].valid = true;
+    memcpy(rx.last_cand[1].data, b, (size_t)flen);
+    rx.now = 10;                               /* well inside the repair's
+                                                 * ~50 ms staleness window */
+
+    uint8_t try1[AX25_MAX_FRAME];              /* chain A alone: 1-bit repair
+                                                 * must fail (2 bad bits) */
+    memcpy(try1, a, (size_t)flen);
+    bool single_fixed = aprs_try_fix(try1, flen);
+
+    uint8_t try2[AX25_MAX_FRAME];              /* chain A + B's cache: must
+                                                 * reconstruct f exactly */
+    memcpy(try2, a, (size_t)flen);
+    bool cross_fixed = aprs_try_fix_cross(&rx, 0, try2, flen);
+
+    int ok = !single_fixed && cross_fixed && memcmp(try2, f, (size_t)flen) == 0;
+    printf("  cross-channel repair  single=%-20s cross=%-6s  %s\n",
+           single_fixed ? "fixed(unexpected)" : "still-bad(expected)",
+           cross_fixed  ? "fixed" : "FAIL",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int main(void)
 {
     int bad = 0;
@@ -142,6 +202,7 @@ int main(void)
     bad += one_case("clip + noise",    3.00, 0.30, 10);
     bad += one_case("noisy (SNR~7dB)", 1.00, 0.45, 7);
     bad += fix_case();
+    bad += cross_fix_case();
 
     printf(bad ? "\nFAIL\n" : "\nPASS\n");
     return bad ? 1 : 0;

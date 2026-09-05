@@ -103,7 +103,7 @@ L'en-tête montre l'aide des touches contextuelle.
 | Icon | HAUT/BAS voiture / maison / camion / coureur / vélo / yacht / avion / wx / point |
 | Interval | HAUT/BAS OFF / 30 / 60 / 120 / 300 / 600 / 900 / 1800 s (auto-balise) |
 | Popup | HAUT/BAS OFF / 5 / 10 / 20 s — popup auto de la vue RX sur un paquet décodé, se referme après N s (une touche annule le minuteur) |
-| AF gain | HAUT/BAS auto / 1..78 — un curseur combiné sur le BK4819 REG_48 AF Rx Gain-2 + gain DAC (~-52 dB à 1, stock à 78) ; il balaie d'abord Gain-2 63->8 (région linéaire), puis le gain DAC 15->0. Les deux sont ré-appliqués à chaque ouverture d'écran SARSAT / APRS et ~2x/s depuis le tick (`patch/radio.c.diff` empêche `RADIO_SetModulation()` de forcer le gain DAC au max, qui était le bug « plus fort après réouverture ») pour alimenter le tap C-Board. Mets le pot de volume au max et règle ça ; aussi ajustable sur l'écran niveau SARSAT contre la barre rms. `auto` = stock. Persiste via `gEeprom.DAC_GAIN` / `.VOLUME_GAIN` pour que `RADIO_SetupRegisters` le garde — pas de patch radio.c. |
+| AF gain | HAUT/BAS auto / 1..78 — un curseur combiné sur le BK4819 REG_48 AF Rx Gain-2 + gain DAC (~-52 dB à 1, stock à 78) ; il balaie d'abord Gain-2 63->8 (région linéaire), puis le gain DAC 15->0. Les deux sont ré-appliqués à chaque ouverture d'écran SARSAT / APRS et ~2x/s depuis le tick (`patch/radio.c.diff` empêche `RADIO_SetModulation()` de forcer le gain DAC au max, qui était le bug « plus fort après réouverture ») pour alimenter le tap C-Board. Mets le pot de volume au max et règle ça ; aussi ajustable sur l'écran niveau SARSAT contre la barre rms. `auto` = stock. Persiste via `gEeprom.DAC_GAIN` / `.VOLUME_GAIN` pour que `RADIO_SetupRegisters` le garde — pas de patch radio.c. **`auto` capture le gain du potentiomètre à l'ouverture de l'écran** (`APRS_ResyncAfGainKnob()`, appelée avant `APRS_ApplyAfGain()` dans `APP_RunSarsat()`/`APP_RunAprs()`) — avant ce correctif la capture ne se faisait qu'une seule fois par démarrage (première ouverture d'écran), restant figée même si le potentiomètre était tourné ensuite : `auto` reclampait alors silencieusement le gain bas, perçu comme une perte de sensibilité (bug trouvé sur le portage F4HWN, corrigé en miroir ici puisque le code était identique). |
 | Squelch | HAUT/BAS bascule **`Squelch fast`** (défaut) / **`Squelch stock`**. `fast` met le **délai d'ouverture** squelch BK4819 (REG_4E bits 13:11) de 5 à 0 **seulement tant que le VFO RX est 144–148 MHz**, pour que le récepteur démute en quelques ms et que les premiers flags AX.25 d'un paquet ne soient pas perdus. Ré-assené à chaque tick de 10 ms (une reconfig VFO réécrit REG_4E). Hors bande = intact. Pour une perte vraiment nulle, mets le menu `SQL` de la radio à 0 (monitor). |
 | Light | HAUT/BAS bascule **`Light on RX`** (stock — rétroéclairage à toute ouverture squelch) / **`Light on frame`**. Avec `Light on frame`, tant que le VFO RX est 144–148 MHz le rétroéclairage sur squelch RX est inhibé et l'écran s'allume **seulement quand la C-Board décode un paquet APRS** (`APRS_QuietBacklight()` conditionne l'appel `BACKLIGHT_ON_TR_RX` dans `APP_StartListening` ; `aprs_rx_arrived()` appelle `BACKLIGHT_TurnOn()`). Hors bande la radio se comporte normalement. |
 | Lat / Lon | **saisie des chiffres** (2+5 pour lat, 3+5 pour lon, décimale placée auto), `*` bascule N/S resp. E/W ; ou HAUT/BAS pour des pas de ±0,001° quand rien n'est tapé. |
@@ -154,9 +154,43 @@ externe.
 >   à ~860 µs (3 % lent) et jittait — aucun TNC ne se verrouillait. L'horloge
 >   à échéance plus les écritures `REG_71` seulement-au-changement l'ont corrigé.
 
-> Mets le VFO APRS sur un canal **144.800 MHz simplex** légal avant de baliser —
 > `APRS_Beacon()` clé le TX avec seulement un garde « pas déjà en émission /
-> indicatif défini », il ne re-vérifie pas bande/lockout.
+> indicatif défini », il ne re-vérifie pas bande/lockout — mais voir ci-dessous,
+> il ne balise plus sur le VFO courant de toute façon.
+
+**Canal dédié 170 (« APRS »)** : comme le firmware CEC d'origine, la balise
+n'émet **jamais** sur le VFO A/B actuellement affiché — elle recharge toujours
+la config du **canal mémoire 170** (le dernier, `APRS_TX_CHANNEL` = index 169)
+juste avant de baliser : fréquence, puissance, mode, largeur, décalage, CTCSS…
+exactement ce que `RADIO_ConfigureChannel(..., VFO_CONFIGURE_RELOAD)` lit pour
+n'importe quel canal mémoire. Ça permet de laisser VFO A/B sur autre chose (une
+répétition, la surveillance SARSAT sur l'autre VFO…) tout en continuant de
+baliser sur 144.800. Le canal 170 s'affiche partout comme **`APRS`** au lieu de
+`CH170`/`MR 170` (nom EEPROM forcé par `APRS_Init()`). À la première utilisation
+(canal encore vierge en EEPROM), il est pré-rempli à 144.800000 MHz, FM large,
+puissance moyenne, sans CTCSS ; édite-le ensuite comme n'importe quel canal
+mémoire (menu Channel, ou copie VFO→canal) pour changer où la balise part —
+la config est relue à chaque salve, aucun redémarrage nécessaire. `APRS_Beacon()`
+emprunte le slot du VFO TX le temps de la salve (sauvegarde/restauration
+complète de `gEeprom.VfoInfo[]`/`ScreenChannel[]`/`MrChannel[]`), donc le VFO
+affiché ne change jamais visiblement, y compris pendant la salve.
+Ne balise **jamais** tant que l'écran SARSAT (F+8) est ouvert : ce dernier
+bloque la boucle principale (donc `APRS_TimeSlice()`/l'auto-balise ne tourne
+pas), et `APRS_Beacon()` a un garde explicite (`SARSAT_ScreenOpen()`) pour le
+documenter/protéger un futur appelant.
+
+> **Mémoires plafonnées à 170** (`misc.h.diff`, `MR_CHANNEL_LAST` 199 → 169) :
+> comme le projet CEC d'origine, il n'y a plus que les canaux **1 à 170** —
+> le 170 est bien le dernier, ce n'est plus un canal perdu au milieu de 200.
+> Si un canal était déjà enregistré au-delà de 170 sur un ancien build, ses
+> octets restent en EEPROM mais deviennent **inaccessibles depuis l'interface**
+> (`IS_MR_CHANNEL()` ne va plus jusque-là). Effet de bord unique, au premier
+> démarrage après le flash : si le VFO actif était en mode « canal fréquence »
+> (bande VHF/UHF prédéfinie, pas un canal mémoire), son numéro logique interne
+> a changé et il peut retomber sur une bande par défaut — resélectionne juste
+> la fréquence/bande voulue une fois, rien n'est perdu. **Pas de canal mémoire
+> normal (1-170) touché par ce changement, seuls les repères fréquence/NOAA
+> internes se décalent.**
 
 **RX :** la C-Board RP2040 démodule l'APRS 144.8 MHz (Bell-202 AFSK 1200 +
 AX.25, `rp2040/src/aprs_rx.c` — 3 slicers biaisés parallèles + une réparation
@@ -208,9 +242,10 @@ temporisent aussi tant que le canal est occupé (`FUNCTION_RECEIVE` /
 
 `build.sh` désactive `ENABLE_SPECTRUM`, `ENABLE_FMRADIO` (broadcast),
 `ENABLE_VOX`, `ENABLE_FLASHLIGHT` et `ENABLE_AUDIO_BAR`. SARSAT + écran niveau +
-TX APRS + écran config + vue RX structurée avec icônes 16x16 +
-`MAIN_SCREEN=moto` : **56 788 o sur 61 440, ~4,5 Ko libres** (`id91` −220 o,
-`stock` +180 o).
+TX APRS (canal dédié 170) + écran config + vue RX structurée avec icônes 16x16 +
+`MAIN_SCREEN=moto` : **59 060 o sur 61 440, ~2,3 Ko libres** (`id91` −332 o,
+`stock` −640 o). Même text avec ou sans le plafond à 170 canaux
+(`misc.h.diff`) — seule la table `gMR_ChannelAttributes` rétrécit en bss.
 - Le RP2040 envoie `CLEAR` + un `0x06C1` par ligne à ~8 ms d'écart ;
   `APP_RunSarsat()` vide avec
   `while (UART_IsCommandAvailable()) UART_HandleCommand();` pour qu'aucune ligne
@@ -345,6 +380,7 @@ Fichiers patchés (`patch/*.diff`, appliqués avec `patch -p0`) :
 | `settings.c` | `gEeprom.VFO_OPEN = true` inconditionnel dans `SETTINGS_InitEEPROM()` — 0.3q n'a pas de menu pour ça, et ça répare tout seul une radio dont `0x0E7F` a été écrasé par le bug de ligne-7 ancien (voir *récupération EEPROM* ci-dessus) |
 | `Makefile` | `ENABLE_SARSAT ?= 1`, `ENABLE_APRS ?= 1` (+defines, +`app/sarsat.o` `app/aprs.o` `app/ax25.o`) ; `ENABLE_BYP_RAW_DEMODULATORS` défaut `0 → 1` ; `MAIN_SCREEN ?= stock` ; `VERSION_STRING = CEC3qSAR` |
 | `radio.h` | `MODULATION_DISCRI` (le démod `DSC`) ajouté à l'enum, avant `MODULATION_UKNOWN` |
+| `misc.h` | `MR_CHANNEL_LAST` 199 → **169** (200 canaux mémoire → **170**, comme le projet CEC d'origine) ; `FREQ_CHANNEL_FIRST/LAST` et `NOAA_CHANNEL_FIRST/LAST` décalés de -30 pour rester contigus (les adresses EEPROM réelles des canaux fréquence/NOAA ne bougent pas, seuls leurs numéros logiques changent) ; `gMR_ChannelAttributes[207]` → `[177]` (`FREQ_CHANNEL_LAST + 1`) |
 
 `APP_RunSarsat()` est une boucle plein écran bloquante modelée sur
 `APP_RunSpectrum()` (le firmware K5 ne fait tourner aucun watchdog matériel,
@@ -360,3 +396,56 @@ continue de se mettre à jour en direct tant que l'écran est ouvert.
 - Pas de nouvelle entrée de menu / réglage EEPROM pour SARSAT — la fonctionnalité
   est à la compilation (`ENABLE_SARSAT`) et ne demande aucune configuration.
 - Pas encore testé sur matériel.
+
+## Digipeater APRS WIDEn-N (2026-09-05)
+
+Ajouté en miroir du port K1/K5V3 (même demande, faite pour les deux
+firmwares) : menu APRS (F+5) champ **Digi** (Off/WIDE1/WIDE1+2/WIDE1+2+3),
+`APRS_PushConfig()` enfin câblée (`0x06D0`, était un stub mort), refactor
+`APRS_Beacon()` → `APRS_TxFrame()` partagée avec la nouvelle
+`APRS_Digipeat()` (`0x06D6`, RP2040 → radio). La décision WIDEn-N elle-même
+vit entièrement côté RP2040 (`rp2040/src/aprs_digi.c`/`.h`, partagé par les
+deux firmwares) — voir `docs/protocol.md` (« Digipeater WIDEn-N ») et
+`firmware/uv-k1-k5v3/patch/integration.md` pour le détail complet, identique
+ici à un point près : `SendReply()` prend ici `(pReply, Size)` sans
+paramètre `Port` (ce firmware n'a qu'un seul UART, contrairement au
+K1/K5V3), et le dispatch du nouveau `0x06D6` a été ajouté à `app_uart.c.diff`
+(hunk `@@ -615,10 +621,32 @@` → `+621,33`) au lieu d'un ancrage `build.sh`.
+
+Build vert, 0 warning : `text 59368 o` (+272 o).
+
+**Retour terrain : « pas de répétition de la trame »** -- même cause que le
+K1/K5V3 (voir `firmware/uv-k1-k5v3/patch/integration.md` pour le détail) :
+`0x06D6` arrive juste après la salve à répéter, radio quasi certainement
+encore en réception, une seule tentative sans retry ; et le popup RX (qui
+s'ouvre justement sur ce paquet) bloque `APRS_TimeSlice()`. Même correctif
+mirroré ici : `APRS_Digipeat()` met la trame en file, `APRS_DigipeatTimeSlice()`
+retente à chaque tick **et** à chaque itération de la boucle de
+`APP_RunAprs()`, abandon après ~3 s. Build vert, 0 warning : `text 59652 o`
+(+284 o).
+
+**Confirmé fonctionnel sans popup.** Suite (détail complet dans
+`firmware/uv-k1-k5v3/patch/integration.md`, décision partagée
+`rp2040/src/aprs_digi.c`) :
+
+- **Indicatif inséré à chaque saut** : après précision de l'utilisateur, le
+  digipeat traçable insère `INDICATIF-SSID*` devant l'alias `WIDEn` (qui
+  garde son nom, SSID décrémenté, bit H posé une fois à 0) à *chaque* saut,
+  pas seulement le dernier -- `WIDE2-2` -> `INDICATIF-SSID*,WIDE2-1` ->
+  `IND1*,IND2*,WIDE2*`. Uniforme WIDE1/2/3.
+- **Deux verrous anti-boucle** : jamais de répétition si la source de la
+  trame = notre indicatif, ni si notre indicatif figure déjà dans la liste
+  digi (ne périme pas).
+- **Petit délai de contenance** ~300 ms avant la 1ʳᵉ tentative d'émission.
+- **Rétroéclairage "Light on frame" avec Popup off** : `APRS_QuietBacklight()`
+  ne regardait pas `popup_s` -> le rétroéclairage stock restait supprimé
+  même popups désactivés. Corrigé : exige maintenant `popup_s != 0`.
+- **Non-répétition avec popup ouvert -- corrigé** : `APRS_CanTransmitNow()`
+  testait `gCurrentFunction == FUNCTION_RECEIVE` (= « squelch fermé »
+  d'après `functions.h`, mauvais état), et `gCurrentFunction` se fige
+  pendant que la boucle du popup bloque le tick. Remplacé par un test
+  direct sur `g_SquelchLost` (porteuse présente), tenu à jour en temps réel
+  dans les deux contextes.
+
+`test_aprs_digi` : 19 cas verts. Build vert, 0 warning : `text 59672 o`.
+**Non testé sur l'air.**

@@ -1,0 +1,36 @@
+--- "/home/stephane/Téléchargements/uvk5cec-0.3q/misc.h"	2024-01-19 14:43:30.000000000 +0100
++++ misc.h	2026-09-04 09:30:00.000000000 +0200
+@@ -43,11 +43,19 @@
+ 
+ enum {
+ 	MR_CHANNEL_FIRST   = 0,
+-	MR_CHANNEL_LAST    = 199u,
+-	FREQ_CHANNEL_FIRST = 200u,
+-	FREQ_CHANNEL_LAST  = 206u,
+-	NOAA_CHANNEL_FIRST = 207u,
+-	NOAA_CHANNEL_LAST  = 216u,
++	/* Capped at 170 memory channels (1..170, index 0..169) instead of the
++	 * stock 200: same convention as KD8CEC's own C-Board project, and
++	 * channel 170 (APRS_TX_CHANNEL in app/aprs.h) is meant to be the actual
++	 * last one, not lost among 30 extra unused slots. FREQ_CHANNEL_FIRST and
++	 * everything after it shifts down by the same 30 so the ranges stay
++	 * contiguous -- if you had channels stored above 170 on an older build,
++	 * their EEPROM bytes are untouched but they become unreachable through
++	 * the UI (IS_MR_CHANNEL() no longer includes them). */
++	MR_CHANNEL_LAST    = 169u,
++	FREQ_CHANNEL_FIRST = 170u,
++	FREQ_CHANNEL_LAST  = 176u,
++	NOAA_CHANNEL_FIRST = 177u,
++	NOAA_CHANNEL_LAST  = 186u,
+ 	LAST_CHANNEL
+ };
+ 
+@@ -186,7 +194,7 @@
+     uint8_t __val;
+ } ChannelAttributes_t;
+ 
+-extern ChannelAttributes_t   gMR_ChannelAttributes[207];
++extern ChannelAttributes_t   gMR_ChannelAttributes[177];   // FREQ_CHANNEL_LAST + 1
+ 
+ extern volatile uint16_t     gBatterySaveCountdown_10ms;
+ 

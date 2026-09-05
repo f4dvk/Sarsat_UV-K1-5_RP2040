@@ -2,8 +2,8 @@
 
 | fichier | carte | MCU | text / bss |
 |---|---|---|---|
-| `sarsat_rp2040-pico.uf2`  | Raspberry Pi Pico / RP2040-Zero | RP2040 (Cortex-M0+, sans FPU) | 74 Ko / 126 Ko |
-| `sarsat_rp2040-pico2.uf2` | Raspberry Pi Pico 2 | RP2350 | 69 Ko / 126 Ko |
+| `sarsat_rp2040-pico.uf2`  | Raspberry Pi Pico / RP2040-Zero | RP2040 (Cortex-M0+, sans FPU) | 77 Ko / 163 Ko |
+| `sarsat_rp2040-pico2.uf2` | Raspberry Pi Pico 2 | RP2350 | 72 Ko / 163 Ko |
 
 Les deux sont le **même firmware** (`../src/`), ne différant que par le cœur cible.
 
@@ -15,7 +15,14 @@ la fréquence RX que la radio rapporte dans sa réponse HELLO `0x06CF` :
 - **~406 / 434 MHz** → COSPAS-SARSAT 1ʳᵉ génération (FGB / T.001), fenêtres 1,1 s.
 - **144,0–148,0 MHz** → **APRS** : démod Bell-202 AFSK 1200 continu + dé-framing
   AX.25. 3 slicers parallèles (enveloppe biaisée ±3/8) + réparation FCS par
-  bascule d'un seul bit (récupération façon Dire-Wolf — l'AX.25 n'a pas de FEC).
+  bascule d'un seul bit (récupération façon Dire-Wolf — l'AX.25 n'a pas de FEC),
+  puis **réparation croisée entre chaînes** (`aprs_try_fix_cross()`) si la
+  réparation 1-bit échoue : les 3 chaînes décodent souvent la même salve en ne
+  différant que sur quelques octets (trop pour 1 bit, mais une chaîne voisine
+  a probablement le bon octet à ces positions) — chaque chaîne met en cache
+  son dernier essai, et on teste les combinaisons "mon octet / celui du
+  voisin" aux positions qui diffèrent (borné à 5 octets, sinon abandon),
+  jusqu'à trouver celle qui passe le FCS et ressemble à une trame UI valide.
   Le champ info est ensuite parsé (non compressé / compressé / MIC-E / objet /
   item / statut / message) et poussé à la radio en décodé structuré `0x06D3` —
   symbole, lat/lon, cap/vitesse/altitude, distance + azimut vers l'opérateur
@@ -46,6 +53,29 @@ Le slicer de bits est en point fixe (int64) dans les deux, donc le RP2040
 fonctionne sans FPU ; `-DSARSAT_SLICER_DOUBLE=ON` au moment du CMake bascule sur
 le slicer double (ne vaut le coup que sur RP2350).
 
+## Digipeater APRS (optionnel)
+
+Menu APRS de la radio (F+5), champ **Digi** : `off` (défaut) / `WIDE1` /
+`WIDE1+2` / `WIDE1+2+3`. La décision (`rp2040/src/aprs_digi.c`, testée sur
+hôte) tourne sur chaque trame décodée : le premier alias `WIDEn` non encore
+utilisé dans le chemin (une entrée déjà marquée « WIDE1\* » est sautée,
+jamais retouchée) est décrémenté si `n` est dans le niveau choisi. L'alias
+garde toujours son nom `WIDEn` ; son bit « répété » passe à 1 une fois le
+compteur à 0, reste à 0 sinon (pour qu'un relais suivant satisfasse les
+sauts restants d'un `WIDE2-2`). Si un indicatif est configuré côté radio
+(**digipeat traçable**, poussé par `0x06D0`), une nouvelle adresse
+`INDICATIF-SSID*` est **insérée** devant l'alias à chaque saut : `WIDE2-2`
+reçu donne `INDICATIF-SSID*,WIDE2-1`, puis `IND1*,IND2*,WIDE2*` après un
+2ᵉ digipeater. Repli sur un simple décrément si pas d'indicatif ou pas de
+place. **Verrous anti-boucle** : jamais de répétition si la source de la
+trame est notre propre indicatif, ni si notre indicatif figure déjà dans le
+chemin digi (ne périme pas), en plus d'une suppression de doublon
+temporelle (~30 s). Une trame retenue est mise en file côté radio (pas
+émise tout de suite), petit délai de contenance ~300 ms, retentée à chaque
+tick (test canal occupé = `g_SquelchLost`), abandon après ~3 s, puis émise
+sur le canal 170 comme la propre balise de la radio. Détail complet dans
+`docs/protocol.md` (section « Digipeater WIDEn-N »). **Non testé sur l'air.**
+
 La C-Board de KD8CEC utilise une **RP2040-Zero**, donc `sarsat_rp2040-pico.uf2`
 est celui à y flasher.
 
@@ -64,13 +94,14 @@ lignes sont étiquetées :
 | `[lvl]` | ~toutes les 3 s au repos | `peak` / `rms` de la fenêtre audio, min..max ADC brut, DC. **Règle le volume radio pour que `peak` lise ~4000-12000 sur une balise.** |
 | `[burst]` | l'audio a franchi le seuil d'armement | le décodeur tourne sur cette fenêtre |
 | `[slicer]` | après chaque salve | `144 bits: <hex>` (trame slicée brute, sync incluse) ou `no sync / no frame` |
-| `[decode]` | après slicing | `BCH OK` + hex ID / pays / protocole / position / ident, ou `BCH uncorrectable` |
+| `[decode]` | après slicing | `BCH OK` + hex ID / pays / protocole / position / ident, ou `BCH uncorrectable`, ou (signal marginal) `BCH OK but hexID all-zero -- false positive, rejected` — le correcteur BCH peut, sur une fenêtre très bruitée, converger vers un mot de code valide mais dégénéré (ID tout à zéro, pays 0/Inconnu, position 0,0) ; comme aucune vraie balise COSPAS-SARSAT n'a un ID entièrement nul, ce cas est rejeté avant d'être poussé à la radio plutôt que d'afficher des infos erronées |
 | `[tx]` | au décodage, et keepalive 5 s | `CLEAR`, `TEXT L0 "..."`, totaux d'octets, `HELLO` (avec compteur d'ack) |
 | `[link]` | réponse radio, et battement 20 s | `link UP/DOWN`, `acks=N`, et une ligne `status:` au changement (VFO / modulation / fréquence RX / écran de la radio). Alerte seulement si la radio n'est pas en FM. Aucune restriction de fréquence — balises d'exercice 406 ou 434 MHz OK. |
 | `[meter]` | tant que le mètre est actif (`m`) | par fenêtre : `rms/peak/dc/clip/adc` + une barre, pour régler le volume radio |
 | `[aprs]` | mode APRS : sur chaque paquet + statut ~3 s | `#N SRC` puis info enroulée ; statut = `CARRIER/idle  mod=FM  hdlc=N -> pkts=N (M fix) fcs_bad=N  clip=X.X%  cdt=N env=N` (`mod` = démod courante de la radio d'après sa réponse HELLO — doit lire `FM` ou `DSC` ; `cdt` = énergie de détection de porteuse, `env` = enveloppe du discriminateur) |
 | `[aprs.rx]` | **provisoire** (`CFG_APRS_RX_DIAG`) : chaque candidat de trame HDLC non trivial | `chC RES len=L ui=U src=CALL \| <hex tête>` — `RES` = `OK`/`FIX`(1 bit réparé)/`BAD`(échec FCS)/`LNG`(débordement)/`DUP` (les fragments `SHT` sont comptés mais pas affichés). `ui=1` = la structure d'octets ressemble à une trame UI AX.25 valide. Lecture : `hdlc=0` en permanence → rien de démodulé (niveau/accord/squelch) ; `BAD` avec `ui=1` + `src` lisible mais la **longueur varie fortement pour la même station** → erreurs de bits corrompant le framing HDLC. Causes habituelles, dans l'ordre : le squelch radio qui **fait des bagots** en pleine salve (chaque ouverture/fermeture masque ~10–20 ms = 12–24 bits — utiliser l'option APRS `Squelch fast`, qui met désormais le délai de fermeture au max, et/ou baisser le `SQL` radio), pente de dé-emphase FM (`Demodu → DSC` + `W/N → Wide`), décalage d'accord. Mets `CFG_APRS_RX_DIAG 0` pour l'usage normal — les écritures console coûtent du temps de décodage. |
 | `[aprs.raw]` | **provisoire** (`CFG_APRS_RX_DIAG`, commande `w`) | capture ADC brute one-shot de la prochaine salve, `begin … <hex 12 bits, 32 échantillons/ligne> … end`. Enregistre la console dans un fichier et décode-la hors-ligne avec `test/host/test_aprs_wav` pour une instrumentation bit par bit complète. |
+| `[digi]` | niveau de digipeat reçu de la radio (`0x06D0`, au changement) ; chaque trame effectivement répétée | `level: off/WIDE1/WIDE1+2/WIDE1+2+3` ; `repeating #N (L bytes)` avant l'envoi `0x06D6` à la radio. |
 
 ### Console série
 

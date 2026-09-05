@@ -1,4 +1,11 @@
-/* SARSAT screen — see app/sarsat.h. Part of the Sarsat_UV-K1-5_RP2040 project. */
+/* SARSAT screen — see app/sarsat.h. Part of the Sarsat_UV-K1-5_RP2040 project.
+ *
+ * Port of the UV-K5 V1 (KD8CEC) module to the F4HWN base (UV-K1 / UV-K5 V3,
+ * PY32F071 + BK4829). The only real differences from the V1 source are the
+ * UART API, which here takes an explicit Port argument (UART_PORT_UART vs
+ * UART_PORT_VCP) -- everything else (VFO_Info_t layout, BK4819_* register
+ * calls, UI_PrintString*, RADIO_*) is close enough to egzumer/DualTachyon
+ * upstream that the logic ports over unchanged. */
 #include "app/sarsat.h"
 
 #ifdef ENABLE_SARSAT
@@ -20,8 +27,9 @@
 #include "functions.h"
 #include "settings.h"
 #include "misc.h"
+#include "app/afgain.h"     /* shared C-Board AF-gain setting (gAfGain) */
 #ifdef ENABLE_APRS
-	#include "app/aprs.h"   /* shared C-Board AF-gain setting (gAprsCfg.af_gain) */
+	#include "app/aprs.h"
 #endif
 
 static char     s_line[SARSAT_LINES][SARSAT_LINE_CHARS + 1];
@@ -41,7 +49,7 @@ static struct {
 bool gSarsatShowRequest;
 
 /* made non-static by patch/app_uart.c.diff */
-extern void SendReply(void *pReply, uint16_t Size);
+extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
 
 /* Phase 2: answer the RP2040. Reply ID = command | 0x8000, payload = data. */
 static void SARSAT_Reply(uint16_t reply_id, const uint8_t *data, uint8_t dlen)
@@ -51,7 +59,7 @@ static void SARSAT_Reply(uint16_t reply_id, const uint8_t *data, uint8_t dlen)
 	buf[2] = dlen;            buf[3] = 0;
 	if (data && dlen)
 		memcpy(buf + 4, data, dlen);
-	SendReply(buf, 4 + dlen);
+	SendReply(UART_PORT_UART, buf, 4 + dlen);
 }
 
 static void SARSAT_ReplyStatus(void)
@@ -69,9 +77,28 @@ static void SARSAT_ReplyStatus(void)
 #ifdef ENABLE_APRS
 	APRS_MyPosition(&my_lat, &my_lon);   /* GPS fix if "Pos GPS", else manual */
 #endif
+	/* Wire modulation byte (rp2040/src/main.c mod_name[]/MOD_IS_FM_LIKE):
+	 * 0 FM, 1 AM, 2 USB, 3 BYP, 4 RAW, 5 DSC -- only 0 and 5 are treated as
+	 * "flat FM discriminator, safe to decode". That table was written for
+	 * the V1 (KD8CEC) firmware, where index 4 ("RAW") is its baseband/IQ
+	 * mode that beats a strong carrier into a whistle (deliberately NOT
+	 * flagged FM-like) and index 5 ("DSC", MODULATION_DISCRI) is the flat
+	 * discriminator mode added there. This firmware's own MODULATION_RAW
+	 * (BK4819_EnterRaw()) is that same flat-discriminator profile, but it
+	 * happens to sit at index 4 in *this* firmware's ModulationMode_t enum
+	 * -- same wire byte value as V1's very different "RAW", so without this
+	 * remap the RP2040 wrongly logs "radio not in FM/DSC" for it. Report it
+	 * as wire value 5 ("DSC") instead, matching what it actually is. */
+	uint8_t wire_mod;
+	if (s_screen_open)
+		wire_mod = 0;                       /* FM: the screen forces its own profile */
+	else if (v->Modulation == MODULATION_RAW)
+		wire_mod = 5;                       /* DSC slot: same flat-discriminator profile */
+	else
+		wire_mod = (uint8_t)v->Modulation;  /* FM/AM/USB/BYP line up with the wire table */
 	uint8_t p[16] = {
 		(uint8_t)(gEeprom.TX_VFO & 1),
-		(uint8_t)(s_screen_open ? MODULATION_FM : v->Modulation),
+		wire_mod,
 		(uint8_t)(f      ), (uint8_t)(f >>  8),
 		(uint8_t)(f >> 16), (uint8_t)(f >> 24),
 		(uint8_t)(s_screen_open ? (s_view == 1 ? 2 : 1) : 0),  /* 2 = level view */
@@ -193,15 +220,13 @@ static void SARSAT_DrawLevel(void)
 	sprintf(s, "adc %u-%u", s_lvl.amin, s_lvl.amax);
 	UI_PrintStringSmallNormal(s, 2, 0, 3);
 
-#ifdef ENABLE_APRS
 	/* UP/DOWN here tune the BK4819 AF gain feeding the C-Board tap -- set the
 	 * volume pot to max and adjust this against the rms bar. */
-	if (gAprsCfg.af_gain < 1 || gAprsCfg.af_gain > 78)
+	if (gAfGain < 1 || gAfGain > 78)
 		strcpy(s, "AF gain: auto");
 	else
-		sprintf(s, "AF gain: %u", gAprsCfg.af_gain);
+		sprintf(s, "AF gain: %u", gAfGain);
 	UI_PrintStringSmallNormal(s, 2, 0, 4);
-#endif
 
 	f = s_lvl.rms / 300;                 /* full bar ~ rms 4800; aim mid-scale */
 	if (f > 16) f = 16;
@@ -267,6 +292,24 @@ bool SARSAT_ScreenOpen(void)
     return s_screen_open;
 }
 
+/* Sleep one popup-loop tick. Also flushes any pending backlight PWM fade to
+ * completion first -- same fix as FOXHUNT_TickDelay() (app/foxhunt.c) and
+ * APRS_TickDelay() (patch/aprs.c): on this firmware BACKLIGHT_TurnOn() only
+ * arms a fade (target brightness + step), the fade itself only advances via
+ * BACKLIGHT_Update(), normally pumped by the 10 ms tick this blocking screen
+ * doesn't run. BACKLIGHT_Update() is pumped 16 times back-to-back rather
+ * than once per 10 ms slice: the fade always completes in <= 16 steps
+ * regardless of the jump size (fadeStep is diff/16), so flushing it up front
+ * makes a brightness change look instant instead of visibly ramping over the
+ * ~160 ms this screen's own loop would otherwise spread it across (see
+ * APRS_TickDelay()'s longer comment for the on-air symptom this avoids). */
+static void SARSAT_TickDelay(uint32_t ms)
+{
+	for (int i = 0; i < 16; i++)
+		BACKLIGHT_Update();
+	SYSTEM_DelayMs(ms);
+}
+
 void APP_RunSarsat(void)
 {
 	/* Only take over the radio when it is idle on the main screen. If a menu
@@ -295,11 +338,12 @@ void APP_RunSarsat(void)
 	 *     shows up as a slow DC drift (which the RP2040 slicer removes), not as
 	 *     a constant beat tone. MODULATION_RAW / BASEBAND1 is an SSB-style raw
 	 *     output and beats the strong 406 MHz carrier into a steady whistle -
-	 *     that was the reported symptom.
+	 *     that was the reported symptom on the V1/KD8CEC port; assume the same
+	 *     here rather than re-discover it on air.
 	 *   - REG_2B bits 10/9/8 : drop RX de-emphasis / HPF300 / LPF3k so the
-	 *     bi-phase-L transitions pass flat (the "EnterRaw" profile of the
-	 *     BK4829 firmware). Remove this write if the extra hiss hurts more than
-	 *     the flatness helps.
+	 *     bi-phase-L transitions pass flat -- this is exactly what
+	 *     BK4819_EnterRaw() (driver/bk4829.c) does; written by hand here so the
+	 *     modulation stays MODULATION_FM (discriminator), not RAW/baseband.
 	 *   - WIDE IF so the beacon's sidebands are not clipped. */
 	RADIO_SetModulation(MODULATION_FM);
 	BK4819_SetFilterBandwidth(BK4819_FILTER_BW_WIDE, false);
@@ -308,14 +352,60 @@ void APP_RunSarsat(void)
 		r2b |= (1u << 10) | (1u << 9) | (1u << 8);
 		BK4819_WriteRegister(BK4819_REG_2B, r2b);
 	}
-#ifdef ENABLE_APRS
+	/* EXPERIMENTAL (3rd guess), not yet confirmed on air: disable AFC
+	 * (Automatic Frequency Control). Reported symptom this targets: a frame
+	 * audible right after opening this screen, no longer audible on
+	 * following frames -- "un AGC qui s'ecarte ou AFC ?". AFC continuously
+	 * nudges the LO based on the discriminator's DC output to keep a signal
+	 * centered; RADIO_SetModulation(MODULATION_FM) just above explicitly
+	 * turned it ON (afcDisableRegSpec = (modulation != MODULATION_FM), false
+	 * for FM = not disabled). With REG_2B's de-emphasis/HPF/LPF bypassed for
+	 * a flat discriminator, AFC sees a very different DC/noise character
+	 * than it was tuned for on normal filtered FM audio -- if it drifts the
+	 * LO away chasing burst/noise content instead of genuine carrier offset,
+	 * that would explain exactly "works right at entry, degrades afterwards"
+	 * without touching squelch (the regression before) or overall gain (the
+	 * AGC-freeze attempt, also reverted). afcDisableRegSpec is the same
+	 * documented RegisterSpec RADIO_SetModulation() itself uses
+	 * (driver/bk4819-regs.h) -- narrower and lower-risk than either previous
+	 * guess: it only stops ongoing frequency correction, it doesn't change
+	 * gain or squelch at all. If this makes things worse, revert it the same
+	 * way as the other two -- don't stack a 4th guess on top. */
+	BK4819_SetRegValue(afcDisableRegSpec, true);
+	/* TRIED and REVERTED (2nd guess after the squelch one above): freeze the
+	 * receiver AGC to a fixed gain step (RADIO_SetupAGC(false, true) ->
+	 * BK4819_SetAGC(false) -> REG_7E fixed AGC index 3, not user-tunable) to
+	 * address "un bout de trame comme un gain automatique... sur la sortie
+	 * discri". Measured on air right after: a -107 dBm frame, audible in
+	 * plain VFO mode, was NOT audible at all in this screen, while a
+	 * -77 dBm frame was -- a ~30 dB-class sensitivity gap. Whether this gap
+	 * pre-existed (WIDE filter bandwidth alone costs some SNR margin) or was
+	 * introduced/worsened by freezing AGC at whatever gain index 3 happens
+	 * to be (plausibly a lower step meant for strong-signal headroom, wrong
+	 * for a weak one) isn't established -- reverted rather than guess again.
+	 * Re-test the same -107/-77 dBm comparison on this reverted build first,
+	 * to know whether the gap is a pre-existing baseline or was this change,
+	 * before trying anything else here. */
+	/* TRIED and REVERTED: forcing BK4819_SetupSquelch() to the "always open"
+	 * values (the same ones this firmware's own SQL=0 uses) to work around a
+	 * weak-signal "poc" instead of a full decode. Confirmed on air to be a
+	 * net regression -- total silence even on a signal that decoded fine
+	 * before this call was added, worse than the original complaint. Root
+	 * cause of the "poc" is therefore NOT (only) the squelch thresholds, or
+	 * this combination of values has some other side effect on this chip/
+	 * firmware that isn't understood yet. Do not re-add this call without
+	 * fresh on-air [lvl]/[burst] numbers to actually explain it -- see
+	 * patch/integration.md for the history. */
 	/* re-assert the C-Board AF gain: RADIO_SetupRegisters / APP_StartListening
 	 * above just wrote REG_48 from gEeprom.VOLUME_GAIN/DAC_GAIN, which a menu
 	 * calibration reload may have reset to stock -> wrong level on reopen.
-	 * Resync "auto"'s stock-knob capture first -- see APRS_ResyncAfGainKnob(). */
-	APRS_ResyncAfGainKnob();
-	APRS_ApplyAfGain();
-#endif
+	 * Resync "auto"'s stock-knob capture first: without this, "auto" stays
+	 * latched to whatever the volume knob was at the *first* SARSAT/APRS
+	 * screen opened since power-on, so turning the knob up later (this
+	 * screen's own point: pot to max, use the level view instead) had no
+	 * effect and read as a sensitivity loss ("needs a stronger signal"). */
+	AFGAIN_ResyncKnob();
+	AFGAIN_Apply();
 
 	gSarsatShowRequest = false;
 	s_view             = 0;      /* always open on the decode, not the level view */
@@ -323,24 +413,32 @@ void APP_RunSarsat(void)
 	s_screen_open      = true;
 	SARSAT_ReplyStatus();        /* let the C-Board know the screen state early */
 
-	KEY_Code_t   prev_key = KEY_INVALID;
-	uint16_t     held     = 0;
-	bool         armed    = false;   /* ignore the launch key until released */
-	bool         run      = true;
-#ifdef ENABLE_APRS
+	KEY_Code_t   prev_key   = KEY_INVALID;
+	uint16_t     held       = 0;
+	bool         armed      = false; /* ignore the launch key until released */
+	bool         run        = true;
 	bool         gain_dirty = false; /* an unsaved AF-gain change on the level view */
-#endif
+	uint16_t     regain_10ms = 0;    /* re-assert AFGAIN every ~500 ms (see below) */
 	while (run)
 	{
 #ifdef ENABLE_UART
 		/* drain: the RP2040 sends a burst of ~14 line frames per decode */
-		while (UART_IsCommandAvailable())
-			UART_HandleCommand();
+		while (UART_IsCommandAvailable(UART_PORT_UART))
+			UART_HandleCommand(UART_PORT_UART);
 #endif
 		if (s_dirty)
 		{
 			s_dirty = false;
 			SARSAT_Draw();
+		}
+
+		/* a calibration reload elsewhere (VOX/MIC/cal menus, reachable from
+		 * this screen only via KEY_EXIT so not normally an issue here, but
+		 * cheap enough to just always do) can reset gEeprom.VOLUME_GAIN/
+		 * DAC_GAIN to stock -- re-assert the override periodically. */
+		if (++regain_10ms >= 25) {            /* ~500 ms (loop is ~20 ms/iter) */
+			regain_10ms = 0;
+			AFGAIN_Apply();
 		}
 
 		const KEY_Code_t key = KEYBOARD_Poll();
@@ -352,33 +450,35 @@ void APP_RunSarsat(void)
 			bool repeat = (key == prev_key) && (++held > 15) && (held % 3 == 0);
 			if (edge || repeat) {
 				switch (key) {
-				/* UV-K5: UP/DOWN scroll the decode, or (level view) tune AF gain */
+				/* UP/DOWN scroll the decode, or (level view) tune AF gain */
 				case KEY_UP:
 				case KEY_DOWN: {
-					const int d = (key == KEY_UP) ? +1 : -1;
-#ifdef ENABLE_APRS
+					int d = (key == KEY_UP) ? +1 : -1;
+					/* SetNav (menu Service) : sur l'UV-K1, les touches
+					 * physiques UP/DOWN sont etiquetees LEFT/RIGHT et le
+					 * firmware inverse deja Direction partout ailleurs
+					 * (menu.c, main.c, scanner.c, spectrum.c...) quand
+					 * gEeprom.SET_NAV est faux (defaut sur UV-K1) -- on
+					 * suit la meme convention ici pour rester coherent. */
+					if (!gEeprom.SET_NAV) d = -d;
 					if (s_view == 1) {
-						int v = (gAprsCfg.af_gain >= 1 && gAprsCfg.af_gain <= 78)
-						        ? gAprsCfg.af_gain : 0;
+						int v = (gAfGain >= 1 && gAfGain <= 78) ? gAfGain : 0;
 						v += d;
 						if (v < 0)  v = 0;
 						if (v > 78) v = 78;
-						gAprsCfg.af_gain = (uint8_t)v;
-						APRS_ApplyAfGain();
+						gAfGain = (uint8_t)v;
+						AFGAIN_Apply();
 						gain_dirty = true;
 						s_dirty = true;
 						break;
 					}
-#endif
 					SARSAT_Scroll(-d);
 					break;
 				}
 				case KEY_5:
-#ifdef ENABLE_APRS
 					if (s_view == 1 && gain_dirty) {
-						APRS_SaveConfig(); gain_dirty = false;
+						AFGAIN_Save(); gain_dirty = false;
 					}
-#endif
 					s_view ^= 1; s_dirty = true;
 					SARSAT_ReplyStatus();   /* tell the C-Board: fast level telemetry on/off */
 					break;  /* text <-> level */
@@ -389,15 +489,13 @@ void APP_RunSarsat(void)
 		}
 		prev_key = key;
 
-		SYSTEM_DelayMs(20);
+		SARSAT_TickDelay(20);
 	}
 
 	s_screen_open      = false;
 	SARSAT_ReplyStatus();            /* screen closed -> C-Board back to full windows */
 	gSarsatShowRequest = false;      /* a late 0x06C1 must not re-open at once  */
-#ifdef ENABLE_APRS
-	if (gain_dirty) APRS_SaveConfig();
-#endif
+	if (gain_dirty) AFGAIN_Save();
 
 	/* Restore normal operation. This screen can be entered from the 10 ms tick
 	 * (auto-open on a decode), not only from a key, so it must NOT rely on the

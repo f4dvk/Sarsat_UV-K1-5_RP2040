@@ -1,14 +1,37 @@
-/* APRS tracker for the UV-K5 (KD8CEC base) — see aprs.h. */
+/* APRS tracker for the UV-K1 / UV-K5 V3 (F4HWN base) — see aprs.h.
+ *
+ * Port of the UV-K5 V1 (KD8CEC) module. Differences from that source, all
+ * called out inline below:
+ *   - SendReply() is not used to ACK any 0x06Dx command the RP2040 sends us
+ *     (RXTEXT/RXINFO/GPS/DIGI), same as the V1 port, see docs/protocol.md --
+ *     but it IS used for APRS_CMD_CONFIG, a command *we* originate (radio ->
+ *     RP2040, unprompted), same as SARSAT_ReplyStatus() already does.
+ *   - UART_IsCommandAvailable()/UART_HandleCommand() take an explicit Port
+ *     argument on this firmware (UART_PORT_UART vs UART_PORT_VCP).
+ *   - The C-Board AF gain override is the shared app/afgain.h module
+ *     (gAfGain / AFGAIN_Apply() / AFGAIN_ResyncKnob()), not a field of
+ *     aprs_cfg_t -- the SARSAT screen already needs it independently of
+ *     ENABLE_APRS on this port.
+ *   - millis10() is a real function here (app/scheduler.c, a getter onto the
+ *     existing 10 ms SysTick_Handler() counter), not an extern from a KD8CEC-
+ *     specific scheduler -- same name, same semantics, zero call-site changes.
+ *   - The EEPROM address for gAprsCfg is this port's own reserved slot (see
+ *     below), not KD8CEC's CEC_EEPROM_START2.
+ * Everything else (VFO_Info_t, BK4819_* register calls, UI_PrintString*,
+ * RADIO_*, SETTINGS_*) is close enough to egzumer/DualTachyon upstream that
+ * the logic ports over unchanged -- same lesson as the SARSAT screen.
+ */
 #include "aprs.h"
 
 #ifdef ENABLE_APRS
 
 #include <string.h>
 
-#include "ARMCM0.h"
+#include "py32f0xx.h"
 #include "external/printf/printf.h"
 #include "ax25.h"
 #include "app/uart.h"
+#include "app/afgain.h"     /* shared C-Board AF-gain setting (gAfGain) */
 #include "app/chFrScanner.h"
 #include "driver/keyboard.h"
 #include "driver/backlight.h"
@@ -28,14 +51,14 @@
 #include "app/sarsat.h"     /* SARSAT_ScreenOpen() -- don't beacon under F+8  */
 #endif
 
-/* EEPROM: 0x1D00..0x1D27 (40 B). This is `CEC_EEPROM_START2` in ceccommon.h,
- * inside the 0x1C00..0x1DFF "DTMF contacts" region but past the 16 real
- * contacts (0x1C00..0x1CFF), protected from factory reset, and referenced
- * nowhere in the 0.3q tree.
- * NOT 0x1D50 (`CEC_EEPROM_START1`): SETTINGS_SaveSettings() rewrites its first
- * 8 bytes with the KD8CEC CW / live-seek settings on every menu change, which
- * wiped the APRS magic + callsign -> "APRS config reverts to default". */
-#define APRS_EE_ADDR        0x1D00
+/* EEPROM: 40 bytes right after app/afgain.h's own 8-byte claim (0x0A170), in
+ * the same unclaimed tail of the "Settings" PY25Q16 sector -- see afgain.c
+ * for the full explanation of why an address needs an explicit ADDR_MAPPINGS
+ * entry on this firmware (build.sh wires this one into
+ * App/driver/eeprom_compat.c the same way). Same physical sector as the core
+ * radio settings and the AF-gain byte, so it survives a normal reset and is
+ * only wiped by "reset ALL". */
+#define APRS_EE_ADDR        0x0A178u
 #define APRS_EE_MAGIC       0xA5
 #define APRS_TXDELAY_FLAGS  40          /* ~0.27 s of preamble tone     */
 #define APRS_DEFAULT_FREQ   14480000u   /* 144.800000 MHz, 10 Hz units: the
@@ -81,16 +104,15 @@ static uint32_t s_bl_on_until_10ms;     /* "light on frame": keep reasserting
                                          * BACKLIGHT_TurnOn() until this time --
                                          * a single one-shot call on the RX
                                          * event alone was reported not to
-                                         * stick on the K1/K5V3 port (screen
-                                         * dark through most of the popup,
-                                         * only lighting right as it closed);
-                                         * same aprs.c code here, so mirrored
-                                         * defensively. Background RX case;
-                                         * the in-popup loop has its own
-                                         * per-iteration reassertion below. */
+                                         * stick (screen dark through most of
+                                         * the popup, only lighting right as
+                                         * it closed). Covers background RX
+                                         * too (no popup open); the in-popup
+                                         * loop has its own per-iteration
+                                         * reassertion, see APP_RunAprs(). */
 static uint32_t s_next_beacon_10ms;
 static bool     s_inited;                /* APRS_Init() has run once        */
-extern uint32_t millis10(void);          /* scheduler.c (via ceccommon)     */
+extern uint32_t millis10(void);          /* app/scheduler.c                 */
 
 /* ------------------------------------------------------------------ config */
 static void APRS_Defaults(void)
@@ -104,66 +126,10 @@ static void APRS_Defaults(void)
     gAprsCfg.sym_code   = '>';           /* car */
     gAprsCfg.interval_s = 0;             /* off by default (needs a callsign) */
     gAprsCfg.popup_s    = 10;            /* auto RX-popup 10 s                 */
-    gAprsCfg.af_gain    = 0;             /* AF level: auto (stock gains)       */
     gAprsCfg.opts       = (1u << APRS_OPT_SQL_SHIFT);  /* fast squelch, BL stock */
     gAprsCfg.lat_e5     = 0;
     gAprsCfg.lon_e5     = 0;
     strcpy(gAprsCfg.comment, "UV-K5_Sarsat");
-}
-
-/* C-Board AF level override (see aprs.h). Volume pot to max + a fixed value
- * here = a stable, tunable level at the C-Board ADC regardless of the knob.
- * gAprsCfg.af_gain is one 1..78 slider (78 = loud .. 1 = ~-52 dB) driving
- * gEeprom.VOLUME_GAIN (AF Rx Gain-2) and gEeprom.DAC_GAIN. Both are honoured by
- * every firmware REG_48 write: VOLUME_GAIN natively, DAC_GAIN via the one-line
- * patch/radio.c.diff (stock firmware forces the DAC gain to max for RX).
- * The slider spends Gain-2 down from 63 to 8 first (0.5 dB/step, its linear
- * region -- below ~4 is near-mute and very non-linear), then the DAC gain from
- * 15 to 0 (~2 dB/step). 0 or >78 = auto (stock: Gain-2 stock, DAC max). */
-static uint8_t s_stock_volgain = 0xFF;
-
-void APRS_ApplyAfGain(void)
-{
-    if (s_stock_volgain == 0xFF)
-        s_stock_volgain = gEeprom.VOLUME_GAIN;
-
-    const uint8_t v = gAprsCfg.af_gain;
-    if (v < 1 || v > 78) {                        /* auto = stock RX behaviour */
-        gEeprom.VOLUME_GAIN = s_stock_volgain;
-        gEeprom.DAC_GAIN    = 0x0F;
-    } else {
-        int notch = 78 - v;                       /* 0 (loud) .. 77 (quiet) */
-        if (notch <= 55) {
-            gEeprom.VOLUME_GAIN = (uint8_t)(63 - notch);   /* 63..8 */
-            gEeprom.DAC_GAIN    = 0x0F;
-        } else {
-            int dac = 15 - (notch - 55);                   /* 14..-7 */
-            gEeprom.VOLUME_GAIN = 8;
-            gEeprom.DAC_GAIN    = (uint8_t)(dac > 0 ? dac : 0);
-        }
-    }
-
-    BK4819_WriteRegister(BK4819_REG_48,
-        (11u << 12) | (0u << 10) |
-        ((uint16_t)(gEeprom.VOLUME_GAIN & 0x3F) << 4) |
-        (gEeprom.DAC_GAIN & 0x0F));
-}
-
-/* "auto" (af_gain outside 1..78) restores s_stock_volgain, captured once so
- * repeated APRS_ApplyAfGain() calls (the ~500 ms re-assert in
- * APRS_TimeSlice()) don't need to re-read it every time. But that means it
- * can go stale: it is first captured whenever APRS_Init() happens to run
- * (the very first SARSAT/APRS screen touch after boot, possibly with the
- * volume knob turned down for an earlier test) and then stays latched at
- * that level for the rest of the power-on session even after the knob is
- * turned up -- "auto" then silently clamps RX audio low, which reads as
- * reduced sensitivity ("needs a stronger signal"). Call this once, right
- * before the first APRS_ApplyAfGain(), whenever the SARSAT or APRS screen is
- * (re)opened, so "auto" always reflects the knob position as of *this*
- * opening, not a stale one. */
-void APRS_ResyncAfGainKnob(void)
-{
-    s_stock_volgain = 0xFF;
 }
 
 /* Reserve MR channel 170 (index APRS_TX_CHANNEL) as the fixed APRS TX slot,
@@ -199,7 +165,8 @@ void APRS_Init(void)
     APRS_EnsureChannel();
     s_next_beacon_10ms = millis10() + 6000;   /* first beacon 60 s after boot */
     s_inited = true;
-    APRS_ApplyAfGain();
+    AFGAIN_ResyncKnob();
+    AFGAIN_Apply();
     APRS_PushConfig();   /* the RP2040 has no persistent state of its own --
                           * it needs this after every one of its own reboots,
                           * not only after a menu edit (see APRS_PushConfig()
@@ -225,7 +192,7 @@ static void APRS_Save(void)
 void APRS_SaveConfig(void) { APRS_Save(); }   /* public wrapper */
 
 /* made non-static by patch/app_uart.c.diff (equivalent), same as sarsat.c */
-extern void SendReply(void *pReply, uint16_t Size);
+extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
 
 /* Push the config to the RP2040: call/ssid (used for traceable digipeating --
  * stamped into a fully-consumed WIDEn-N slot instead of an anonymous
@@ -233,8 +200,8 @@ extern void SendReply(void *pReply, uint16_t Size);
  * currently unused RP2040-side) and digi_level. Called on every
  * menu save AND from APRS_Init() -- the RP2040 keeps no state across its own
  * reboots, so it must get this fresh at least once after either side resets,
- * not only when the user happens to touch the menu. No ACK expected (no
- * 0x06Dx APRS command is acked on this firmware, see docs/protocol.md). */
+ * not only when the user happens to touch the menu. No ACK expected (see the
+ * file header note). */
 static void APRS_PushConfig(void)
 {
     uint8_t b[4 + 11];
@@ -246,7 +213,7 @@ static void APRS_PushConfig(void)
     b[12] = gAprsCfg.sym_table;
     b[13] = gAprsCfg.sym_code;
     b[14] = (uint8_t)((gAprsCfg.opts & APRS_OPT_DIGI_MASK) >> APRS_OPT_DIGI_SHIFT);
-    SendReply(b, sizeof(b));
+    SendReply(UART_PORT_UART, b, sizeof(b));
 }
 
 /* ------------------------------------------- GPS fix from the C-Board (0x06D5) */
@@ -333,15 +300,14 @@ static uint16_t afsk_scale(uint16_t f)
  *   mute -> REG_70 tone1 -> EnableTXLink -> settle -> set REG_71 -> unmute.
  * BK4819_EnableTXLink() is what puts REG_30 into the TX-DSP state with
  * ENABLE_PA_GAIN / ENABLE_PLL_VCO; writing REG_30 by hand without those
- * collapsed the PA ("keys up but nothing radiates").
+ * collapsed the PA ("keys up but nothing radiates") on the V1 port.
  *
- * Timing: BK4819_WriteRegister is a ~40 us bit-banged transfer, so the old
- * "write REG_71 every bit + SYSTICK_DelayUs(820)" loop ran each cell at
- * ~860 us = 3 % slow AND jittered by whether the tone changed -- unlockable
- * for a real TNC. Instead: write REG_71 only on an actual tone change (NRZI
- * runs stay phase-continuous) and clock the bit cells off a free-running
- * SysTick deadline that absorbs the write time and self-corrects for IRQ
- * jitter, so the average stays exactly 1200 baud. */
+ * Timing: BK4819_WriteRegister is a ~40 us bit-banged transfer, so the naive
+ * "write REG_71 every bit + delay" loop runs slow and jitters -- unlockable
+ * for a real TNC (found on the V1 port). Instead: write REG_71 only on an
+ * actual tone change (NRZI runs stay phase-continuous) and clock the bit
+ * cells off a free-running SysTick deadline that absorbs the write time and
+ * self-corrects for IRQ jitter, so the average stays exactly 1200 baud. */
 static void APRS_SendTones(const uint8_t *tones, int nb)
 {
     const uint16_t r_mark  = afsk_scale(AFSK_MARK);
@@ -443,30 +409,41 @@ static void APRS_TxFrame(const uint8_t *frame, int flen)
 }
 
 /* Gates shared by originating a beacon and repeating someone else's frame:
- * never while actually transmitting, never over the SARSAT screen (F+8),
- * never while the channel is busy (CSMA -- the caller retries on the next
- * slice for a beacon; a missed digipeat opportunity is simply dropped,
- * which is safe). Beaconing additionally requires a real callsign (never
- * transmit under the NOCALL default) and, in GPS mode, a fresh fix --
- * digipeating does not: the repeated frame's own source field already
- * identifies the originating station, this radio is only relaying it, not
- * originating it. */
+ * never while actually transmitting, never over the SARSAT screen, never
+ * while the channel is busy (CSMA -- the caller retries on the next slice
+ * for a beacon; a missed digipeat opportunity is simply dropped, which is
+ * safe). Beaconing additionally requires a real callsign (never transmit
+ * under the NOCALL default) and, in GPS mode, a fresh fix -- digipeating
+ * does not: the repeated frame's own source field already identifies the
+ * originating station, this radio is only relaying it, not originating it. */
 static bool APRS_CanTransmitNow(void)
 {
     if (gCurrentFunction == FUNCTION_TRANSMIT)
         return false;
 #ifdef ENABLE_SARSAT
+    /* Never key up while the SARSAT screen owns the radio: it forces its own
+     * FM+WIDE+REG2B receive profile on the currently selected VFO for the
+     * C-Board decoder, and a mid-monitoring jump to channel 170 for TX would
+     * fight that. In practice APRS_TimeSlice() (the only caller of the
+     * auto-beacon path) is not ticked while APP_RunSarsat()'s loop is
+     * blocking anyway -- this is belt and suspenders, and covers a future
+     * caller too. */
     if (SARSAT_ScreenOpen())
         return false;
 #endif
     /* CSMA: never key up while a carrier is present. g_SquelchLost (not
-     * gCurrentFunction) is the right test: per functions.h FUNCTION_RECEIVE
-     * is "squelch closed" (idle) and FUNCTION_INCOMING (never tested by the
-     * old check) is "signal present". And gCurrentFunction only updates on
-     * the main tick, which APP_RunAprs()'s popup loop blocks -- it froze on
-     * "mid-reception" for as long as the popup stayed open. g_SquelchLost
-     * stays live in both contexts (main tick, or the popup's own inline
-     * mini-squelch poll). */
+     * gCurrentFunction) is the right test here: per functions.h,
+     * FUNCTION_RECEIVE is actually "squelch closed" (idle) and the state
+     * that means "a signal is present" is FUNCTION_INCOMING, never tested
+     * by the check this replaces. More fundamentally, gCurrentFunction is
+     * only updated by the main 10 ms tick, which APP_RunAprs()'s own popup
+     * loop blocks for as long as it stays open -- it would sit frozen at
+     * whatever it was on entry (almost always mid-reception, since the
+     * popup opens ON a decoded packet) regardless of the real channel
+     * state. g_SquelchLost stays live in both contexts: normally via that
+     * same tick, and inside the popup via its own inline mini-squelch poll
+     * (see APP_RunAprs()'s loop) -- the likely cause of "no repetition
+     * while the popup is open", reported on air with the previous check. */
     if (g_SquelchLost)
         return false;
     return true;
@@ -506,7 +483,7 @@ void APRS_Beacon(void)
  * generously enough for real-world APRS traffic without following the
  * RP2040's own much larger internal margin (APRS_RX_MAX_FRAME=330, sized for
  * its own worst-case demod buffer, not for what any real packet needs). A
- * local (stack) buffer, not static -- this firmware's RAM is tight too. */
+ * local (stack) buffer, not static -- this firmware's RAM is already tight. */
 #define APRS_DIGI_MAX_FRAME (256 + 2)
 
 /* APRS_CMD_DIGI arrives right on the tail of the very burst it repeats --
@@ -578,12 +555,14 @@ void APRS_TimeSlice(void)
 {
     APRS_Ensure();
     APRS_ApplySquelch();               /* APRS-band fast-squelch (cheap: 1 reg read) */
+    AFGAIN_TimeSlice();                /* keep a fixed C-Board AF gain in effect
+                                        * everywhere, screen open or not     */
     APRS_DigipeatTimeSlice();          /* retry a queued digipeat frame until
                                         * the channel is actually clear      */
 
-    /* "light on frame", background RX (no popup open): keep reasserting the
-     * backlight for a short window after each decode -- see
-     * s_bl_on_until_10ms's comment. */
+    /* "light on frame", background RX (no popup open, e.g. popup disabled or
+     * in its post-close cooldown): keep reasserting the backlight for a
+     * short window after each decode -- see s_bl_on_until_10ms's comment. */
     if (s_bl_on_until_10ms && (int32_t)(millis10() - s_bl_on_until_10ms) < 0)
         BACKLIGHT_TurnOn();
 
@@ -605,18 +584,6 @@ void APRS_TimeSlice(void)
         if (g == 1 && (uint8_t)(millis10() - s_gps_blink) >= 25) {
             s_gps_blink = (uint8_t)millis10();
             gUpdateStatus = true;
-        }
-    }
-
-    /* Re-assert the C-Board AF gain periodically: a menu that re-runs
-     * SETTINGS_LoadCalibration() (F cal / bat cal) reloads the stock
-     * VOLUME_GAIN / DAC_GAIN from EEPROM and drops the override, so the level
-     * would be wrong the next time SARSAT / APRS is opened. */
-    if (gAprsCfg.af_gain >= 1 && gAprsCfg.af_gain <= 78) {
-        static uint8_t s_regain;
-        if (++s_regain >= 50) {          /* ~every 500 ms */
-            s_regain = 0;
-            APRS_ApplyAfGain();
         }
     }
 
@@ -676,25 +643,31 @@ bool APRS_QuietBacklight(void)
            aprs_on_band();
 }
 
-/* Block the K5 battery-save on the APRS band: FUNCTION_POWER_SAVE cycles the
- * receiver off, which chops the audio the C-Board needs to demodulate a packet
- * (frames were missed until the user turned BATSAVE off). Wired into the
- * gSchedulePowerSave inhibit list in app/app.c, same idea as the fast-squelch.
- * Only while the RX VFO sits in 144-148 MHz -> no effect on normal use. */
+/* Block the battery-save on the APRS band: FUNCTION_POWER_SAVE cycles the
+ * receiver off, which chops the audio the C-Board needs to demodulate a
+ * packet. Wired into the gSchedulePowerSave inhibit list in app/app.c, same
+ * idea as APRS_KeepAwake() on the SARSAT screen's own inhibit hook (this one
+ * is band-based, not screen-based: it applies any time the radio sits on
+ * 144-148 MHz, not just while a screen is open). Only while the RX VFO sits
+ * in 144-148 MHz -> no effect on normal use. */
 bool APRS_KeepAwake(void)
 {
     return aprs_on_band();
 }
 
-/* APRS-band "fast squelch" (REG_4E): the stock BK4819 setup uses a long squelch
- * OPEN delay (bits 13:11), so the receiver takes tens of ms to un-mute and the
- * first AX.25 flags of a packet are lost. On 144-148 MHz set:
+/* APRS-band "fast squelch" (REG_4E): the stock BK4819 setup uses a long
+ * squelch OPEN delay (bits 13:11), so the receiver takes tens of ms to
+ * un-mute and the first AX.25 flags of a packet are lost. On 144-148 MHz set:
  *   - open  delay 0 (bits 13:11) -> un-mutes on the first flag
  *   - close delay 3 = max (bits 10:9) -> once open it HOLDS through the packet
- * The first cut used close delay 1, which let the squelch snap shut on the
- * brief amplitude dips inside an AFSK burst ("le squelch fait des bagots") --
- * every chatter blanks ~10-20 ms = 12-24 bits, wrecking the HDLC framing.
- * Re-asserted every tick because a VFO re-config rewrites REG_4E. */
+ * (a close delay of 1 let the squelch snap shut on the brief amplitude dips
+ * inside an AFSK burst on the V1 port -- every chatter blanks ~10-20 ms =
+ * 12-24 bits, wrecking the HDLC framing; kept at 3 here from the start).
+ * Re-asserted every tick because a VFO re-config rewrites REG_4E. Only
+ * touches the two delay fields, not the RSSI/noise/glitch thresholds
+ * themselves -- unlike the "force squelch always open" attempt that
+ * regressed the SARSAT screen on this firmware (see patch/sarsat.c), this is
+ * the same narrow register slice the V1 port already validated on air. */
 void APRS_ApplySquelch(void)
 {
     if (((gAprsCfg.opts & APRS_OPT_SQL_MASK) >> APRS_OPT_SQL_SHIFT) == 0 ||
@@ -729,7 +702,8 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
     APRS_Ensure();
 
     /* suppress a spurious mic-line PTT while the C-Board pushes the packet
-     * (a few-ms key-up was seen right after an APRS decode on 144.8) */
+     * (a few-ms key-up was seen right after an APRS decode on 144.8, on the
+     * V1 port) */
     gSerialConfigCountDown_500ms = 2;
 
     if (id == APRS_CMD_RXINFO && size >= 22) {
@@ -790,6 +764,19 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
     }
 }
 
+/* SetNav (menu Service) : sur l'UV-K1 les touches physiques UP/DOWN sont
+ * etiquetees LEFT/RIGHT et le firmware inverse deja partout ailleurs
+ * (App/app/menu.c, main.c, scanner.c, spectrum.c...) le sens de UP/DOWN
+ * quand gEeprom.SET_NAV est faux (defaut sur UV-K1, cf. App/settings.c) --
+ * on suit la meme convention ici pour que l'ecran config APRS navigue dans
+ * le meme sens que le reste du firmware sur ce boitier. */
+static KEY_Code_t nav_key(KEY_Code_t k)
+{
+    if (gEeprom.SET_NAV || (k != KEY_UP && k != KEY_DOWN))
+        return k;
+    return (k == KEY_UP) ? KEY_DOWN : KEY_UP;
+}
+
 /* ---------------------------------------------------------- config screen  */
 enum { F_CALL, F_SSID, F_PATH, F_SYM, F_TEXT, F_INT, F_POPUP, F_AFGAIN, F_SQL,
        F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_N };
@@ -832,13 +819,18 @@ static void field_str(int f, char *out)
     case F_SYM:  sprintf(out, "Icon  %s", SYMS[sym_index()].n); break;
     case F_TEXT: sprintf(out, "Txt %.14s",
                          gAprsCfg.comment[0] ? gAprsCfg.comment : "(empty)"); break;
-    case F_INT:  if (gAprsCfg.interval_s == 0) strcpy(out, "Interval OFF");
-                 else sprintf(out, "Interval %us", gAprsCfg.interval_s); break;
-    case F_POPUP: if (gAprsCfg.popup_s == 0) strcpy(out, "Popup OFF");
-                  else sprintf(out, "Popup %us", gAprsCfg.popup_s); break;
-    case F_AFGAIN: if (gAprsCfg.af_gain < 1 || gAprsCfg.af_gain > 78)
-                       strcpy(out, "AF gain auto");
-                   else sprintf(out, "AF gain %u", gAprsCfg.af_gain); break;
+    case F_INT:
+        if (gAprsCfg.interval_s == 0) strcpy(out, "Interval OFF");
+        else sprintf(out, "Interval %us", gAprsCfg.interval_s);
+        break;
+    case F_POPUP:
+        if (gAprsCfg.popup_s == 0) strcpy(out, "Popup OFF");
+        else sprintf(out, "Popup %us", gAprsCfg.popup_s);
+        break;
+    case F_AFGAIN:
+        if (gAfGain < 1 || gAfGain > 78) strcpy(out, "AF gain auto");
+        else sprintf(out, "AF gain %u", gAfGain);
+        break;
     case F_SQL: strcpy(out,
         ((gAprsCfg.opts & APRS_OPT_SQL_MASK) >> APRS_OPT_SQL_SHIFT)
             ? "Squelch fast" : "Squelch stock"); break;
@@ -935,13 +927,12 @@ static void field_step(int f, int dir)
         break;
     }
     case F_AFGAIN: {
-        int v = (gAprsCfg.af_gain >= 1 && gAprsCfg.af_gain <= 78)
-                ? gAprsCfg.af_gain : 0;   /* 0 = auto */
+        int v = (gAfGain >= 1 && gAfGain <= 78) ? gAfGain : 0;   /* 0 = auto */
         v += dir;
         if (v < 0)  v = 0;
         if (v > 78) v = 78;
-        gAprsCfg.af_gain = (uint8_t)v;
-        APRS_ApplyAfGain();               /* live */
+        gAfGain = (uint8_t)v;
+        AFGAIN_Apply();                    /* live */
         break;
     }
     case F_SQL:
@@ -957,12 +948,16 @@ static void field_step(int f, int dir)
         break;
     }
     case F_POS:    gAprsCfg.opts ^= APRS_OPT_GPS; break;   /* manual <-> GPS */
-    case F_LAT: gAprsCfg.lat_e5 += dir * 100;  /* 0.001 deg step */
-                if (gAprsCfg.lat_e5 >  9000000) gAprsCfg.lat_e5 =  9000000;
-                if (gAprsCfg.lat_e5 < -9000000) gAprsCfg.lat_e5 = -9000000; break;
-    case F_LON: gAprsCfg.lon_e5 += dir * 100;
-                if (gAprsCfg.lon_e5 >  18000000) gAprsCfg.lon_e5 =  18000000;
-                if (gAprsCfg.lon_e5 < -18000000) gAprsCfg.lon_e5 = -18000000; break;
+    case F_LAT:
+        gAprsCfg.lat_e5 += dir * 100;  /* 0.001 deg step */
+        if (gAprsCfg.lat_e5 >  9000000) gAprsCfg.lat_e5 =  9000000;
+        if (gAprsCfg.lat_e5 < -9000000) gAprsCfg.lat_e5 = -9000000;
+        break;
+    case F_LON:
+        gAprsCfg.lon_e5 += dir * 100;
+        if (gAprsCfg.lon_e5 >  18000000) gAprsCfg.lon_e5 =  18000000;
+        if (gAprsCfg.lon_e5 < -18000000) gAprsCfg.lon_e5 = -18000000;
+        break;
     }
 }
 
@@ -970,7 +965,8 @@ static void field_step(int f, int dir)
  * is the separate status line). Row 0 here = header/help, rows 1..6 = a
  * scrolling window over the 7 fields F_CALL..F_LON -- writing a 7th field row
  * would land on gFrameBuffer[7], off the end of the buffer and off-screen
- * (that was the "Lon invisible" bug). `first` is the top field of the window. */
+ * (that was the "Lon invisible" bug on the V1 port). `first` is the top
+ * field of the window. */
 #define APRS_VIS_ROWS 6
 
 /* Every string reaching UI_PrintStringSmall* must be <= 18 glyphs -- it does
@@ -1025,7 +1021,8 @@ static void draw_config(int sel, int editing, int callcur, int first)
  * Column-major: bytes 0..15 are the top 8-px LCD page (bit0 = top pixel),
  * bytes 16..31 the bottom page. An icon spans two LCD rows. Kept to a small
  * hand-picked set (aprs.fi-style); anything unmapped falls back to a box.
- * Generated by tools/gen_icons.py (edit the pixel grids there, re-run). */
+ * Generated by tools/gen_icons.py on the V1 port (edit the pixel grids
+ * there, re-run) -- same table reused verbatim here, it's pure pixel data. */
 static const uint8_t ICON_BMP[14][32] = {
     { 0x00, 0x80, 0xC0, 0xC0, 0xE0, 0xB0, 0xD0, 0xD0, 0xD0, 0xD0, 0xB0, 0xE0, 0xC0, 0xC0, 0x80, 0x00, 0x00, 0x03, 0x17, 0x3F, 0x3F, 0x17, 0x07, 0x07, 0x07, 0x07, 0x17, 0x3F, 0x3F, 0x17, 0x03, 0x00 },  /*  0 car */
     { 0x00, 0x00, 0x00, 0x80, 0xC0, 0xE0, 0xF0, 0xF8, 0xF8, 0xF0, 0xE0, 0xC0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x7F, 0x7F, 0x43, 0x7F, 0x67, 0x67, 0x67, 0x67, 0x7F, 0x43, 0x7F, 0x7F, 0x7E, 0x00 },  /*  1 house */
@@ -1100,9 +1097,7 @@ static void draw_rx(bool header)
 
         draw_icon(icon_index(s_rxi.sym_t, s_rxi.sym_c), 2, top);
 
-        /* right column (col 22): line 1 = name/callsign, line 2 = msg addressee
-         * (the packet-age readout was dropped -- the digi path took its slot,
-         * and now has its own wrapped row below). */
+        /* right column (col 22): line 1 = name/callsign, line 2 = msg addressee */
         const char *lbl = (obj && s_rxi.name[0]) ? s_rxi.name : s_rxi.src;
         strncpy(s, lbl, 14); s[14] = 0;
         UI_PrintStringSmallNormal(s, 22, 0, top);
@@ -1190,13 +1185,37 @@ static void draw_rx(bool header)
     ST7565_BlitFullScreen();
 }
 
+/* Sleep one popup-loop tick. Also flushes any pending backlight PWM fade to
+ * completion first -- same rationale as FOXHUNT_TickDelay() in
+ * app/foxhunt.c: BACKLIGHT_TurnOn() only *arms* a fade (it sets the target
+ * brightness and a step size), the fade itself is only advanced by
+ * BACKLIGHT_Update(), which the normal 10 ms tick calls from app.c -- a tick
+ * this blocking popup loop does not run, so without pumping it here every
+ * BACKLIGHT_TurnOn() in this file (decoded frame, keypress, entry) would
+ * never reach the hardware PWM until the loop exits ("backlight only lights
+ * up as the popup closes, even on a keypress", reported on air).
+ * BACKLIGHT_Update() is pumped 16 times back-to-back rather than once per
+ * 10 ms slice: the fade always completes in <= 16 steps regardless of the
+ * jump size (fadeStep is diff/16, see BACKLIGHT_SetBrightness()), so 16
+ * calls always finish it -- spreading it across the ~160 ms of a slower loop
+ * made the ramp plainly visible on screen ("effet de fondu" reported once
+ * the backlight fix landed); flushing it up front makes each brightness
+ * change look as instant here as it does on the normal (non-blocking) UI,
+ * where the same ~160 ms ramp is masked by the screen changing under it. */
+static void APRS_TickDelay(uint32_t ms)
+{
+    for (int i = 0; i < 16; i++)
+        BACKLIGHT_Update();
+    SYSTEM_DelayMs(ms);
+}
+
 void APP_RunAprs(void)
 {
     APRS_Ensure();
-    APRS_ResyncAfGainKnob();
-    APRS_ApplyAfGain();                    /* level right regardless of prior menu use */
+    AFGAIN_ResyncKnob();
+    AFGAIN_Apply();                        /* level right regardless of prior menu use */
 
-    const bool popup = gAprsShowRequest;   /* opened by the tick, not by F+5 */
+    const bool popup = gAprsShowRequest;   /* opened by the tick, not by a key */
     gAprsShowRequest = false;
 
     /* This blocking screen can be opened from the 10 ms tick (auto-popup on an
@@ -1219,7 +1238,7 @@ void APP_RunAprs(void)
     }
 
     /* auto-popup (from the tick, on a decoded packet) opens on the RX view;
-     * a manual F+5 always opens on the config menu (press * for the last RX). */
+     * a manual key always opens on the config menu (press * for the last RX). */
     int sel = 0, editing = 0, callcur = 0, first = 0, view = popup ? 1 : 0;
     bool armed = false, run = true, closed_by_key = false;
     KEY_Code_t prev = KEY_INVALID;
@@ -1234,8 +1253,8 @@ void APP_RunAprs(void)
 
     while (run) {
 #ifdef ENABLE_UART
-        while (UART_IsCommandAvailable())
-            UART_HandleCommand();
+        while (UART_IsCommandAvailable(UART_PORT_UART))
+            UART_HandleCommand(UART_PORT_UART);
 #endif
         /* mini squelch: the main loop (which normally does this) is blocked.
          * carrier present  -> speaker path + RX LED on  (C-Board hears it)
@@ -1266,15 +1285,19 @@ void APP_RunAprs(void)
          * it, whichever comes first -- effectively never sent. */
         APRS_DigipeatTimeSlice();
 
-        /* "Light on frame": the one-shot BACKLIGHT_TurnOn() from
-         * aprs_rx_arrived() (fired once, the instant the frame decodes) was
-         * reported not to stick on the K1/K5V3 port -- screen dark through
-         * the whole popup, only lighting right as it closed. Reasserting it
-         * every loop iteration (~20 ms) for as long as the popup stays open
-         * is a stronger guarantee regardless of cause; mirrored here since
-         * this port's aprs.c has the identical code. */
+        /* "Light on frame": reported on air as "the backlight stays dark
+         * through the whole popup, then flashes on right as it closes" --
+         * i.e. only the unconditional BACKLIGHT_TurnOn() in this function's
+         * own exit path (below) was ever visible; the one-shot call from
+         * aprs_rx_arrived() (fired once, the instant the frame decodes)
+         * wasn't sticking, for a reason not pinned down from the source
+         * alone. Reasserting it every loop iteration (~20 ms) for as long as
+         * the popup/screen stays open is a stronger guarantee regardless of
+         * cause -- same fix shape as AFGAIN_TimeSlice() earlier in this
+         * project (a one-shot apply that silently got overridden). */
         if (gAprsCfg.opts & APRS_OPT_BL_DECODE)
             BACKLIGHT_TurnOn();
+
         /* a new packet: while the auto-close timer is running, re-arm it and
          * pull the RX view back up (a keypress has cleared close_at, so a
          * user who navigated away is left alone) */
@@ -1298,11 +1321,12 @@ void APP_RunAprs(void)
         }
 
         KEY_Code_t k = KEYBOARD_Poll();
-        if (k == KEY_INVALID) { armed = true; prev = k; SYSTEM_DelayMs(20); continue; }
-        if (!armed || k == prev) { SYSTEM_DelayMs(20); continue; }
+        if (k == KEY_INVALID) { armed = true; prev = k; APRS_TickDelay(20); continue; }
+        if (!armed || k == prev) { APRS_TickDelay(20); continue; }
         prev = k;
         dirty = true;
         close_at = 0;                         /* a key cancels the auto-close */
+        k = nav_key(k);                       /* UV-K1 SetNav (see nav_key()) */
 
         /* This loop blocks the main task, whose backlight and auto-keypad-lock
          * countdowns then never tick -- so nothing turns them back on. Refresh
@@ -1366,7 +1390,7 @@ void APP_RunAprs(void)
             default: break;
             }
         }
-        SYSTEM_DelayMs(20);
+        APRS_TickDelay(20);
     }
 
     /* restore normal operation. This screen can be auto-opened from the 10 ms

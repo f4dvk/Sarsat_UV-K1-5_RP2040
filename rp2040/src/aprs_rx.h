@@ -70,6 +70,19 @@ typedef struct {
     /* parallel decode chains */
     aprs_chan_t ch[APRS_RX_SLICERS];
 
+    /* last frame candidate delivered/attempted by each chain (post any
+     * single-bit repair), for aprs_try_fix_cross(): 3 independent slicers
+     * of the same audio usually agree on most of a frame and diverge only
+     * at the few byte positions where one of them mis-sliced a bit -- a
+     * chain that still fails its own FCS check can often be rescued by
+     * swapping in a sibling chain's bytes at just those positions. */
+    struct {
+        uint8_t  data[APRS_RX_MAX_FRAME];
+        int      len;
+        uint32_t at;
+        bool     valid;
+    } last_cand[APRS_RX_SLICERS];
+
     /* de-dup: suppress the same frame from more than one chain */
     uint8_t  last[APRS_RX_MAX_FRAME];
     int      last_len;
@@ -127,6 +140,17 @@ uint16_t aprs_fcs_residue(const uint8_t *data, int len);
 /* Single-bit-error repair: flip each bit in turn, keep the flip that makes the
  * FCS residue valid. Returns true (and leaves `d` fixed) on success. */
 bool     aprs_try_fix(uint8_t *d, int len);
+
+/* Cross-channel repair: try swapping in chain `sibling`'s cached bytes (see
+ * aprs_rx_t::last_cand) at the positions where they differ from `d`, one
+ * combination at a time, keeping the first that both passes the FCS and
+ * looks like a plausible UI frame. Bails out (returns false) without
+ * touching `d` if more than a handful of bytes differ (either not really
+ * the same burst, or too many combinations to brute-force cheaply) or if
+ * no sibling chain has a same-length, recent-enough candidate cached.
+ * Exposed (not just internal to aprs_output()) so the host test can drive
+ * it directly against known byte patterns. */
+bool     aprs_try_fix_cross(aprs_rx_t *r, int chain, uint8_t *d, int len);
 
 /* Format a raw AX.25 UI frame as TNC2 monitor text ("SRC>DST,PATH:info").
  * Writes up to `max_lines` NUL-terminated lines of `line_chars` glyphs into

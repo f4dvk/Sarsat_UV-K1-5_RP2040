@@ -61,7 +61,7 @@ de trame 2G + BCH(250,202) portable sur MCU est conservé non compilé sous
 | Décodeur 1G RP2040 (`rp2040/`) | **fonctionne sur matériel** (C-Board / RP2040-Zero) : décode de vraies balises FGB y compris signal faible, tests hôte OK. `.uf2` pré-compilés `rp2040/bin/sarsat_rp2040-{pico,pico2}.uf2`. |
 | Lien radio ↔ RP2040 (`docs/protocol.md`) | **bidirectionnel** — RP2040 → UV-K5 `0x06Cx` à 38400 ; l'UV-K5 répond `ID\|0x8000` (ACK + un statut HELLO avec VFO / modulation / fréquence RX). Le RP2040 le logge en `[link]`. |
 | **Firmware UV-K5 V1 (base KD8CEC)** | **fonctionne sur matériel** — `firmware/uv-k5v1-kd8cec/`, `ENABLE_SARSAT`, F+8 / auto-ouverture, discriminateur FM + AF plat REG_2B, reçoit sur le VFO sélectionné avec squelch forcé ouvert, affiche les 6 lignes décodées. Ajoute aussi le tracker APRS (TX + RX via la C-Board), l'entrée GPS et un écran VFO principal redessiné — voir `firmware/uv-k5v1-kd8cec/integration.md`. |
-| Firmware UV-K1 (base F4HWN) | pas commencé (Phase 3) |
+| Firmware UV-K1 / UV-K5 V3 (base F4HWN) | **écran SARSAT validé sur matériel** (affichage classique F4HWN) — `firmware/uv-k1-k5v3/`. Réglage de gain C-Board fait (potentiomètre au max). Tracker APRS/GPS/canal dédié **compilé, 0 warning, pas encore testé sur matériel**. Voir `firmware/uv-k1-k5v3/patch/integration.md`. |
 
 ### Notes de terrain
 

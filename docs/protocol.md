@@ -33,10 +33,11 @@ Le firmware radio (Phase 3/4) ajoute un gestionnaire pour les ID ci-dessous dans
 | `0x06C1` | `SARSAT_TEXT` | `line:u8, invert:u8, ascii[0..20]` | définit une ligne d'affichage (0 = haut). `invert` = rendu inversé. ASCII uniquement, ≤ 21 glyphes. |
 | `0x06C2` | `SARSAT_BEACON` | struct compacte (ci-dessous) | résultat de décodage lisible par la machine ; la radio le met en forme elle-même. Alternative optionnelle à `0x06C1`. |
 | `0x06C3` | `SARSAT_LEVEL` | `peak:u16,rms:u16,dc:u16,clip:u8,adcmin:u16,adcmax:u16,verdict:u8` LE | télémétrie de niveau audio pour l'écran de réglage de la radio, ~1/s, sans ACK |
-| `0x06D0` | `APRS_CONFIG` | (réservé) radio → RP2040 : call / SSID / path / symbole | pour digipeat / ack — pas encore câblé. La config côté radio vit en EEPROM `0x1D00` (40 o ; **pas** `0x1D50`, que `SETTINGS_SaveSettings()` écrase). |
+| `0x06D0` | `APRS_CONFIG` | `call[6], ssid:u8, path:u8, sym_table:u8, sym_code:u8, digi_level:u8` (11 o) | radio → RP2040, sans ACK : poussé à chaque sauvegarde du menu APRS **et** à `APRS_Init()` (donc aussi après un reboot radio, le RP2040 n'ayant pas d'état persistant). `call`/`ssid` servent au digipeat « traçable » (voir plus bas), `path`/`sym_table`/`sym_code` sont gardés côté RP2040 mais inexploités pour l'instant. `digi_level` : 0 off, 1 répète WIDEn-N pour n=1, 2 aussi n=2, 3 aussi n=3 (cumulatif). La config côté radio vit en EEPROM `0x1D00` (40 o ; **pas** `0x1D50`, que `SETTINGS_SaveSettings()` écrase) sur le V1, adresse dédiée équivalente sur le K1/K5V3. |
 | `0x06D2` | `APRS_RXTEXT` | `line:u8, ascii[0..18]` | RP2040 → radio : une ligne d'un paquet APRS 144.8 MHz décodé, utilisée seulement quand le champ info n'a **pas** pu être parsé. `line = 0xFF` efface la vue RX ; `line = 0` est l'indicatif source, `1..3` le champ info enroulé. Sans ACK. |
 | `0x06D3` | `APRS_RXINFO` | décodé structuré (ci-dessous) | RP2040 → radio : un paquet APRS parsé (symbole, lat/lon, cap/vitesse/altitude, distance+azimut vers l'opérateur, source, nom d'objet, chemin digipeater, texte commentaire/statut/message). La radio le rend façon Kenwood avec une icône symbole et une ligne « Direct » / « Via … ». Sans ACK. |
 | `0x06D5` | `APRS_GPS` | `flags:u8, lat_e5:i32, lon_e5:i32, speed_kmh:u16, course_deg:u16, alt_m:i16, sats:u8` LE (16 o) | RP2040 → radio, ~toutes les 3 s : le fix d'un module GPS sur l'en-tête NMEA de la C-Board (UART1 GP5, 9600 8N1, `$GxRMC`/`$GxGGA`). `flags` bit0 = fix valide. Envoyé seulement une fois qu'un module a été vu. La radio l'utilise pour la balise quand le champ **Pos** de son menu APRS est sur **GPS** (sinon elle balise la lat/lon manuelle), et pilote un symbole GPS en barre haute (absent = pas de trames, clignotant = `flags` bit0 à 0, fixe = fix). Le RP2040 utilise aussi son propre fix pour la distance/azimut RX quand il est valide. Sans ACK. |
+| `0x06D6` | `APRS_DIGI` | trame AX.25 brute : `dst[7] src[7] digi[7]×n ctrl pid info`, **sans FCS** | RP2040 → radio, sans ACK : une trame que le RP2040 a décidé de digipeater (`aprs_digi.h` — WIDEn-N New-N-Paradigm, cf. section dédiée plus bas) et déjà mutée (SSID décrémenté / bit H posé). La radio recalcule le FCS et émet en AFSK sur le canal 170, exactement comme sa propre balise (mêmes conditions CSMA / écran SARSAT). |
 
 ### Sélection du mode
 
@@ -81,6 +82,73 @@ Distance et azimut sont calculés sur le RP2040 (approximation équirectangulair
 depuis la position propre de l'opérateur, que la radio envoie dans sa réponse
 `SARSAT_HELLO` (ci-dessous). Ils sont omis (flag à 0) tant que l'opérateur n'a
 pas saisi de position dans l'écran de config APRS.
+
+### Digipeater WIDEn-N (`APRS_DIGI`)
+
+Menu APRS (F+5) → champ **Digi** : `off` / `WIDE1` / `WIDE1+2` / `WIDE1+2+3`
+(cumulatif — `WIDE1+2` répète aussi bien un alias `WIDE1-N` qu'un `WIDE2-N`).
+Toute la décision vit côté RP2040 (`rp2040/src/aprs_digi.c`/`.h`, testée sur
+hôte, `rp2040/test/host/test_aprs_digi`), qui a déjà l'adresse AX.25 sous la
+main pour chaque trame décodée :
+
+0. **Verrous anti-boucle** (si un indicatif est configuré) : la trame n'est
+   **jamais** répétée si son adresse **source** est notre propre
+   indicatif-SSID (on relaierait notre propre trame revenue par un autre
+   chemin), ni si notre indicatif-SSID apparaît **déjà** quelque part dans
+   la liste digi/via (utilisé ou non) — preuve que cette trame est déjà
+   passée par nous une fois. Ce dernier contrôle ne périme jamais,
+   contrairement à la suppression de doublon temporelle ci-dessous.
+1. Parcourt les adresses digipeater/via de la trame (à partir de l'octet 14) ;
+   celles déjà marquées répétées (bit H, affiché « WIDE1\* » sur un moniteur)
+   sont **sautées**, jamais retouchées — seule la première adresse *non
+   encore utilisée* est éligible (routage source AX.25 strictement
+   positionnel, jamais de saut en avant dans le chemin).
+2. Si cette adresse est un alias générique `WIDEn` (texte littéral du
+   callsign, `n` = 1..3) avec `n` ≤ `digi_level` : décrémente son SSID (le
+   « N » de `WIDEn-N`). L'alias **garde toujours son nom** (`WIDEn`) ; son
+   propre bit H passe à 1 une fois le compteur à 0 (relais terminé pour cet
+   alias), reste à 0 sinon (pour qu'un digipeater suivant puisse encore le
+   satisfaire — le relais multi-sauts d'un `WIDE2-2`).
+   Digipeat « traçable » si un indicatif est configuré côté radio (poussé
+   par `0x06D0`) : une **nouvelle adresse est insérée** juste avant l'alias,
+   portant `INDICATIF-SSID` bit H posé (c'est nous qui traitons ce saut) —
+   la trame grandit de 7 o, à **chaque** saut, pas seulement le dernier.
+   Recevoir `WIDE2-2` produit `INDICATIF-SSID*,WIDE2-1` après un saut,
+   `INDICATIF1*,INDICATIF2*,WIDE2*` après qu'un second digipeater l'a
+   terminé — un moniteur voit à la fois quelles stations ont relayé et
+   comment l'alias générique a été consommé, à chaque étape. Repli sur un
+   simple décrément en place (pas d'insertion, alias `WIDEn` seulement
+   décrémenté/marqué) si aucun indicatif n'est configuré (`NOCALL`), ou si
+   les 7 o supplémentaires ne tiendraient pas dans le tampon.
+3. Sinon (adresse déjà utilisée en tête, indicatif explicite, alias hors
+   plage, ou chemin déjà entièrement satisfait) : la trame n'est **pas**
+   répétée.
+
+Une trame acceptée est mise en file (1 emplacement) côté radio plutôt
+qu'émise immédiatement, puis envoyée en AFSK dès que le canal est **vraiment**
+libre — retentée à chaque tick (~10 ms) *et* à chaque itération de la boucle
+du popup RX (qui bloquerait sinon `APRS_TimeSlice()` tout du long), avec un
+petit délai de contenance (~300 ms) avant la première tentative pour laisser
+le canal se stabiliser, et abandon après ~3 s si le canal reste occupé
+(mieux vaut renoncer qu'émettre une répétition tardive). `0x06D6` arrive en
+effet juste après la salve à répéter, radio quasi certainement encore en
+réception à cet instant précis — une unique tentative immédiate perdait la
+course CSMA presque systématiquement (remonté sur l'air). Le test « canal
+occupé » utilise `g_SquelchLost` (porteuse présente), pas `gCurrentFunction`
+(qui d'après `functions.h` désigne l'état « squelch fermé » avec
+`FUNCTION_RECEIVE`, et se fige de toute façon pendant que la boucle du popup
+bloque le tick principal).
+
+**Anti-boucle temporelle** : en complément des verrous du point 0, une
+suppression de doublon (`aprs_digi_seen_recently()`, ~30 s glissants, clé =
+adresses dst+src + hachage du champ info) empêche de re-répéter une trame
+déjà digipeatée récemment — utile quand un même poste
+gère plusieurs niveaux WIDE à la fois (ex. `WIDE1+2`) et entend son propre
+relais revenir via un autre digipeater avant d'avoir épuisé tous les sauts.
+
+Aucune passerelle spécifique (aucune action sur un indicatif explicite en
+tête de chemin) : seuls les alias `WIDEn` génériques déclenchent une
+répétition, conformément au périmètre demandé.
 
 ### Charge utile `SARSAT_BEACON` (little-endian)
 

@@ -1,14 +1,17 @@
---- "/home/stephane/Téléchargements/uvk5cec-0.3q/ui/main.c"	2024-01-19 14:43:30.000000000 +0100
-+++ ui/main.c	2026-09-04 06:00:00.000000000 +0200
-@@ -27,6 +27,7 @@
+--- "/home/stephane/T\303\251l\303\251chargements/uvk5cec-0.3q/ui/main.c"	2024-01-19 14:43:30.000000000 +0100
++++ ui/main.c	2026-09-04 09:00:00.000000000 +0200
+@@ -27,6 +27,10 @@
  #include "driver/bk4819.h"
  #include "driver/st7565.h"
  #include "external/printf/printf.h"
 +#include "font.h"
++#ifdef ENABLE_APRS
++	#include "app/aprs.h"   // APRS_TX_CHANNEL: label MR channel 170 "APRS"
++#endif
  #include "functions.h"
  #include "helper/battery.h"
  #include "misc.h"
-@@ -165,10 +166,75 @@
+@@ -165,10 +169,75 @@
  {
  #if defined(ENABLE_RSSI_BAR)
  
@@ -84,7 +87,7 @@
  	uint8_t           *p_line        = gFrameBuffer[line];
  	char               str[16];
  
-@@ -303,8 +369,403 @@
+@@ -303,8 +372,417 @@
  
  // ***************************************************************************
  
@@ -226,7 +229,7 @@
 +static const uint8_t HDR6_W[38] = { 5, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 5, 4, 6, 6, 1, 1, 6, 4, 7, 6, 6, 4, 6, 6, 5, 6, 6, 6, 8, 6, 5, 6, 7, 2 };
 +static const uint8_t HDR6[38][8] = {
 +  { 0x1E, 0x33, 0x21, 0x33, 0x1E, 0x00, 0x00, 0x00 },  // 0
-+  { 0x21, 0x3F, 0x3E, 0x20, 0x00, 0x00, 0x00, 0x00 },  // 1
++  { 0x21, 0x3F, 0x3F, 0x20, 0x00, 0x00, 0x00, 0x00 },  // 1 (top-right pixel of the flag was missing)
 +  { 0x31, 0x31, 0x39, 0x2F, 0x26, 0x00, 0x00, 0x00 },  // 2
 +  { 0x21, 0x21, 0x25, 0x3F, 0x1E, 0x00, 0x00, 0x00 },  // 3
 +  { 0x18, 0x1C, 0x1B, 0x3F, 0x1E, 0x00, 0x00, 0x00 },  // 4
@@ -297,6 +300,10 @@
 +{
 +	// fixed slots so nothing shifts when a flag appears/disappears
 +	char s[12];
++#ifdef ENABLE_APRS
++	if (sc == APRS_TX_CHANNEL) strcpy(s, "APRS");
++	else
++#endif
 +	if (IS_MR_CHANNEL(sc)) sprintf(s, "MR %u", sc + 1);
 +	else                   sprintf(s, "VFO %c", (char)('A' + actVFO));
 +	HdrPut(s, 3);
@@ -339,6 +346,11 @@
 +	const VFO_Info_t *v2 = &gEeprom.VfoInfo[idleVFO];
 +	const uint8_t sc2    = gEeprom.ScreenChannel[idleVFO];
 +	const uint32_t f2    = v2->pRX->Frequency;
++#ifdef ENABLE_APRS
++	if (sc2 == APRS_TX_CHANNEL) {
++		sprintf(s, "%c  APRS", (char)('A' + idleVFO));
++	} else
++#endif
 +	if (IS_MR_CHANNEL(sc2)) {
 +		SETTINGS_FetchChannelName(nm, sc2);
 +		if (nm[0])
@@ -421,7 +433,12 @@
 +		want_freq_line = true;
 +	}
 +	else if (IS_MR_CHANNEL(sc) && gEeprom.CHANNEL_DISPLAY_MODE == MDF_CHANNEL) {
-+		char e[8]; sprintf(e, "CH-%03u", sc + 1);
++		char e[8];
++#ifdef ENABLE_APRS
++		if (sc == APRS_TX_CHANNEL) strcpy(e, "APRS");
++		else
++#endif
++		sprintf(e, "CH-%03u", sc + 1);
 +		UI_PrintString(e, 0, LCD_WIDTH, 1, 8);
 +	}
 +	else {
@@ -488,7 +505,19 @@
  	char               String[22];
  
  	center_line = CENTER_LINE_NONE;
-@@ -796,6 +1257,7 @@
+@@ -554,6 +1032,11 @@
+ 						break;
+ 
+ 					case MDF_CHANNEL:	// show the channel number
++#ifdef ENABLE_APRS
++						if (gEeprom.ScreenChannel[vfo_num] == APRS_TX_CHANNEL)
++							strcpy(String, "APRS");
++						else
++#endif
+ 						sprintf(String, "CH-%03u", gEeprom.ScreenChannel[vfo_num] + 1);
+ 						UI_PrintString(String, 32, 0, line, 8);
+ 						break;
+@@ -796,6 +1279,7 @@
  		DrawCommBuffToSpectrum();
  
  	ST7565_BlitFullScreen();

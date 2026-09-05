@@ -31,6 +31,7 @@
 #include "country_codes.h"
 #include "aprs_rx.h"
 #include "aprs_parse.h"
+#include "aprs_digi.h"
 #include "gps_nmea.h"
 
 #if SARSAT_LOG
@@ -75,6 +76,13 @@ static aprs_rx_t g_aprs;
 static uint32_t  g_aprs_pkts;
 static int32_t   g_my_lat_e5, g_my_lon_e5;   /* operator position (HELLO reply) */
 static uint8_t   g_radio_mod = 0xFF;         /* last modulation from a HELLO reply */
+static uint8_t   g_aprs_digi_level;          /* 0=off, pushed by the radio via
+                                              * CMD_APRS_CONFIG, see aprs_digi.h */
+static char      g_aprs_my_call[7];          /* radio's own call/SSID, pushed the
+                                              * same way, for traceable digipeating
+                                              * (aprs_digi_process()) -- "" if the
+                                              * radio has none configured yet    */
+static uint8_t   g_aprs_my_ssid;
 
 #if CFG_APRS_RX_DIAG
 /* provisional: 'w' arms a one-shot raw-ADC capture of the next carrier, then
@@ -152,6 +160,17 @@ static void link_poll(void)
                                         (d[10] << 16) | ((uint32_t)d[11] << 24));
                 g_my_lon_e5 = (int32_t)(d[12] | (d[13] << 8) |
                                         (d[14] << 16) | ((uint32_t)d[15] << 24));
+            }
+        } else if (id == CMD_APRS_CONFIG && dl >= 11) {
+            /* {call[6], ssid, path, sym_table, sym_code, digi_level} */
+            memcpy(g_aprs_my_call, d, 6);
+            g_aprs_my_call[6] = 0;
+            g_aprs_my_ssid = d[6];
+            if (d[10] != g_aprs_digi_level) {
+                static const char *const lv[] = { "off", "WIDE1", "WIDE1+2", "WIDE1+2+3" };
+                g_aprs_digi_level = (d[10] <= 3) ? d[10] : 0;
+                LOG("[digi]   level: %s  call: %s-%u\n", lv[g_aprs_digi_level],
+                    g_aprs_my_call, g_aprs_my_ssid);
             }
         } else if ((id & 0x8000) && (id & 0x00FF) >= 0xC0) {
 #if CFG_TX_HEXDUMP
@@ -447,6 +466,34 @@ static void my_position(int32_t *lat, int32_t *lon)
     *lon = g_my_lon_e5;
 }
 
+/* WIDEn-N digipeat: attempted on every valid frame regardless of whether its
+ * info field parses for display (a digipeater repeats the whole packet, it
+ * does not need to understand it). See aprs_digi.h for the decision rule. */
+static void aprs_try_digipeat(const uint8_t *ax25, int len)
+{
+    if (g_aprs_digi_level == APRS_DIGI_OFF || len <= 0 || len > 256)
+        return;
+
+    uint8_t d[256];
+    memcpy(d, ax25, (size_t)len);
+    /* may come back longer than `len`: a traced hop inserts a 7-byte address
+     * ahead of a still-generic alias (see aprs_digi.h) -- `sizeof d` bounds
+     * how far that growth is allowed to go. */
+    int nlen = aprs_digi_process(d, len, (int)sizeof d, g_aprs_digi_level,
+                                 g_aprs_my_call, g_aprs_my_ssid);
+    if (!nlen)
+        return;
+
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (aprs_digi_seen_recently(d, nlen, now_ms))
+        return;                        /* already repeated this recently */
+
+    LOG("[digi]   repeating #%lu (%d -> %d bytes)\n",
+        (unsigned long)g_aprs_pkts, len, nlen);
+    radio_send(CMD_APRS_DIGI, d, (size_t)nlen);
+    link_poll();
+}
+
 /* Called from aprs_rx on a full FCS-valid AX.25 frame. Parse the APRS info and
  * push a structured 0x06D3 to the radio (falls back to 0x06D2 raw text if the
  * info field wasn't understood). */
@@ -454,6 +501,7 @@ static void aprs_on_packet(const uint8_t *ax25, int len, void *user)
 {
     (void)user;
     g_aprs_pkts++;
+    aprs_try_digipeat(ax25, len);
 
     aprs_info_t ai;
     bool parsed = aprs_parse(ax25, len, &ai);
@@ -861,6 +909,26 @@ int main(void)
                 "(weak signal / mistune / off-band?)\n");
             rearm_at = make_timeout_time_ms(500);
             continue;
+        }
+
+        /* BCH corrects a bounded number of bit errors, but a heavily noisy
+         * window (weak/marginal signal) can occasionally land close enough
+         * to a degenerate codeword to pass as "BCH OK" while being pure
+         * noise, not a real beacon -- seen on air as hexID "000000000000000"
+         * / country 0 (Unknown) / lat,lon 0,0. No real COSPAS-SARSAT beacon
+         * ID is all-zero (every real one carries a non-zero country/protocol
+         * field), so treat this one shape of false positive as rejected
+         * rather than pushing garbage to the radio screen. */
+        {
+            bool all_zero = true;
+            for (const char *p = r.hex_id; *p; p++)
+                if (*p != '0') { all_zero = false; break; }
+            if (all_zero) {
+                LOG("[decode] BCH OK but hexID all-zero -- false positive, "
+                    "rejected\n");
+                rearm_at = make_timeout_time_ms(500);
+                continue;
+            }
         }
 
         /* de-dup: the beacon re-transmits every ~50 s; keep the log terse and
