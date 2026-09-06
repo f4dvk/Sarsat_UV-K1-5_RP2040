@@ -92,6 +92,13 @@ static uint32_t s_next_beacon_10ms;
 static bool     s_inited;                /* APRS_Init() has run once        */
 extern uint32_t millis10(void);          /* scheduler.c (via ceccommon)     */
 
+/* SmartBeaconing: two fixed presets, selected through the F_INT menu row by
+ * overloading gAprsCfg.interval_s with sentinel values below the smallest real
+ * period (30 s). Needs GPS position mode + a live fix (speed / course). */
+#define APRS_SB_CAR  1u                  /* interval_s == 1 : car profile    */
+#define APRS_SB_FOOT 2u                  /* interval_s == 2 : on-foot profile */
+#define APRS_SB_IS(v) ((v) == APRS_SB_CAR || (v) == APRS_SB_FOOT)
+
 /* ------------------------------------------------------------------ config */
 static void APRS_Defaults(void)
 {
@@ -754,6 +761,46 @@ static void APRS_DigipeatTimeSlice(void)
     APRS_TxFrame(frame, s_digi_pending.len + 2);
 }
 
+/* SmartBeaconing profiles -- {low, high, slow, fast, turn_min, turn_slope,
+ * turn_time}, speeds km/h, angles deg, times s.  Row 0 = car, 1 = on foot.
+ * `slow` doubles as the fallback fixed period when GPS is unavailable.        */
+static const uint16_t s_sb_prof[2][7] = {
+    {    5,   90, 1200,   30,    25,     255,     25 },   /* car    */
+    {    2,    8,  600,   90,    35,      80,     45 },   /* on foot */
+};
+#define APRS_SB_ROW  (gAprsCfg.interval_s == APRS_SB_FOOT)
+
+/* SmartBeaconing (HamHUD-style): variable beacon rate from GPS speed, plus
+ * "corner pegging" -- an extra beacon when the course changes by more than a
+ * speed-dependent threshold. Returns true when a beacon is due now; latches
+ * its own timing.  Only called while a live GPS fix is available.            */
+static bool APRS_SmartBeaconDue(void)
+{
+    static uint32_t last_10ms;
+    static uint16_t last_course;
+
+    const uint16_t *p = s_sb_prof[APRS_SB_ROW];
+    uint16_t v   = s_gps.speed_kmh;
+    uint16_t sec = (uint16_t)((millis10() - last_10ms) / 100u);
+
+    uint16_t rate = (v <= p[0]) ? p[2]
+                  : (v >= p[1]) ? p[3]
+                  : (uint16_t)((uint32_t)p[3] * p[1] / v);
+
+    bool due = sec >= rate;
+
+    if (!due && v > p[0] && sec >= p[6]) {           /* corner pegging */
+        int16_t dc = (int16_t)((int16_t)s_gps.course - (int16_t)last_course);
+        if (dc < -180) dc += 360; else if (dc > 180) dc -= 360;
+        if (dc < 0) dc = (int16_t)-dc;
+        if (dc >= (int16_t)(p[4] + p[5] / v))
+            due = true;
+    }
+
+    if (due) { last_10ms = millis10(); last_course = s_gps.course; }
+    return due;
+}
+
 void APRS_TimeSlice(void)
 {
     APRS_Ensure();
@@ -811,18 +858,36 @@ void APRS_TimeSlice(void)
 
     if (kiss || gAprsCfg.interval_s == 0)
         return;
-    if ((int32_t)(millis10() - s_next_beacon_10ms) < 0)
+
+    const bool sb      = APRS_SB_IS(gAprsCfg.interval_s);
+    const bool sb_live = sb && (gAprsCfg.opts & APRS_OPT_GPS) && APRS_GpsFixValid();
+
+    /* SmartBeaconing with no live GPS fix (position set to manual, or GPS mode
+     * still searching) falls back to a plain fixed beacon at the profile's
+     * slow rate. APRS_Beacon()'s own guard still blocks a zero-position GPS
+     * beacon, so "manual + valid lat/lon" keeps working and "GPS + no fix"
+     * stays silent. */
+    if (!sb_live && (int32_t)(millis10() - s_next_beacon_10ms) < 0)
         return;
 
-    /* channel busy (RX in progress) or already transmitting: hold off ~3 s */
+    /* channel busy (RX in progress) or already transmitting: hold off ~3 s on
+     * the timed paths; live SmartBeaconing just re-checks on the next tick */
     if (gCurrentFunction == FUNCTION_TRANSMIT ||
         gCurrentFunction == FUNCTION_RECEIVE  ||
         gCurrentFunction == FUNCTION_MONITOR) {
-        s_next_beacon_10ms = millis10() + 300;
+        if (!sb_live)
+            s_next_beacon_10ms = millis10() + 300;
         return;
     }
 
-    s_next_beacon_10ms = millis10() + gAprsCfg.interval_s * 100u;
+    if (sb_live) {
+        if (!APRS_SmartBeaconDue())       /* latches its own timing on a yes   */
+            return;
+    } else {
+        uint16_t period = sb ? s_sb_prof[APRS_SB_ROW][2]   /* SB fallback: slow rate */
+                             : gAprsCfg.interval_s;
+        s_next_beacon_10ms = millis10() + (uint32_t)period * 100u;
+    }
     APRS_Beacon();
 }
 
@@ -1027,8 +1092,12 @@ static void field_str(int f, char *out)
     case F_SYM:  sprintf(out, "Icon  %s", SYMS[sym_index()].n); break;
     case F_TEXT: sprintf(out, "Txt %.14s",
                          gAprsCfg.comment[0] ? gAprsCfg.comment : "(empty)"); break;
-    case F_INT:  if (gAprsCfg.interval_s == 0) strcpy(out, "Interval OFF");
-                 else sprintf(out, "Interval %us", gAprsCfg.interval_s); break;
+    case F_INT:
+        if      (gAprsCfg.interval_s == 0)            strcpy(out, "Interval OFF");
+        else if (gAprsCfg.interval_s == APRS_SB_CAR)  strcpy(out, "Interval SB car");
+        else if (gAprsCfg.interval_s == APRS_SB_FOOT) strcpy(out, "Interval SB foot");
+        else sprintf(out, "Interval %us", gAprsCfg.interval_s);
+        break;
     case F_POPUP: if (gAprsCfg.popup_s == 0) strcpy(out, "Popup OFF");
                   else sprintf(out, "Popup %us", gAprsCfg.popup_s); break;
     case F_AFGAIN: if (gAprsCfg.af_gain < 1 || gAprsCfg.af_gain > 78)
@@ -1126,7 +1195,8 @@ static void kbuf_commit(int f)
 
 static void field_step(int f, int dir)
 {
-    static const uint16_t INTS[] = { 0, 30, 60, 120, 300, 600, 900, 1800 };
+    static const uint16_t INTS[] = { 0, APRS_SB_CAR, APRS_SB_FOOT,
+                                     30, 60, 120, 300, 600, 900, 1800 };
     switch (f) {
     case F_SSID: gAprsCfg.ssid = (gAprsCfg.ssid + dir + 16) & 15; break;
     case F_PATH: gAprsCfg.path = (gAprsCfg.path + dir + APRS_PATH_N) % APRS_PATH_N; break;

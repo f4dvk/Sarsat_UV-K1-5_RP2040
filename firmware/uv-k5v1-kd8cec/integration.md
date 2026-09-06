@@ -644,3 +644,75 @@ réutilise entièrement la file digipeat**.
 
 Build V1 vert, 0 warning : **`text 60988 o`** (+168 o, marge ~450 o). Le
 dispatch `0x06D6` était déjà câblé (digipeater), rien à changer dans `build.sh`.
+
+## Retrait de « Live Seek » KD8CEC (2026-09-06)
+
+Pour dégager de la place flash sur le V1 en vue du SmartBeaconing APRS
+(l'utilisateur a besoin de l'AM, donc `ENABLE_AM_FIX=0` est exclu), la
+fonction **« Live.S » (Live Seek)** de KD8CEC — un mini‑spectre RSSI affiché
+pendant la recherche de canal/fréquence, désactivé par défaut, sans rapport
+avec SARSAT/APRS — est retirée à la compilation.
+
+4 nouveaux `.diff` (ajoutés à la boucle de patch de `build.sh`) :
+
+| fichier | modif |
+|---|---|
+| `ceccommon.c` | corps de `DrawCommBuffToSpectrum()`, `CEC_TimeSlice500ms()`, `CEC_ApplyChangeRXFreq()` vidés (stubs vides — les sites d'appel dans `main.c` / `app/main.c` / `ui/main.c` + `patch/ui_main.c.diff` restent tels quels, le compilateur/LTO élimine) |
+| `ui/menu.c` | ligne `{"Live.S", …, MENU_LIVESEEK}` retirée de `MenuList[]` ; table `gSubMenu_LIVESEEK[3][6]` retirée ; cas d'affichage retiré |
+| `ui/menu.h` | `extern … gSubMenu_LIVESEEK` retiré (l'entrée d'enum `MENU_LIVESEEK` est **conservée** pour ne pas renuméroter l'enum) |
+| `app/menu.c` | les 3 `case MENU_LIVESEEK` (min/max, set, get) retirés |
+
+Effet : plus d'entrée « Live.S » dans le menu radio, et pas d'overlay spectre
+pendant la recherche — la recherche/scan normale est inchangée. Les octets
+CW_* morts (`CW_TONE`/`CW_SPEED`/`CW_KEYTYPE`, jamais utilisés dans la 0.3q,
+juste persistés en EEPROM `0x1D50`) et le bloc EEPROM associé sont **laissés
+en place** (retrait à risque quasi nul mais gain marginal ~120 o de plus).
+
+Build V1 vert, 0 warning : **`text 60192 o`** (−796 o), `bss 5700` (−176),
+**marge ~1230 o** (était ~450). `.bin` + `sha256.txt` régénérés.
+
+## SmartBeaconing APRS (2026-09-06)
+
+Le champ menu **`Interval`** (F+5) prend deux valeurs en plus de
+`OFF / 30 / 60 / … / 1800 s` :
+
+- **`SB car`** — profil voiture
+- **`SB foot`** — profil piéton
+
+En SmartBeaconing la cadence de balise suit la vitesse GPS, plus le *corner
+pegging* (balise supplémentaire quand le cap change de plus d'un seuil qui
+dépend de la vitesse) — **tant qu'il y a `Pos = GPS` + un fix valide**.
+
+**Repli quand il n'y a pas de fix GPS live** (position en `manual`, ou mode
+GPS encore en recherche) : balise **à intervalle fixe = la cadence lente du
+profil** (1200 s en `SB car`, 600 s en `SB foot`), sur la position résolue.
+Donc `manual` + lat/lon valides continue de baliser (lentement) ; `GPS` sans
+fix reste silencieux (le garde-fou de `APRS_Beacon()` bloque toujours une
+balise GPS à position nulle).
+
+| paramètre | `SB car` | `SB foot` |
+|---|---|---|
+| vitesse basse (≤ → cadence lente) | 5 km/h | 2 km/h |
+| vitesse haute (≥ → cadence rapide) | 90 km/h | 8 km/h |
+| cadence lente (arrêt) | 1200 s (20 min) | 600 s (10 min) |
+| cadence rapide | 30 s | 90 s |
+| angle mini de virage | 25° | 35° |
+| pente du seuil de virage | 255 | 80 |
+| temps mini entre balises (corner peg) | 25 s | 45 s |
+
+Entre les deux vitesses : `cadence = rapide × vitesse_haute / vitesse`
+(voiture à 50 km/h → 54 s ; à 30 → 90 s). Seuil de virage :
+`angle_mini + pente / vitesse` (voiture à 50 km/h → 30° ; piéton à 4 km/h →
+55°) — un virage plus serré est exigé à basse vitesse pour ignorer le
+frétillement GPS.
+
+Implémentation (100 % radio, `patch/aprs.c`) : sentinelles `interval_s == 1`
+(car) / `== 2` (foot) — sous la plus petite période réelle (30 s), pas de
+champ de struct ni de changement EEPROM. Table `s_sb_prof[2][7]` (28 o) +
+`APRS_SmartBeaconDue()` (cadence + corner peg, latch interne du timing) ;
+`APRS_TimeSlice()` choisit entre SB live, repli fixe (cadence lente du profil)
+et période numérique classique. Le `0x06D0` n'est pas concerné (`interval_s`
+n'est pas poussé au RP2040).
+
+Build V1 vert, 0 warning : **`text 60632 o`** (+440 o vs post‑Live‑Seek),
+marge ~790 o. `.bin` + `sha256.txt` régénérés. **Non testé matériel.**

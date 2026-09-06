@@ -1,0 +1,10 @@
+--- ui/menu.h
++++ ui/menu.h
+@@ -150,7 +150,6 @@
+ extern const char        gSubMenu_D_RSP[4][11];
+ #endif
+ 
+-extern const char gSubMenu_LIVESEEK[3][6];
+ 
+ extern const char* const gSubMenu_PTT_ID[5];
+ extern const char        gSubMenu_PONMSG[4][8];

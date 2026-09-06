@@ -1,0 +1,34 @@
+--- ui/menu.c
++++ ui/menu.c
+@@ -50,7 +50,6 @@
+ 	{"TxOffs", VOICE_ID_TX_OFFSET_FREQUENCY,           MENU_OFFSET        }, // was "OFFSET"
+ 	{"W/N",    VOICE_ID_CHANNEL_BANDWIDTH,             MENU_W_N           },
+ 
+-	{"Live.S", VOICE_ID_CHANNEL_BANDWIDTH,             MENU_LIVESEEK      }, //by KD8CEC
+ 
+ 	{"Scramb", VOICE_ID_SCRAMBLER_ON,                  MENU_SCR           }, // was "SCR"
+ 	{"BusyCL", VOICE_ID_BUSY_LOCKOUT,                  MENU_BCL           }, // was "BCL"
+@@ -237,12 +236,6 @@
+ 	"NAME\n+\nFREQ"
+ };
+ 
+-const char gSubMenu_LIVESEEK[3][6] =
+-{
+-	"NONE",
+-	"LIVE",
+-	"LIVE+"
+-};
+ 
+ 
+ #ifdef ENABLE_ALARM
+@@ -735,10 +728,6 @@
+ 			strcpy(String, gSubMenu_MDF[gSubMenuSelection]);
+ 			break;
+ 
+-		case MENU_LIVESEEK:
+-			strcpy(String, gSubMenu_LIVESEEK[gSubMenuSelection]);
+-			break;
+-
+ 		case MENU_RP_STE:
+ 			if (gSubMenuSelection == 0)
+ 				strcpy(String, "OFF");

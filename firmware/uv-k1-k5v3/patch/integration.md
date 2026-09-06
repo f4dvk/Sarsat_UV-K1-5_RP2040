@@ -1430,3 +1430,27 @@ Build vert, 0 warning : **`FLASH 118224/120832 o (97,84 %)`** (+~150 o).
 **validée sur matériel** (2026-09-06, `kissutil`, RX + TX bout en bout — cf.
 détail V1) ; le port radio ici est un miroir verbatim du V1 (mêmes bits
 `opts`, même gating `APRS_TimeSlice`).
+
+## SmartBeaconing APRS (2026-09-06)
+
+Miroir du V1 (barème et détail complet là-bas). Champ menu `Interval` (F+5) :
+deux valeurs en plus, **`SB car`** (voiture) et **`SB foot`** (piéton) ;
+cadence de balise variable selon la vitesse GPS + corner pegging tant qu'il y
+a `Pos = GPS` + fix valide.
+
+| | `SB car` | `SB foot` |
+|---|---|---|
+| bas / haut | 5 / 90 km/h | 2 / 8 km/h |
+| lent / rapide | 1200 / 30 s | 600 / 90 s |
+| virage mini / pente / temps mini | 25° / 255 / 25 s | 35° / 80 / 45 s |
+
+**Repli sans fix GPS live** (`Pos = manual`, ou GPS en recherche) : balise à
+intervalle fixe = la cadence lente du profil (1200 s / 600 s) sur la position
+résolue. `manual` + lat/lon valides balise lentement ; `GPS` sans fix reste
+silencieux.
+
+`patch/aprs.c` : sentinelles `interval_s == 1|2`, table `s_sb_prof[2][7]`,
+`APRS_SmartBeaconDue()`. `APRS_TimeSlice()` : SB live / repli fixe (cadence
+lente) / période numérique. Build K1/K5V3 vert, 0 warning :
+**`FLASH 118576/120832 o (98,13 %)`** (+352 o), `RAM 15104`. `.bin` +
+`sha256.txt` régénérés. **Non testé matériel.**

@@ -1,0 +1,37 @@
+--- app/menu.c
++++ app/menu.c
+@@ -120,12 +120,6 @@
+ 	            // 57948      44    3284   61276    ef5c firmware => 57896      44    3284   61224    ef28 firmware
+ 	switch (menu_id)
+ 	{
+-		//============= KD8CEC WORK ==================
+-		case MENU_LIVESEEK:
+-			//*pMin = 0;
+-			*pMax = ARRAY_SIZE(gSubMenu_LIVESEEK) - 1;
+-			break;
+-		//============= END OF KD8CEC WORK ===========
+ 		case MENU_SQL:
+ 			*pMax = 9;
+ 			break;
+@@ -582,10 +576,6 @@
+ 			gEeprom.CHANNEL_DISPLAY_MODE = gSubMenuSelection;
+ 			break;
+ 
+-		case MENU_LIVESEEK:
+-			CEC_LiveSeekMode = gSubMenuSelection;
+-			break;
+-
+ 		case MENU_AUTOLK:
+ 			gEeprom.AUTO_KEYPAD_LOCK = gSubMenuSelection;
+ 			gKeyLockCountdown        = 30;
+@@ -992,10 +982,6 @@
+ 			gSubMenuSelection = gEeprom.CHANNEL_DISPLAY_MODE;
+ 			break;
+ 
+-		case MENU_LIVESEEK:
+-			gSubMenuSelection = CEC_LiveSeekMode;
+-			break;
+-
+ 		case MENU_AUTOLK:
+ 			gSubMenuSelection = gEeprom.AUTO_KEYPAD_LOCK;
+ 			break;

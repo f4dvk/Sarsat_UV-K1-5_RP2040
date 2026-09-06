@@ -29,8 +29,15 @@ cp "$HERE/patch/aprs.h"   app/aprs.h
 cp "$HERE/patch/ax25.c"   app/ax25.c
 cp "$HERE/patch/ax25.h"   app/ax25.h
 
-# 3. apply the source hooks
-for d in app_uart.c app_app.c app_main.c settings.c radio.h radio.c ui_main.c ui_status.c misc.h Makefile; do
+# 3. apply the source hooks.
+#    ceccommon.c / ui_menu.{c,h} / app_menu.c : remove KD8CEC's "Live.S" (Live
+#    Seek) feature -- the mini RSSI-spectrum overlay shown while seeking. It is
+#    off by default, unrelated to SARSAT/APRS, and freed ~800 B of flash for the
+#    APRS SmartBeaconing work. The 3 helpers in ceccommon.c are gutted (kept as
+#    empty stubs so their call sites need no edit); the menu entry + submenu
+#    strings + handlers are dropped (MENU_LIVESEEK enum slot kept, now unused).
+for d in app_uart.c app_app.c app_main.c settings.c radio.h radio.c ui_main.c ui_status.c misc.h Makefile \
+         ceccommon.c ui_menu.c ui_menu.h app_menu.c; do
     f="${d/_//}"
     patch -p0 --forward "$f" < "$HERE/patch/${d}.diff"
 done
