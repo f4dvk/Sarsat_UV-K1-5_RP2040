@@ -173,23 +173,45 @@ void APRS_ResyncAfGainKnob(void)
     s_stock_volgain = 0xFF;
 }
 
-/* Reserve MR channel 170 (index APRS_TX_CHANNEL) as the fixed APRS TX slot,
- * the way KD8CEC's own C-Board project does. Populated with sane defaults
- * only the first time it is seen still erased (0xFFFFFFFF frequency) -- a
- * user edit through the normal channel menu (frequency/power/mode/width) is
- * never overwritten afterwards. The name is always forced to "APRS" (never
- * left as "CH170"/"MR 170"), including on a channel the user already had
- * something else stored in, since this slot is meant to be dedicated. */
+/* This firmware is a fixed SARSAT / APRS appliance, so it seeds a few
+ * dedicated MR channels with sane defaults:
+ *
+ *   ch 170  "APRS"    144.800 MHz  FM   wide  HIGH   -- the fixed APRS TX slot
+ *   ch 1    "SAREX"   434.200 MHz  DSC  wide  LOW    -- SAR exercise beacon
+ *   ch 2    "SARSAT"  406.028 MHz  DSC  wide  LOW    -- real 406 MHz (RX only!)
+ *
+ * A slot is written ONLY while still erased (0xFFFFFFFF frequency): a channel
+ * already storing something -- a user edit, or a channel the operator uses for
+ * something else -- is never touched (clear it first if you want the default
+ * back). The APRS slot's name is additionally re-pinned to "APRS" on every
+ * boot, the way KD8CEC's own C-Board project keeps its TX slot dedicated. */
+static void APRS_SeedChannel(uint8_t ch, uint32_t freq,
+                             uint8_t modulation, uint8_t power, const char *name)
+{
+    uint32_t cur;
+    EEPROM_ReadBuffer((uint16_t)(ch * 16u), &cur, sizeof cur);
+    if (cur != 0xFFFFFFFFu)
+        return;                       /* slot in use -- leave it alone */
+    VFO_Info_t v;
+    RADIO_InitInfo(&v, ch, freq);     /* wide + FM + std step by default */
+    v.Modulation   = modulation;
+    v.OUTPUT_POWER = power;
+    SETTINGS_SaveChannel(ch, 0, &v, 2);
+    SETTINGS_SaveChannelName(ch, name);
+}
+
 static void APRS_EnsureChannel(void)
 {
-    uint32_t freq;
-    EEPROM_ReadBuffer(APRS_TX_CHANNEL * 16u, &freq, sizeof(freq));
-    if (freq == 0xFFFFFFFFu) {
-        VFO_Info_t v;
-        RADIO_InitInfo(&v, APRS_TX_CHANNEL, APRS_DEFAULT_FREQ);
-        v.OUTPUT_POWER = OUTPUT_POWER_MID;
-        SETTINGS_SaveChannel(APRS_TX_CHANNEL, 0, &v, 2);
-    }
+#ifdef ENABLE_BYP_RAW_DEMODULATORS
+    const uint8_t discri = MODULATION_DISCRI;   /* flat FM discriminator ("DSC") */
+#else
+    const uint8_t discri = MODULATION_FM;
+#endif
+    APRS_SeedChannel(APRS_TX_CHANNEL, APRS_DEFAULT_FREQ,
+                     MODULATION_FM, OUTPUT_POWER_HIGH, "APRS");
+    APRS_SeedChannel(0, 43420000u, discri, OUTPUT_POWER_LOW, "SAREX");
+    APRS_SeedChannel(1, 40602800u, discri, OUTPUT_POWER_LOW, "SARSAT");
+
     char nm[11];
     SETTINGS_FetchChannelName(nm, APRS_TX_CHANNEL);
     if (strcmp(nm, "APRS") != 0)

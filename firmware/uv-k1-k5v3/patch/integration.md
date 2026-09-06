@@ -403,10 +403,20 @@ d'insertion déjà utilisés par SARSAT/afgain sans nouvel ancrage) :
 | `CMakePresets.json` | `"ENABLE_APRS": false` par défaut (`-DENABLE_APRS=ON` dans `build.sh`) |
 
 **Ouverture** : comme SARSAT, assignable via le menu (`F1Shrt`/`F1Long`/
-`F2Shrt`/`F2Long` → `APRS`), plus l'auto-popup sur trame RX décodée. Canal
-dédié 170 (`APRS_EnsureChannel()`, appelée par `APRS_Init()`) — même logique
-que le V1 : pré-remplissage 144.800000 MHz / FM large / puissance moyenne
-**seulement** si le canal est encore vierge en EEPROM, nom forcé à `"APRS"`.
+`F2Shrt`/`F2Long` → `APRS`), plus l'auto-popup sur trame RX décodée.
+
+**Canaux mémoire pré-remplis** (`APRS_SeedChannel()`, appelée par
+`APRS_Init()`, même logique que le V1) — chacun écrit **seulement s'il est
+encore vierge** en EEPROM, jamais par-dessus un canal utilisé :
+
+| ch | nom | fréquence | modulation | largeur | puissance |
+|---|---|---|---|---|---|
+| 170 | `APRS` | 144.800 MHz | FM | large | **haute** |
+| 1 | `SAREX` | 434.200 MHz | **RAW** (discri plat) | large | basse |
+| 2 | `SARSAT` | 406.028 MHz | **RAW** | large | basse |
+
+(406.028 MHz = bande SARSAT réelle : **réception uniquement**.) Le nom du
+canal 170 est re-forcé à `"APRS"` à chaque boot.
 
 **Marge flash dépassée avec le preset `Fusion` complet + SARSAT + APRS**
 (constaté à la compilation : dépassement de ~2,3 Ko). `build.sh` désactive
@@ -1453,3 +1463,12 @@ silencieux.
 lente) / période numérique. Build K1/K5V3 vert, 0 warning :
 **`FLASH 118576/120832 o (98,13 %)`** (+352 o), `RAM 15104`. `.bin` +
 `sha256.txt` régénérés. **Non testé matériel.**
+
+## Canaux par défaut SAREX / SARSAT (2026-09-06)
+
+`APRS_EnsureChannel()` -> `APRS_SeedChannel()` : canal 170 puissance par défaut
+**moyenne -> haute** ; canaux 1 et 2 pré-remplis s'ils sont vierges —
+`SAREX` 434.200 MHz RAW / `SARSAT` 406.028 MHz RAW, large + puissance basse
+(`OUTPUT_POWER_LOW1`). Jamais par-dessus un canal utilisé. Build K1/K5V3 vert,
+0 warning : `FLASH 118664/120832 o (98,21 %)` (+88). `.bin` + `sha256.txt`
+régénérés. Non testé matériel.

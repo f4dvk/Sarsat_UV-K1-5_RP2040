@@ -166,11 +166,23 @@ exactement ce que `RADIO_ConfigureChannel(..., VFO_CONFIGURE_RELOAD)` lit pour
 n'importe quel canal mémoire. Ça permet de laisser VFO A/B sur autre chose (une
 répétition, la surveillance SARSAT sur l'autre VFO…) tout en continuant de
 baliser sur 144.800. Le canal 170 s'affiche partout comme **`APRS`** au lieu de
-`CH170`/`MR 170` (nom EEPROM forcé par `APRS_Init()`). À la première utilisation
-(canal encore vierge en EEPROM), il est pré-rempli à 144.800000 MHz, FM large,
-puissance moyenne, sans CTCSS ; édite-le ensuite comme n'importe quel canal
-mémoire (menu Channel, ou copie VFO→canal) pour changer où la balise part —
-la config est relue à chaque salve, aucun redémarrage nécessaire. `APRS_Beacon()`
+`CH170`/`MR 170` (nom EEPROM forcé par `APRS_Init()`).
+
+**Canaux mémoire pré-remplis** (`APRS_SeedChannel()`, appelée par
+`APRS_Init()`) — chacun n'est écrit **que s'il est encore vierge** en EEPROM
+(fréquence `0xFFFFFFFF`) ; un canal déjà utilisé (édition, ou autre usage de
+l'opérateur) n'est **jamais** touché — efface-le d'abord si tu veux le défaut :
+
+| ch | nom | fréquence | modulation | largeur | puissance |
+|---|---|---|---|---|---|
+| 170 | `APRS` | 144.800 MHz | FM | large | **haute** |
+| 1 | `SAREX` | 434.200 MHz | **DSC** (discri plat) | large | basse |
+| 2 | `SARSAT` | 406.028 MHz | **DSC** | large | basse |
+
+(406.028 MHz = bande SARSAT réelle : **réception uniquement**.) Édite-les
+ensuite comme n'importe quel canal (menu Channel, ou copie VFO→canal) ; la
+config du canal 170 est relue à chaque salve, aucun redémarrage nécessaire.
+`APRS_Beacon()`
 emprunte le slot du VFO TX le temps de la salve (sauvegarde/restauration
 complète de `gEeprom.VfoInfo[]`/`ScreenChannel[]`/`MrChannel[]`), donc le VFO
 affiché ne change jamais visiblement, y compris pendant la salve.
@@ -716,3 +728,12 @@ n'est pas poussé au RP2040).
 
 Build V1 vert, 0 warning : **`text 60632 o`** (+440 o vs post‑Live‑Seek),
 marge ~790 o. `.bin` + `sha256.txt` régénérés. **Non testé matériel.**
+
+## Canaux par défaut SAREX / SARSAT (2026-09-06)
+
+`APRS_EnsureChannel()` -> `APRS_SeedChannel()` : en plus du canal 170 (dont la
+puissance par défaut passe **moyenne -> haute**), pré-remplit les canaux 1 et 2
+s'ils sont vierges — `SAREX` 434.200 MHz DSC / `SARSAT` 406.028 MHz DSC, tous
+deux large + puissance basse. Jamais écrit par-dessus un canal déjà utilisé.
+Build V1 vert, 0 warning : `text 60732 o` (+100). `.bin` + `sha256.txt`
+régénérés. Non testé matériel.
