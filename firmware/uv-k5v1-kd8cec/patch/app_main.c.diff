@@ -1,4 +1,4 @@
---- "/home/stephane/T\303\251l\303\251chargements/uvk5cec-0.3q/app/main.c"	2024-01-19 14:43:30.000000000 +0100
+--- a/app/main.c	2024-01-19 14:43:30.000000000 +0100
 +++ app/main.c	2026-09-02 19:46:07.519502679 +0200
 @@ -30,6 +30,12 @@
  #ifdef ENABLE_SPECTRUM

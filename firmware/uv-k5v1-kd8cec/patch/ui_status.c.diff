@@ -1,4 +1,4 @@
---- "/home/stephane/T\303\251l\303\251chargements/uvk5cec-0.3q/ui/status.c"	2024-01-19 14:43:30.000000000 +0100
+--- a/ui/status.c	2024-01-19 14:43:30.000000000 +0100
 +++ ui/status.c	2026-09-04 09:40:00.000000000 +0200
 @@ -33,6 +33,9 @@
  #include "ui/helper.h"

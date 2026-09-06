@@ -4,7 +4,7 @@
 # mismatch.
 set -u
 
-UPSTREAM="${1:-/home/stephane/Decode_sarsat_406_v1g_v2g}"
+UPSTREAM="${1:-${UPSTREAM:-$HOME/Decode_sarsat_406_v1g_v2g}}"
 REF="$UPSTREAM/build/dec406_hex"
 
 if [[ ! -x "$REF" ]]; then

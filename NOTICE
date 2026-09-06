@@ -1,0 +1,13 @@
+Sarsat_UV-K1-5_RP2040
+Copyright 2026 F4DVK and contributors
+
+This product includes software developed for the Sarsat_UV-K1-5_RP2040
+project, licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It also aggregates third-party components under their own licenses
+(Apache-2.0, BSD-3-Clause, MIT, and — for the COSPAS-SARSAT 1st-generation
+decoder core — a contested MIT / CC BY-NC-SA notice from upstream). Until
+that decoder's licensing is clarified with its upstream authors, treat the
+project as amateur-radio / educational and non-commercial.
+
+See CREDITS.md for the full inventory of components and their origins.

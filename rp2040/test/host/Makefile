@@ -8,7 +8,9 @@
 #   make clean
 
 SRC_DIR   := ../../src
-UPSTREAM  := /home/stephane/Decode_sarsat_406_v1g_v2g
+# Upstream reference decoder (github.com/moricef/Decode_sarsat_406_v1g_v2g),
+# cloned next to this repo by default. Override: make parity UPSTREAM=/path
+UPSTREAM  ?= $(HOME)/Decode_sarsat_406_v1g_v2g
 
 CC        := gcc
 CFLAGS    := -std=c11 -Wall -Wextra -O2 -I$(SRC_DIR) \

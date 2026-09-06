@@ -100,8 +100,10 @@ make check           # parité + parité slicer fixe-vs-double
 ./test_slicer some_beacon.wav [rate]   # chemin de décodage complet sur un vrai enregistrement
 ```
 
-`make parity` a besoin de la référence amont compilée une fois :
-`make -C /home/stephane/Decode_sarsat_406_v1g_v2g` (produit `build/dec406_hex`).
+`make parity` a besoin de la référence amont
+([`github.com/moricef/Decode_sarsat_406_v1g_v2g`](https://github.com/moricef/Decode_sarsat_406_v1g_v2g))
+compilée une fois — clonée à côté de ce dépôt puis `make` dedans (produit
+`build/dec406_hex`), ou `make parity UPSTREAM=/chemin/vers/Decode_sarsat_406_v1g_v2g`.
 
 Ce que les tests hôte prouvent actuellement :
 
@@ -126,14 +128,18 @@ la référence.
 
 ## Provenance & licence
 
-- Le cœur du décodeur 1G (`rp2040/src/dec406*.c`, `audio_slicer.c`,
-  `country_codes.c`) est porté de
-  **github.com/moricef/Decode_sarsat_406_v1g_v2g**. Décodeur d'origine :
-  **F4EHY** `dec406_v7` (2020). Les en-têtes des fichiers source amont portent un
-  avis *CC BY-NC-SA* ; le fichier `LICENSE` du dépôt amont est *MIT* (Fabien
-  Morel, 2026). Traiter ce port comme un usage radioamateur **non commercial /
-  éducatif** en attendant clarification avec l'auteur amont.
-- Le codec de trame série Quansheng (`quansheng_frame.c`) est retravaillé depuis
-  `benshi-esp32-sim/src/UvK5Link.h`.
-- La glu spécifique au projet (`sarsat_decoder.c`, `main.c`, patches firmware) —
-  mêmes termes que `benshi-esp32-sim`.
+Le code original de ce projet (patches firmware, modules RP2040 propres,
+`docs/`, `tools/`, `rp2040/test/`) est sous **Apache‑2.0** — voir `LICENSE` et
+`NOTICE`.
+
+Le dépôt agrège aussi du code amont sous d'autres licences (Apache‑2.0 pour les
+deux firmwares Quansheng, BSD‑3‑Clause pour le démodulateur AFSK porté de
+`pico_tnc`, MIT/CC‑BY‑NC‑SA pour le décodeur SARSAT porté de
+`moricef/Decode_sarsat_406_v1g_v2g`). **`CREDITS.md`** en fait l'inventaire
+complet.
+
+> ⚠️ Le décodeur SARSAT 1G (`rp2040/src/dec406*.c`) a une licence amont
+> contradictoire (MIT côté fichier `LICENSE`, *CC BY‑NC‑SA* côté en‑têtes
+> source, cœur `dec406_v7` de **F4EHY**, 2020). Tant que ce n'est pas clarifié
+> avec les auteurs amont, **traiter tout le projet comme radioamateur /
+> éducatif non commercial**.

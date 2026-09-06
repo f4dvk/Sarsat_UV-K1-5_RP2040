@@ -503,10 +503,9 @@ pas inclus dans ce fichier). Build vert, 0 warning, +88 o :
 
 ## Fait (étape 1/N) : écran principal « Icom » en mode Main Only (2026-09-05)
 
-Objectif final demandé par l'utilisateur : amener ce firmware au même niveau
-que le V1 (affichage, menu, décodage), **par étapes vérifiables**. Voir
-`/home/stephane/.claude/plans/partitioned-wiggling-sundae.md` (Phase 6) pour
-la feuille de route complète.
+Objectif final : amener ce firmware au même niveau que le V1 (affichage, menu,
+décodage), **par étapes vérifiables**. La feuille de route complète est
+retracée dans l'historique git et les sections datées de ce fichier.
 
 **Étape 1 (validée par l'utilisateur avant codage)** : ce firmware a déjà en
 natif un mode très proche de l'Icom — `ENABLE_BIG_FREQ` (actif) affiche la
