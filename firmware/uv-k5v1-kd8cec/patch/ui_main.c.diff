@@ -87,7 +87,7 @@
  	uint8_t           *p_line        = gFrameBuffer[line];
  	char               str[16];
  
-@@ -303,8 +372,417 @@
+@@ -303,8 +372,424 @@
  
  // ***************************************************************************
  
@@ -449,9 +449,16 @@
 +		MotoFreq(e);
 +#else
 +		if (f < 100000000u) {
-+			int fw = ((int)strlen(e) - 1) * 13 + 3;
-+			int fx = (LCD_WIDTH - fw) / 2;
-+			UI_DisplayFrequency(e, fx < 2 ? 2 : fx, 1, false);
++			// id91: last two digits (100 Hz + 10 Hz) half height, like moto
++			const int el = (int)strlen(e);
++			char eb[12];
++			strcpy(eb, e);
++			eb[el - 2] = 0;                       // "DDD.DDD"
++			const int bw = (el - 3) * 13 + 3;     // its pixel advance (dot = 3)
++			int fx = (LCD_WIDTH - bw - 14) / 2;   // 14 px = 2 small glyphs
++			if (fx < 2) fx = 2;
++			UI_DisplayFrequency(eb, fx, 1, false);
++			UI_PrintStringSmallNormal(e + el - 2, fx + bw, 0, 2);
 +		} else {
 +			UI_PrintString(e, 0, LCD_WIDTH, 1, 8);
 +		}

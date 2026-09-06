@@ -36,11 +36,17 @@ for d in app_uart.c app_app.c app_main.c settings.c radio.h radio.c ui_main.c ui
 done
 
 # 4. build (native arm-none-eabi-gcc; openocd targets are not invoked by 'all')
-#    Disabled to make room for SARSAT + APRS (flash is 60 KB):
+#    Disabled to make room for SARSAT + APRS + the "121 MHz report" message
+#    (flash is 60 KB and now ~99 % full):
 #      SPECTRUM (~7 KB), FMRADIO broadcast (~3 KB), VOX + FLASHLIGHT (~1 KB),
-#      AUDIO_BAR (the TX mic-level bar overlay, unused here).
+#      AUDIO_BAR (the TX mic-level bar overlay, unused here),
+#      COPY_CHAN_TO_VFO (~110 B, the "copy current channel to VFO" shortcut),
+#      SCAN_RANGES (~220 B, scan-by-frequency-range -- scan-by-channel stays).
 #    MAIN_SCREEN = stock | moto | id91  (redesigned main VFO screen; "stock"
-#    keeps the original, "id91" is ~700 B lighter than "moto").
+#    keeps the original). "id91" reuses the stock big-digit font + stock
+#    horizontal S-meter instead of moto's own font tables -> ~340 B lighter
+#    than "moto" for the same icom-style layout. Kept on "id91" for the flash
+#    headroom; switch back to "moto" if a build ever has room to spare.
 make -j"$(nproc)" \
     ENABLE_SARSAT=1 \
     ENABLE_APRS=1 \
@@ -50,7 +56,9 @@ make -j"$(nproc)" \
     ENABLE_VOX=0 \
     ENABLE_FLASHLIGHT=0 \
     ENABLE_AUDIO_BAR=0 \
-    MAIN_SCREEN=moto \
+    ENABLE_COPY_CHAN_TO_VFO=0 \
+    ENABLE_SCAN_RANGES=0 \
+    MAIN_SCREEN=id91 \
     VERSION_STRING=CEC3qSAR \
     AUTHOR_STRING=KD8CEC_SARSAT
 

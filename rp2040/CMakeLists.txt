@@ -34,6 +34,7 @@ add_executable(sarsat_rp2040
     src/aprs_parse.c
     src/aprs_digi.c
     src/gps_nmea.c
+    src/kiss.c
 )
 
 target_include_directories(sarsat_rp2040 PRIVATE src)

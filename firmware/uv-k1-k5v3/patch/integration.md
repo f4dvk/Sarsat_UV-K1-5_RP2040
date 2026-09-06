@@ -1334,3 +1334,99 @@ post-échec FCS). Le passage des 3 pads GP26/GP27/GP28 en mode analogique
 le montage court-circuité — il **évite** que les buffers logiques de
 GP27/GP28 chargent le nœud audio, il ne peut pas dégrader le décodage.
 Rien à corriger côté firmware.
+
+
+### Message « report balise 121 MHz » (2026-09-06)
+
+Même fonction que sur le port V1 (voir `firmware/uv-k5v1-kd8cec/integration.md`
+pour le détail), portée ici à l'identique. 100 % côté radio, aucun changement
+RP2040.
+
+- **`aprs_cfg_t` +16 o** (40 -> 56, 7 pages EEPROM) : `char msg_to[10]` +
+  `_rsv[6]`. `build.sh` : le mapping `eeprom_compat.c` de la config APRS passe
+  de `0x00A178..0x00A1A0` (40 o) à `0x00A178..0x00A1B0` (56 o) -- toujours dans
+  la queue non revendiquée du secteur « Settings », aucune collision. Le
+  `grep -q` de contrôle est mis à jour en conséquence. `APRS_Init()` assainit
+  `msg_to` pour une EEPROM écrite par un build antérieur.
+- Champs menu `To <call>` + `Send report`, assistant Signal/Direction,
+  trame `INDICATIF>APZSAR,WIDE1-1,WIDE2-2:` + `:DEST:Report Balise 121 MHz
+  S: n Dir: ddd|KO <lat> <lon>{NN`. Détail complet côté V1.
+- `<lat> <lon>` = position résolue (`APRS_MyPosition()` : GPS si mode GPS +
+  fix, sinon lat/lon manuel) en degrés décimaux, 4 décimales, signées,
+  tronquées ; `0.0000 0.0000` si rien de réglé.
+- **Accusé de réception** : 3 ré-émissions / 30 s puis **écoute jusqu'à
+  5 min** (`APRS_MSG_WAIT_10MS`) ; `APRS_MsgCheckAck()` accepte un `ackNN`
+  tardif, même après abandon (`FAIL -> ACK`), compare l'indicatif de base
+  (SSID toléré). La ligne `Send report` affiche le **numéro de message** :
+  `Rpt #NN TX n/3` -> `Rpt #NN wait ack` -> `Rpt #NN ACK OK` /
+  `Rpt #NN no ack`, pour que l'opérateur voie quel `ackNN` attendre
+  (`s_msg.seq` s'incrémente à chaque report, repart de 1 au reboot).
+  Correctifs de deux remontées : (1) « popup `ackNN` après avoir quitté le
+  menu, ne passe pas OK » -- les trames sont traitées dans le menu, la
+  fenêtre d'accusé était trop courte ; (2) « ack dans les temps mais ne
+  passe pas » -- numéro attendu > 1 après plusieurs essais. Voir le détail
+  côté V1. RP2040 `main.c` : log message = `to [ADRESSEE] : TEXTE`.
+- L'assistant réutilise `APRS_TickDelay()` (pas `SYSTEM_DelayMs`) dans sa
+  boucle, comme le reste de cet écran (fondu rétroéclairage F4HWN).
+- **Réception coupée dans le menu APRS -- corrigé** (« LED s'allume, du
+  souffle, mais la trame ne passe pas ») : (1) `APRS_TxFrame()` ré-applique
+  `APRS_ApplySquelch()` + `AFGAIN_Apply()` en fin (le tick, bloqué par
+  `APP_RunAprs()`, ne le fait plus après une ré-émission de report / un
+  digipeat) et la boucle appelle `APRS_ApplySquelch()` à chaque itération ;
+  (2) le mini-squelch de la boucle diffère la coupure HP de **~2 s**
+  (`msq_mute_at`) pour ne pas hacher le flux vers la C-Board entre paquets
+  rapprochés. (3) à l'arrivée d'un paquet, la boucle bascule sur la **vue
+  RX** même en ouverture manuelle du menu (le décodage tournait, l'écran
+  config ne le montrait pas). Détail complet côté V1.
+- **Ack toujours pas pris en compte -- durci** (log
+  `to [F4DVK-14 ] : ack01`) : `APRS_MsgCheckAck()` accepte un numéro
+  `1..s_msg.seq` (client lent qui ré-accuse `ack01`), compare l'indicatif
+  base à base **les deux côtés élagués** (`gAprsCfg.call` peut traîner une
+  espace), et mémorise `last_ack_no` -> la ligne bloquée affiche
+  `#03 wait  got a01` / `#03 no ack got a01` comme diagnostic. Détail V1.
+- **Audio de la trame dans le menu** (« pas d'audio » -> « aucun souffle FM »
+  -> « squelch met plusieurs secondes à couper » -> « squelch s'ouvre mais
+  pas d'audio »). Cause racine (surtout V1, cf. détail là-bas) : un TX AFSK
+  laisse `BK4819_SetAF(AF_MUTE)` ; le `RADIO_SetupRegisters()` de ce firmware
+  ré-appelle bien `RADIO_SetModulation()` mais on l'appelle explicitement
+  aussi -- dans `APRS_TxFrame()` (fin) **et** à l'ouverture manuelle de
+  l'écran : `RADIO_SelectVfos` + `RADIO_SetupRegisters(true)` +
+  `RADIO_SetModulation(gRxVfo->Modulation)` + `gEnableSpeaker` +
+  `APRS_ApplySquelch` + `AFGAIN_Apply` (réglage opérateur **conservé**). HP
+  démarre **coupé**, le mini-squelch de la boucle l'ouvre sur une porteuse.
+  `APP_StartListening()` retiré (forçait le HP ouvert). Détail V1.
+- **Menu ouvert manuellement : décodage en arrière-plan, pas de popup**
+  (demandé) : un paquet reçu pendant qu'on est dans l'écran config ne
+  bascule pas sur la vue RX -- seul un auto-popup (écran fermé) le fait. Le
+  décodage + la reconnaissance de l'accusé de report tournent quand même
+  (ligne `Send report` -> `ACK OK` sans interrompre) ; `*` pour la dernière
+  trame. Détail V1.
+- **Passe d'optimisation flash** : `APRS_TxInfo()` factorise
+  `APRS_Beacon()`/`APRS_MsgTx()`, diagnostic `last_ack_no` retiré, `#include
+  "app/app.h"` retiré. **`FLASH 118088/120832 o (97,73 %)`** (−152 o).
+- Build vert, 0 warning, `RAM 15072/16384 o`. `.bin` + `sha256.txt`
+  régénérés. **Non testé matériel.**
+
+## Mode TNC KISS (2026-09-06)
+
+Miroir du V1 (détail complet là-bas). Le gros est côté RP2040
+(`rp2040/src/kiss.c`/`.h`, codec SLIP/KISS, testé hôte
+`rp2040/test/host/test_kiss`). Côté radio :
+
+- **`aprs_cfg_t::opts` bit 6** (`APRS_OPT_KISS`, `0x40`) -- struct 56 o
+  inchangée. Champ menu `KISS TNC on/off` (`F_KISS`, après `Send report`),
+  toggle immédiat -> `APRS_PushConfig()`.
+- **`APRS_PushConfig()`** : 12ᵉ octet de charge = `flags`, bit 0 = KISS
+  (`SendReply(UART_PORT_UART, b, 16)`).
+- **`APRS_TimeSlice()`** : `if (kiss) return;` juste après
+  `APRS_DigipeatTimeSlice()` -- garde le fast-squelch, le gain AF
+  (`AFGAIN_TimeSlice()`) et le relais des trames (`0x06D6 -> APRS_Digipeat`),
+  coupe l'auto-balise / le report 121 / l'animation du symbole GPS.
+- **`aprs_rx_arrived()`** : `if (kiss) return;` en tête.
+- **`draw_config()`** : en-tête `KISS TNC  host USB` quand actif.
+
+Build vert, 0 warning : **`FLASH 118224/120832 o (97,84 %)`** (+~150 o).
+`.bin` + `sha256.txt` régénérés. La chaîne KISS (codec RP2040 + hôte) est
+**validée sur matériel** (2026-09-06, `kissutil`, RX + TX bout en bout — cf.
+détail V1) ; le port radio ici est un miroir verbatim du V1 (mêmes bits
+`opts`, même gating `APRS_TimeSlice`).

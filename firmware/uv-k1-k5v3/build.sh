@@ -100,12 +100,12 @@ perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_A
 # App/driver/eeprom_compat.c : reserver de la place dans la queue non revendiquee
 # du secteur "Settings" (0x00A170.. , juste apres "Settings Version" qui
 # s'arrete a 0x00A170) : 8 o pour le reglage de gain AF C-Board (afgain.c),
-# puis 40 o juste apres pour la config APRS (aprs.c, meme page EEPROM 8 o que
-# le V1 utilisait a 0x1D00 sur son EEPROM a lui). Meme secteur physique que les
-# reglages radio, donc protege du reset normal comme eux, efface seulement par
-# "reset ALL".
+# puis 56 o juste apres pour la config APRS (aprs.c, 7 pages EEPROM 8 o -- 40 o
+# a l'origine, +16 o quand le champ "msg_to" du message report 121 a ete
+# ajoute). Meme secteur physique que les reglages radio, donc protege du reset
+# normal comme eux, efface seulement par "reset ALL".
 perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A170, 0x00A170, 0x00A178),  \/\/ Sarsat_UV-K1-5_RP2040: gain AF C-Board (8 o)\n\};\n/' App/driver/eeprom_compat.c
-perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A178, 0x00A178, 0x00A1A0),  \/\/ Sarsat_UV-K1-5_RP2040: config APRS (40 o)\n\};\n/' App/driver/eeprom_compat.c
+perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A178, 0x00A178, 0x00A1B0),  \/\/ Sarsat_UV-K1-5_RP2040: config APRS (56 o)\n\};\n/' App/driver/eeprom_compat.c
 
 # App/scheduler.h + .c : exposer millis10() (compteur 10 ms deja tenu par
 # SysTick_Handler() dans gGlobalSysTickCounter, jusqu'ici prive a ce fichier) --
@@ -300,7 +300,7 @@ grep -q 'app/afgain.c'      App/CMakeLists.txt || { echo "!! CMakeLists.txt : af
 grep -q 'app/aprs.c'        App/CMakeLists.txt || { echo "!! CMakeLists.txt : aprs.c"; exit 1; }
 grep -q 'app/ax25.c'        App/CMakeLists.txt || { echo "!! CMakeLists.txt : ax25.c"; exit 1; }
 grep -q '0x00A170, 0x00A170, 0x00A178' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping gain AF"; exit 1; }
-grep -q '0x00A178, 0x00A178, 0x00A1A0' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping config APRS"; exit 1; }
+grep -q '0x00A178, 0x00A178, 0x00A1B0' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping config APRS"; exit 1; }
 grep -qE '^uint32_t millis10\(void\);' App/scheduler.h || { echo "!! scheduler.h : millis10() declaration"; exit 1; }
 grep -qE '^uint32_t millis10\(void\) \{ return gGlobalSysTickCounter; \}' App/scheduler.c || { echo "!! scheduler.c : millis10() definition"; exit 1; }
 grep -q 'diff >> 2' App/driver/backlight.c || { echo "!! backlight.c : fondu raccourci"; exit 1; }

@@ -33,9 +33,16 @@
 #include "aprs_parse.h"
 #include "aprs_digi.h"
 #include "gps_nmea.h"
+#include "kiss.h"
+
+/* KISS TNC mode: the USB-CDC carries a binary KISS stream, not the debug log,
+ * so every LOG() must fall silent while it is on (see the APRS menu's KISS
+ * field -> a flag in CMD_APRS_CONFIG). */
+static bool       g_kiss;
+static kiss_dec_t g_kiss_rx;
 
 #if SARSAT_LOG
-#define LOG(...)  printf(__VA_ARGS__)
+#define LOG(...)  do { if (!g_kiss) printf(__VA_ARGS__); } while (0)
 #else
 #define LOG(...)  ((void)0)
 #endif
@@ -162,7 +169,7 @@ static void link_poll(void)
                                         (d[14] << 16) | ((uint32_t)d[15] << 24));
             }
         } else if (id == CMD_APRS_CONFIG && dl >= 11) {
-            /* {call[6], ssid, path, sym_table, sym_code, digi_level} */
+            /* {call[6], ssid, path, sym_table, sym_code, digi_level, [flags]} */
             memcpy(g_aprs_my_call, d, 6);
             g_aprs_my_call[6] = 0;
             g_aprs_my_ssid = d[6];
@@ -171,6 +178,17 @@ static void link_poll(void)
                 g_aprs_digi_level = (d[10] <= 3) ? d[10] : 0;
                 LOG("[digi]   level: %s  call: %s-%u\n", lv[g_aprs_digi_level],
                     g_aprs_my_call, g_aprs_my_ssid);
+            }
+            {   /* flags byte 11 bit 0 = KISS TNC mode */
+                bool kiss = (dl >= 12) && (d[11] & 0x01);
+                if (kiss != g_kiss) {
+                    if (!kiss)                       /* leaving KISS: log again */
+                        g_kiss = false;
+                    LOG("[link]   KISS TNC %s\n", kiss ? "ON  -- USB is now a "
+                        "binary KISS stream" : "OFF");
+                    g_kiss = kiss;
+                    memset(&g_kiss_rx, 0, sizeof g_kiss_rx);
+                }
             }
         } else if ((id & 0x8000) && (id & 0x00FF) >= 0xC0) {
 #if CFG_TX_HEXDUMP
@@ -501,6 +519,16 @@ static void aprs_on_packet(const uint8_t *ax25, int len, void *user)
 {
     (void)user;
     g_aprs_pkts++;
+
+    if (g_kiss) {   /* KISS TNC: the host is the AX.25 stack -- hand it the raw
+                     * frame and do nothing else (no digipeat, no display) */
+        static uint8_t kb[KISS_MAX_FRAME * 2 + 4];
+        int kn = kiss_encode(kb, (int)sizeof kb, ax25, len);
+        for (int i = 0; i < kn; i++)
+            putchar_raw(kb[i]);
+        return;
+    }
+
     aprs_try_digipeat(ax25, len);
 
     aprs_info_t ai;
@@ -541,8 +569,14 @@ static void aprs_on_packet(const uint8_t *ax25, int len, void *user)
         for (const char *s = ai.text; *s && n < 158; ) p[n++] = *s++;
         p[n++] = 0;
 
-        LOG("[aprs]   #%lu  %s  %s%s  %s%s\n", (unsigned long)g_aprs_pkts, ai.src,
-            via[0] ? "via " : "direct", via, ai.has_pos ? "pos " : "", ai.text);
+        if (ai.kind == APRS_KIND_MESSAGE)
+            LOG("[aprs]   #%lu  %s  %s%s  to [%s] : %s\n",
+                (unsigned long)g_aprs_pkts, ai.src,
+                via[0] ? "via " : "direct", via, ai.name, ai.text);
+        else
+            LOG("[aprs]   #%lu  %s  %s%s  %s%s\n", (unsigned long)g_aprs_pkts,
+                ai.src, via[0] ? "via " : "direct", via,
+                ai.has_pos ? "pos " : "", ai.text);
         radio_send(CMD_APRS_RXINFO, p, (size_t)n);
         link_poll();
         return;
@@ -775,6 +809,22 @@ int main(void)
         /* -------- APRS mode: stream the ADC ring through the AFSK demod ---- */
         if (g_mode == MODE_APRS) {
             aprs_service();
+
+            if (g_kiss) {
+                /* KISS TNC: RX frames go out as KISS from aprs_on_packet();
+                 * here we take KISS data frames from the host and hand them to
+                 * the radio, which appends the FCS + keys up on channel 170
+                 * (CMD_APRS_DIGI -> APRS_Digipeat, with its own CSMA gate). */
+                int c;
+                while ((c = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
+                    int fl = kiss_decode_byte(&g_kiss_rx, (uint8_t)c);
+                    if (fl >= 16 && fl <= 256)
+                        radio_send(CMD_APRS_DIGI, g_kiss_rx.frame, (size_t)fl);
+                }
+                sleep_us(300);
+                continue;
+            }
+
             if (time_reached(next_lvl)) {
                 uint32_t clip = aprs_rx_clip_permille(&g_aprs);
                 int32_t cdt = 0, env = 0; int car = 0;

@@ -33,7 +33,7 @@ Le firmware radio (Phase 3/4) ajoute un gestionnaire pour les ID ci-dessous dans
 | `0x06C1` | `SARSAT_TEXT` | `line:u8, invert:u8, ascii[0..20]` | définit une ligne d'affichage (0 = haut). `invert` = rendu inversé. ASCII uniquement, ≤ 21 glyphes. |
 | `0x06C2` | `SARSAT_BEACON` | struct compacte (ci-dessous) | résultat de décodage lisible par la machine ; la radio le met en forme elle-même. Alternative optionnelle à `0x06C1`. |
 | `0x06C3` | `SARSAT_LEVEL` | `peak:u16,rms:u16,dc:u16,clip:u8,adcmin:u16,adcmax:u16,verdict:u8` LE | télémétrie de niveau audio pour l'écran de réglage de la radio, ~1/s, sans ACK |
-| `0x06D0` | `APRS_CONFIG` | `call[6], ssid:u8, path:u8, sym_table:u8, sym_code:u8, digi_level:u8` (11 o) | radio → RP2040, sans ACK : poussé à chaque sauvegarde du menu APRS **et** à `APRS_Init()` (donc aussi après un reboot radio, le RP2040 n'ayant pas d'état persistant). `call`/`ssid` servent au digipeat « traçable » (voir plus bas), `path`/`sym_table`/`sym_code` sont gardés côté RP2040 mais inexploités pour l'instant. `digi_level` : 0 off, 1 répète WIDEn-N pour n=1, 2 aussi n=2, 3 aussi n=3 (cumulatif). La config côté radio vit en EEPROM `0x1D00` (40 o ; **pas** `0x1D50`, que `SETTINGS_SaveSettings()` écrase) sur le V1, adresse dédiée équivalente sur le K1/K5V3. |
+| `0x06D0` | `APRS_CONFIG` | `call[6], ssid:u8, path:u8, sym_table:u8, sym_code:u8, digi_level:u8, flags:u8` (12 o) | radio → RP2040, sans ACK : poussé à chaque sauvegarde du menu APRS **et** à `APRS_Init()` (donc aussi après un reboot radio, le RP2040 n'ayant pas d'état persistant). `call`/`ssid` servent au digipeat « traçable » (voir plus bas), `path`/`sym_table`/`sym_code` sont gardés côté RP2040 mais inexploités pour l'instant. `digi_level` : 0 off, 1 répète WIDEn-N pour n=1, 2 aussi n=2, 3 aussi n=3 (cumulatif). `flags` bit 0 = **mode TNC KISS** (voir plus bas). La config côté radio vit en EEPROM `0x1D00` (56 o ; **pas** `0x1D50`, que `SETTINGS_SaveSettings()` écrase) sur le V1, adresse dédiée équivalente sur le K1/K5V3. |
 | `0x06D2` | `APRS_RXTEXT` | `line:u8, ascii[0..18]` | RP2040 → radio : une ligne d'un paquet APRS 144.8 MHz décodé, utilisée seulement quand le champ info n'a **pas** pu être parsé. `line = 0xFF` efface la vue RX ; `line = 0` est l'indicatif source, `1..3` le champ info enroulé. Sans ACK. |
 | `0x06D3` | `APRS_RXINFO` | décodé structuré (ci-dessous) | RP2040 → radio : un paquet APRS parsé (symbole, lat/lon, cap/vitesse/altitude, distance+azimut vers l'opérateur, source, nom d'objet, chemin digipeater, texte commentaire/statut/message). La radio le rend façon Kenwood avec une icône symbole et une ligne « Direct » / « Via … ». Sans ACK. |
 | `0x06D5` | `APRS_GPS` | `flags:u8, lat_e5:i32, lon_e5:i32, speed_kmh:u16, course_deg:u16, alt_m:i16, sats:u8` LE (16 o) | RP2040 → radio, ~toutes les 3 s : le fix d'un module GPS sur l'en-tête NMEA de la C-Board (UART1 GP5, 9600 8N1, `$GxRMC`/`$GxGGA`). `flags` bit0 = fix valide. Envoyé seulement une fois qu'un module a été vu. La radio l'utilise pour la balise quand le champ **Pos** de son menu APRS est sur **GPS** (sinon elle balise la lat/lon manuelle), et pilote un symbole GPS en barre haute (absent = pas de trames, clignotant = `flags` bit0 à 0, fixe = fix). Le RP2040 utilise aussi son propre fix pour la distance/azimut RX quand il est valide. Sans ACK. |
@@ -149,6 +149,64 @@ relais revenir via un autre digipeater avant d'avoir épuisé tous les sauts.
 Aucune passerelle spécifique (aucune action sur un indicatif explicite en
 tête de chemin) : seuls les alias `WIDEn` génériques déclenchent une
 répétition, conformément au périmètre demandé.
+
+### Message « report balise 121 MHz »
+
+Menu APRS (F+5) → champ **`Send report`** : un message APRS pré-formaté vers un
+destinataire fixe (champ **`To`** du menu, adressee APRS ≤ 9 caractères),
+chemin fixe `WIDE1-1,WIDE2-2`, pour un compte-rendu de radiogoniométrie sur
+balise de détresse 121,5 MHz. **Entièrement côté radio** — le RP2040 n'est pas
+impliqué en émission ; l'accusé de réception est repéré dans le décodage
+`APRS_RXINFO` (`0x06D3`) déjà poussé pour tout message reçu.
+
+À l'activation : demande `Signal ?` (1 chiffre 0-9) puis, si > 0, `Direction ?`
+(0-359) ; si 0, `Dir: KO` et pas de question direction. Le message émis est
+`INDICATIF-SSID>APZSAR,WIDE1-1,WIDE2-2:` + info
+`:DESTINATAIRE:Report Balise 121 MHz S: <n> Dir: <ddd|KO> <lat> <lon>{NN`
+(chiffres bruts, `{NN` = numéro de message APRS, cycle 1..99). `<lat> <lon>` =
+position résolue (fix GPS si mode GPS, sinon lat/lon manuel du menu) en
+**degrés décimaux, 4 décimales, signées** (`-` = S / O) ; `0.0000 0.0000` si
+aucune position n'est réglée.
+
+La radio ré-émet **3 fois, 30 s d'intervalle** (sur ~90 s), puis **reste en
+écoute de l'accusé pendant 5 min** avant de conclure. L'accusé
+`:INDICATIF:ackNN` du destinataire (indicatif de base comparé, SSID toléré ;
+numéro de message vérifié) est repéré même s'il arrive après la fenêtre de
+ré-émission, y compris après un abandon. Les trames rentrantes sont traitées
+aussi bien écran fermé (tick) qu'en restant dans le menu APRS (la boucle
+bloquante sert l'UART à chaque itération). État sur la ligne `Send report` :
+`Report TX n/3` → `Report wait ack` → `Report ACK OK` / `Report no ack`.
+Sans C-Board branchée (rien pour entendre l'accusé), le verdict est
+`no ack` au bout des 5 min.
+
+### Mode TNC KISS
+
+Menu APRS (F+5) → champ **`KISS TNC on/off`**. Quand il est actif :
+
+- **Côté RP2040** : l'USB-CDC cesse d'être la console de debug (tous les
+  `LOG()` deviennent muets) et devient un **flux KISS binaire** (SLIP :
+  `FEND 0xC0`, `FESC 0xDB`, `TFEND 0xDC`, `TFESC 0xDD`). Le RP2040 arrête de
+  décoder-pour-l'affichage et de digipeater : c'est un simple modem Bell-202.
+  - RX : chaque trame AX.25 démodulée sort en **frame KISS data** (`FEND 0x00
+    <trame échappée> FEND`) sur l'USB.
+  - TX : une frame KISS data reçue de l'hôte est transmise à la radio en
+    `APRS_DIGI` (`0x06D6`), telle quelle -- la radio ajoute le FCS et clé sur
+    le canal 170, avec sa garde CSMA (`g_SquelchLost`). Un seul emplacement
+    de file : un hôte qui rafale plusieurs trames en perd (APRS est lent).
+  - Les commandes KISS non-data (`TXDELAY`, `P`, `SlotTime`, `TXtail`,
+    `SetHardware`) sont acceptées et **ignorées** (la radio gère son keying).
+- **Côté radio** : `APRS_TimeSlice()` n'exécute plus l'auto-balise ni le
+  « report 121 MHz » ; `aprs_rx_arrived()` (popup) est inhibé. Reste actif :
+  le fast-squelch APRS, le gain AF C-Board, et le relais `0x06D6 → APRS_TxFrame`
+  (chemin digipeat réutilisé). L'écran APRS affiche `KISS TNC  host USB` en
+  en-tête. La radio n'a pas besoin de garder un écran ouvert -- il suffit
+  qu'un VFO soit sur 144.800 FM.
+- **Transport** : bit 0 de l'octet `flags` (12ᵉ octet) de `APRS_CONFIG`
+  (`0x06D0`) = KISS. Poussé à chaque changement du champ menu.
+- **Half-duplex** : pendant une TX (~0,5-1 s) la RX est morte -- normal pour
+  un TNC mono-radio. Un moniteur série lent qui gèle la pompe d'échantillons
+  ferait perdre des trames RX (`PICO_STDIO_USB_STDOUT_TIMEOUT_US` limite ce
+  risque).
 
 ### Charge utile `SARSAT_BEACON` (little-endian)
 

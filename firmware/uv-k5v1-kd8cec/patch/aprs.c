@@ -196,6 +196,18 @@ void APRS_Init(void)
     EEPROM_ReadBuffer(APRS_EE_ADDR, &gAprsCfg, sizeof(gAprsCfg));
     if (gAprsCfg.magic != APRS_EE_MAGIC || gAprsCfg.call[0] == 0xFF)
         APRS_Defaults();
+    {   /* msg_to is a newer field: an EEPROM written by an older build has
+         * junk in those bytes -- accept only a plausible addressee */
+        int ok = 1;
+        for (int i = 0; i < (int)sizeof gAprsCfg.msg_to; i++) {
+            char c = gAprsCfg.msg_to[i];
+            if (c == 0) break;
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                  c == '-' || c == ' ')) { ok = 0; break; }
+        }
+        if (!ok) memset(gAprsCfg.msg_to, 0, sizeof gAprsCfg.msg_to);
+        gAprsCfg.msg_to[sizeof gAprsCfg.msg_to - 1] = 0;
+    }
     APRS_EnsureChannel();
     s_next_beacon_10ms = millis10() + 6000;   /* first beacon 60 s after boot */
     s_inited = true;
@@ -237,15 +249,16 @@ extern void SendReply(void *pReply, uint16_t Size);
  * 0x06Dx APRS command is acked on this firmware, see docs/protocol.md). */
 static void APRS_PushConfig(void)
 {
-    uint8_t b[4 + 11];
+    uint8_t b[4 + 12];
     b[0] = APRS_CMD_CONFIG & 0xFF; b[1] = APRS_CMD_CONFIG >> 8;
-    b[2] = 11;                     b[3] = 0;
+    b[2] = 12;                     b[3] = 0;
     memcpy(b + 4, gAprsCfg.call, 6);
     b[10] = gAprsCfg.ssid;
     b[11] = gAprsCfg.path;
     b[12] = gAprsCfg.sym_table;
     b[13] = gAprsCfg.sym_code;
     b[14] = (uint8_t)((gAprsCfg.opts & APRS_OPT_DIGI_MASK) >> APRS_OPT_DIGI_SHIFT);
+    b[15] = (gAprsCfg.opts & APRS_OPT_KISS) ? 0x01 : 0x00;   /* flags: KISS */
     SendReply(b, sizeof(b));
 }
 
@@ -440,6 +453,20 @@ static void APRS_TxFrame(const uint8_t *frame, int flen)
     gEeprom.MrChannel[txv]     = saved_mrc;
     RADIO_SelectVfos();
     RADIO_SetupRegisters(true);          /* back to RX, exactly as before */
+
+    /* AFSK TX left the BK4819 AF muted (BK4819_SetAF(AF_MUTE) in
+     * APRS_SendTones()) and this KD8CEC RADIO_SetupRegisters() does NOT set
+     * the AF -- so the speaker stays dead until the next signal makes the
+     * (blocked, if we're in APP_RunAprs()) main loop call APP_StartListening.
+     * Restore the VFO's demod now. RADIO_SetupRegisters() also put REG_4E
+     * back to the channel squelch and reset REG_48 -- the 10 ms tick normally
+     * re-applies the APRS-band fast squelch + C-Board level, but it is blocked
+     * whenever this TX fired from APP_RunAprs()'s own loop (report retry /
+     * digipeat). Re-apply all three so every TX path leaves a clean APRS RX
+     * behind. No-ops off-band / when gain is auto. */
+    RADIO_SetModulation(gRxVfo->Modulation);
+    APRS_ApplySquelch();
+    APRS_ApplyAfGain();
 }
 
 /* Gates shared by originating a beacon and repeating someone else's frame:
@@ -472,6 +499,25 @@ static bool APRS_CanTransmitNow(void)
     return true;
 }
 
+/* Assemble "MYCALL-SSID>APZSAR,<digi...>:<info>" and hand it to APRS_TxFrame().
+ * Shared by APRS_Beacon() and APRS_MsgTx(). */
+static void APRS_TxInfo(const char *info, int ilen,
+                        const ax25_addr_t *digi, int nd)
+{
+    if (ilen <= 0 || ilen > AX25_MAX_INFO)
+        return;
+
+    ax25_addr_t src, dst;
+    memset(&src, 0, sizeof src); memset(&dst, 0, sizeof dst);
+    memcpy(src.call, gAprsCfg.call, 6); src.ssid = gAprsCfg.ssid;
+    strcpy(dst.call, "APZSAR");
+
+    uint8_t frame[AX25_MAX_FRAME];
+    int flen = ax25_build_ui(frame, &dst, &src, digi, nd, info, ilen);
+    if (flen)
+        APRS_TxFrame(frame, flen);
+}
+
 void APRS_Beacon(void)
 {
     if (gAprsCfg.call[0] == 0 || strcmp(gAprsCfg.call, "NOCALL") == 0)
@@ -485,19 +531,153 @@ void APRS_Beacon(void)
 
     char info[AX25_MAX_INFO + 4];
     int  ilen = APRS_FormatPosition(info);
-    if (ilen > AX25_MAX_INFO) ilen = AX25_MAX_INFO;
 
-    ax25_addr_t src, dst, digi[AX25_MAX_DIGI];
-    memset(&src, 0, sizeof src); memset(&dst, 0, sizeof dst);
-    memcpy(src.call, gAprsCfg.call, 6); src.ssid = gAprsCfg.ssid;
-    strcpy(dst.call, "APZSAR");          dst.ssid = 0;
+    ax25_addr_t digi[AX25_MAX_DIGI];
+    memset(digi, 0, sizeof digi);
     int nd = APRS_Digi(digi);
+    APRS_TxInfo(info, ilen, digi, nd);
+}
 
-    uint8_t frame[AX25_MAX_FRAME];
-    int flen = ax25_build_ui(frame, &dst, &src, digi, nd, info, ilen);
-    if (!flen) return;
+/* ---- "121 MHz beacon report" APRS message ("Send report" on the screen) --
+ * A canned APRS text message to a fixed recipient (gAprsCfg.msg_to) over a
+ * fixed WIDE1-1,WIDE2-2 path, for reporting a 121.5 MHz homing bearing:
+ *   "Report Balise 121 MHz S: <0-9> Dir: <0-359|KO>"
+ * Sent with an APRS message number so the addressee's client auto-acks; we
+ * retry up to APRS_MSG_TRIES times, APRS_MSG_RETRY_10MS apart, until that
+ * ack comes back (seen through the RP2040's decoded-message push, 0x06D3)
+ * or we give up. Progress shows on the F_SEND menu row. Needs the C-Board
+ * connected (it is what hears the ack); with no TNC it always ends "no ack". */
+#define APRS_MSG_TRIES        3
+#define APRS_MSG_RETRY_10MS   3000     /* 30 s between the (re)transmits     */
+#define APRS_MSG_WAIT_10MS    30000    /* keep listening for the ack 5 min   */
+#define APRS_MSG_DIR_KO       0xFFFFu
 
-    APRS_TxFrame(frame, flen);
+enum { APRS_MSG_IDLE = 0, APRS_MSG_WAIT, APRS_MSG_ACK, APRS_MSG_FAIL };
+
+static struct {
+    uint8_t  state;               /* APRS_MSG_*                             */
+    uint8_t  seq;                 /* APRS message number, cycles 1..99      */
+    uint8_t  tries;               /* (re)transmits done so far (max _TRIES) */
+    uint8_t  sig;                 /* signal 0..9                            */
+    uint16_t dir;                 /* 0..359, or APRS_MSG_DIR_KO             */
+    uint32_t next_at_10ms;        /* next (re)transmit due                  */
+    uint32_t deadline_10ms;       /* declare "no ack" past this             */
+} s_msg;
+
+static int APRS_MsgInfo(char *info)
+{
+    char to[10];
+    int n = 0;
+    for (; n < 9 && gAprsCfg.msg_to[n]; n++) to[n] = gAprsCfg.msg_to[n];
+    for (; n < 9; n++) to[n] = ' ';         /* addressee is exactly 9 chars */
+    to[9] = 0;
+
+    char dir[8];
+    if (s_msg.dir == APRS_MSG_DIR_KO) strcpy(dir, "KO");
+    else                             sprintf(dir, "%u", s_msg.dir);
+
+    /* my resolved position (GPS fix if in GPS mode, else the manual lat/lon),
+     * in decimal degrees with 4 decimals, signed (- = S / W) */
+    int32_t lat, lon;
+    APRS_MyPosition(&lat, &lon);
+    uint32_t la = (lat < 0) ? (uint32_t)(-lat) : (uint32_t)lat;
+    uint32_t lo = (lon < 0) ? (uint32_t)(-lon) : (uint32_t)lon;
+
+    return sprintf(info,
+        ":%s:Report Balise 121 MHz S: %u Dir: %s %s%u.%04u %s%u.%04u{%02u",
+        to, s_msg.sig, dir,
+        lat < 0 ? "-" : "", (unsigned)(la / 100000u), (unsigned)(la % 100000u / 10u),
+        lon < 0 ? "-" : "", (unsigned)(lo / 100000u), (unsigned)(lo % 100000u / 10u),
+        s_msg.seq);
+}
+
+static void APRS_MsgTx(void)
+{
+    char info[AX25_MAX_INFO + 8];
+    int  ilen = APRS_MsgInfo(info);
+
+    ax25_addr_t digi[2];
+    memset(digi, 0, sizeof digi);
+    strcpy(digi[0].call, "WIDE1"); digi[0].ssid = 1;   /* fixed WIDE1-1,WIDE2-2 */
+    strcpy(digi[1].call, "WIDE2"); digi[1].ssid = 2;
+    APRS_TxInfo(info, ilen, digi, 2);
+}
+
+/* begin a report; sig 0 forces "Dir: KO" and the caller skips the direction */
+static void APRS_MsgStart(uint8_t sig, uint16_t dir)
+{
+    if (gAprsCfg.call[0] == 0 || strcmp(gAprsCfg.call, "NOCALL") == 0)
+        return;
+    if (gAprsCfg.msg_to[0] <= ' ')            /* no recipient set */
+        return;
+    s_msg.sig   = (sig > 9) ? 9 : sig;
+    s_msg.dir   = (sig == 0) ? APRS_MSG_DIR_KO : (dir > 359 ? 359 : dir);
+    s_msg.seq   = (uint8_t)(s_msg.seq % 99u) + 1u;
+    s_msg.tries = 0;
+    s_msg.state = APRS_MSG_WAIT;
+    s_msg.next_at_10ms  = millis10();                       /* first TX next slice */
+    s_msg.deadline_10ms = millis10() + APRS_MSG_WAIT_10MS;
+}
+
+/* pumped from APRS_TimeSlice() and the APP_RunAprs() loop, like digipeat.
+ * The 3 (re)transmits go out over the first ~90 s, but we keep the state on
+ * WAIT (still matching an incoming ack) until APRS_MSG_WAIT_10MS -- a real
+ * APRS ack, digipeated both ways or bounced off an i-gate, routinely takes
+ * longer than the retransmit window. */
+static void APRS_MsgTimeSlice(void)
+{
+    if (s_msg.state != APRS_MSG_WAIT)
+        return;
+    if ((int32_t)(millis10() - s_msg.deadline_10ms) >= 0) {
+        s_msg.state = APRS_MSG_FAIL;                        /* no ack, gave up */
+        BACKLIGHT_TurnOn();
+        return;
+    }
+    if (s_msg.tries >= APRS_MSG_TRIES)
+        return;                                             /* done TXing, listen */
+    if ((int32_t)(millis10() - s_msg.next_at_10ms) < 0)
+        return;
+    if (!APRS_CanTransmitNow())
+        return;                                             /* channel busy */
+    APRS_MsgTx();
+    s_msg.tries++;
+    s_msg.next_at_10ms = millis10() + APRS_MSG_RETRY_10MS;
+}
+
+/* an APRS message decoded by the RP2040 (0x06D3): is it our "ackNN"?
+ * Accepts a late ack that lands after we already gave up (FAIL -> ACK). */
+static void APRS_MsgCheckAck(const char *addressee, const char *text)
+{
+    if ((s_msg.state != APRS_MSG_WAIT && s_msg.state != APRS_MSG_FAIL) ||
+        strncmp(text, "ack", 3) != 0)
+        return;
+
+    /* base callsign of the addressee (before '-' / space) must be ours; an
+     * SSID that differs or is absent is tolerated (some clients ack the bare
+     * call). Trim both sides -- gAprsCfg.call can carry a trailing space from
+     * the char-cycle editor. */
+    char ab[8], mc[8];
+    int i = 0, j = 0;
+    for (; i < 6 && addressee[i] > ' ' && addressee[i] != '-'; i++)
+        ab[i] = addressee[i];
+    ab[i] = 0;
+    for (; j < 6 && gAprsCfg.call[j] > ' ' && gAprsCfg.call[j] != '-'; j++)
+        mc[j] = gAprsCfg.call[j];
+    mc[j] = 0;
+    if (ab[0] == 0 || strcmp(ab, mc) != 0)
+        return;
+
+    /* "ackNN": accept NN == the current report, OR any earlier number of this
+     * session -- retested reports carry the same S/Dir text, so a slow client
+     * that keeps re-acking "ack01" (or dedups our retries) still confirms the
+     * report was received. Only a number past our current seq is rejected. */
+    int no = 0;
+    for (const char *q = text + 3; *q >= '0' && *q <= '9'; q++)
+        no = no * 10 + (*q - '0');
+    if (no >= 1 && no <= s_msg.seq) {
+        s_msg.state = APRS_MSG_ACK;
+        BACKLIGHT_TurnOn();
+    }
 }
 
 /* AX25_MAX_FRAME (112 o) is sized for OUR OWN beacon (2 digis, short info) --
@@ -577,9 +757,18 @@ static void APRS_DigipeatTimeSlice(void)
 void APRS_TimeSlice(void)
 {
     APRS_Ensure();
+
+    /* KISS TNC: the RP2040 (on its USB) is the TNC. The radio only keeps the
+     * fast-squelch on, the C-Board AF level applied, and relays the frames the
+     * host asks to send (APRS_DigipeatTimeSlice, fed by CMD_APRS_DIGI) -- no
+     * own beacon / "121 MHz report" / RX popup. */
+    const bool kiss = (gAprsCfg.opts & APRS_OPT_KISS) != 0;
+
     APRS_ApplySquelch();               /* APRS-band fast-squelch (cheap: 1 reg read) */
-    APRS_DigipeatTimeSlice();          /* retry a queued digipeat frame until
-                                        * the channel is actually clear      */
+    APRS_DigipeatTimeSlice();          /* retry a queued frame until the channel
+                                        * is clear -- also the KISS TX path   */
+    if (!kiss)
+        APRS_MsgTimeSlice();           /* retry the "121 MHz report" message   */
 
     /* "light on frame", background RX (no popup open): keep reasserting the
      * backlight for a short window after each decode -- see
@@ -620,7 +809,7 @@ void APRS_TimeSlice(void)
         }
     }
 
-    if (gAprsCfg.interval_s == 0)
+    if (kiss || gAprsCfg.interval_s == 0)
         return;
     if ((int32_t)(millis10() - s_next_beacon_10ms) < 0)
         return;
@@ -646,6 +835,9 @@ static bool aprs_on_band(void)
 
 static void aprs_rx_arrived(void)      /* common: count + rate-limited popup */
 {
+    if (gAprsCfg.opts & APRS_OPT_KISS)  /* KISS: the RP2040 doesn't push RX for
+                                        * display, but guard anyway -- no popup */
+        return;
     s_rx_pkts++;
     s_rx_dirty = true;
     if (gAprsCfg.opts & APRS_OPT_BL_DECODE) {  /* a decoded frame lights the screen */
@@ -753,6 +945,8 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
         s_rxi.at_10ms = millis10();
         s_rxi.valid   = true;
         s_rxn = 0;                                 /* the text fallback is stale */
+        if (s_rxi.kind == APRS_RX_KIND_MESSAGE)
+            APRS_MsgCheckAck(s_rxi.name, s_rxi.text);
         aprs_rx_arrived();
         return;
     }
@@ -792,12 +986,13 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 
 /* ---------------------------------------------------------- config screen  */
 enum { F_CALL, F_SSID, F_PATH, F_SYM, F_TEXT, F_INT, F_POPUP, F_AFGAIN, F_SQL,
-       F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_N };
+       F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_KISS, F_N };
 
 /* char cycling for the keypad-poor text fields: space, A-Z, 0-9, then a few
  * punctuation marks for the comment. */
 static const char CALLSET[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 static const char TEXTSET[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./+";
+static const char ADDRSET[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
 static char cyc_char(char c, int dir, const char *set)
 {
     const char *p = strchr(set, (c == 0) ? ' ' : c);
@@ -868,6 +1063,26 @@ static void field_str(int f, char *out)
                 (long)(a / 100000), (unsigned long)(a % 100000));
         break;
     }
+    case F_MSGTO:
+        sprintf(out, "To  %.9s", gAprsCfg.msg_to[0] > ' ' ? gAprsCfg.msg_to : "(none)");
+        break;
+    case F_SEND:
+        /* show the message number so the operator can match it to the "ackNN" */
+        switch (s_msg.state) {
+        case APRS_MSG_WAIT:
+            sprintf(out, s_msg.tries < APRS_MSG_TRIES ? "Rpt #%02u TX %u/3"
+                                                      : "Rpt #%02u wait ack",
+                    s_msg.seq, s_msg.tries);
+            break;
+        case APRS_MSG_ACK:  sprintf(out, "Rpt #%02u ACK OK", s_msg.seq); break;
+        case APRS_MSG_FAIL: sprintf(out, "Rpt #%02u no ack", s_msg.seq); break;
+        default:            strcpy(out, "Send report");                  break;
+        }
+        break;
+    case F_KISS:
+        strcpy(out, (gAprsCfg.opts & APRS_OPT_KISS) ? "KISS TNC on"
+                                                    : "KISS TNC off");
+        break;
     }
 }
 
@@ -949,6 +1164,7 @@ static void field_step(int f, int dir)
         APRS_ApplySquelch();
         break;
     case F_BLIGHT: gAprsCfg.opts ^= APRS_OPT_BL_DECODE; break;
+    case F_KISS:   gAprsCfg.opts ^= APRS_OPT_KISS; APRS_PushConfig(); break;
     case F_DIGI: {
         uint8_t lv = (gAprsCfg.opts & APRS_OPT_DIGI_MASK) >> APRS_OPT_DIGI_SHIFT;
         lv = (uint8_t)((lv + dir + 4) % 4);
@@ -980,14 +1196,16 @@ static void draw_config(int sel, int editing, int callcur, int first)
     char s[24];
     UI_DisplayClear();
 
-    if (editing && sel == F_CALL)
-        sprintf(s, "CALL char %d  A:ok", callcur + 1);
+    if (editing && (sel == F_CALL || sel == F_MSGTO))
+        sprintf(s, "char %d   A:ok", callcur + 1);
     else if (editing && sel == F_TEXT)
         sprintf(s, "TEXT pos %d UP/DN", callcur + 1);
     else if (editing && (sel == F_LAT || sel == F_LON))
         strcpy(s, "0-9  *:sign  A:ok");
     else if (editing)
         strcpy(s, "UP/DN then A:ok");
+    else if (gAprsCfg.opts & APRS_OPT_KISS)
+        strcpy(s, "KISS TNC  host USB");
     else
         sprintf(s, "APRS 5:TX *:RX%c%c",
                 first > 0 ? '^' : ' ',
@@ -1002,10 +1220,12 @@ static void draw_config(int sel, int editing, int callcur, int first)
             char v[16];
             kbuf_render(v, f == F_LAT ? 2 : 3);
             sprintf(s, "%s %s", f == F_LAT ? "Lat " : "Lon ", v);
-        } else if (editing && f == sel && f == F_TEXT) {
-            int w = 0;                            /* comment with a [x] cursor */
-            for (int i = 0; i < 14; i++) {        /* 14 + 2 brackets = 16 <= 18 */
-                char ch = gAprsCfg.comment[i] ? gAprsCfg.comment[i] : ' ';
+        } else if (editing && f == sel && (f == F_TEXT || f == F_MSGTO)) {
+            const char *b = (f == F_TEXT) ? gAprsCfg.comment : gAprsCfg.msg_to;
+            const int   m = (f == F_TEXT) ? 14 : 9;   /* +[ ] brackets <= 18 */
+            int w = 0;
+            for (int i = 0; i < m; i++) {
+                char ch = b[i] ? b[i] : ' ';
                 if (i == callcur) { s[w++] = '['; s[w++] = ch; s[w++] = ']'; }
                 else              s[w++] = ch;
             }
@@ -1017,6 +1237,26 @@ static void draw_config(int sel, int editing, int callcur, int first)
             UI_PrintStringSmallBold(s, 2, 0, r + 1);
         else
             UI_PrintStringSmallNormal(s, 2, 0, r + 1);
+    }
+    ST7565_BlitFullScreen();
+}
+
+/* --- "Send report" wizard: ask Signal (0-9), then Direction (0-359) ------ */
+static uint8_t s_wiz;       /* 0 none, 1 asking signal, 2 asking direction   */
+static uint8_t s_wizsig;    /* signal digit captured in step 1              */
+
+static void draw_wizard(void)
+{
+    char s[22];
+    UI_DisplayClear();
+    if (s_wiz == 1) {
+        UI_PrintStringSmallBold("Signal 0-9 ?  0=KO", 2, 0, 2);
+    } else {
+        int w = sprintf(s, "S:%u  Dir? ", s_wizsig);
+        for (int i = 0; i < s_klen && w < 16; i++) s[w++] = s_kbuf[i];
+        s[w] = 0;
+        UI_PrintStringSmallBold(s, 2, 0, 2);
+        UI_PrintStringSmallNormal("0-359    A = send", 2, 0, 4);
     }
     ST7565_BlitFullScreen();
 }
@@ -1208,12 +1448,33 @@ void APP_RunAprs(void)
         return;
     }
 
-    /* RX stays live under the popup so the C-Board keeps decoding (a packet
-     * arriving here is shown too and re-arms the auto-close timer). But the
-     * blocked main loop can't close the speaker path / RX LED when the carrier
-     * drops between packets -- so pump the BK4819 squelch interrupt in the loop
-     * and follow it (see the SQUELCH block below). */
-    if (!g_SquelchLost) {                 /* channel already idle -> silence it now */
+    /* Manual F+5 open on the APRS band -> re-tune the BK4819 for FM RX on the
+     * current VFO. The APRS screen otherwise just inherits whatever RX state
+     * it opened on -- BK4819 AF muted after a TX, not even demodulating:
+     * "leger souffle, aucun souffle FM, pas de trame". RADIO_SetupRegisters()
+     * sets the FM demod (un-mutes the BK4819 AF) + the squelch and leaves the
+     * SPEAKER muted -- the mini-squelch loop below then opens it only on a
+     * real carrier (so no persistent idle hiss). The operator's own AF-gain
+     * setting is kept so the level matches what the C-Board sees. */
+    const bool monitor = !popup && aprs_on_band();
+
+    if (monitor) {
+        RADIO_SelectVfos();
+        RADIO_SetupRegisters(true);
+        RADIO_SetModulation(gRxVfo->Modulation);   /* un-mute the BK4819 AF to
+                                                    * the VFO's demod -- this
+                                                    * KD8CEC RADIO_SetupRegisters()
+                                                    * does NOT (only APP_Start-
+                                                    * Listening() normally does),
+                                                    * so a TX-left AF_MUTE stuck:
+                                                    * "squelch s'ouvre mais pas
+                                                    * d'audio de la trame" */
+        gEnableSpeaker = true;
+        APRS_ApplySquelch();
+        APRS_ApplyAfGain();
+        g_SquelchLost = false;
+        BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
+    } else if (!g_SquelchLost) {          /* channel already idle -> silence it now */
         AUDIO_AudioPathOff();
         BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
     }
@@ -1225,10 +1486,13 @@ void APP_RunAprs(void)
     KEY_Code_t prev = KEY_INVALID;
     bool dirty = true;
     uint16_t last_pkts = s_rx_pkts;
+    uint8_t  last_msg  = s_msg.state;
+    s_wiz = 0;
 
     /* auto-popups close themselves after gAprsCfg.popup_s (unless a key is hit) */
     const bool timed = (popup && gAprsCfg.popup_s);
     uint32_t close_at = timed ? millis10() + gAprsCfg.popup_s * 100u : 0;
+    uint32_t msq_mute_at = 0;    /* deferred speaker mute (see mini squelch) */
 
     BACKLIGHT_TurnOn();
 
@@ -1238,21 +1502,31 @@ void APP_RunAprs(void)
             UART_HandleCommand();
 #endif
         /* mini squelch: the main loop (which normally does this) is blocked.
-         * carrier present  -> speaker path + RX LED on  (C-Board hears it)
-         * carrier gone      -> both off, so the channel noise is not heard */
+         * carrier present -> speaker path + RX LED on (the C-Board hears it).
+         * carrier gone    -> mute the speaker, but only ~2 s LATER: APRS
+         * packets come in bursts a fraction of a second apart, and cutting the
+         * audio feed to the C-Board between them breaks its bit-PLL / HDLC
+         * framing -> "la LED s'allume, du souffle, mais la trame ne passe pas".
+         * The deferred mute keeps the feed continuous across those short gaps
+         * and only silences the channel after a real lull. */
         while (BK4819_ReadRegister(BK4819_REG_0C) & 1u) {
             BK4819_WriteRegister(BK4819_REG_02, 0);
             uint16_t ib = BK4819_ReadRegister(BK4819_REG_02);
             if (ib & BK4819_REG_02_SQUELCH_LOST) {
                 g_SquelchLost = true;
+                msq_mute_at = 0;
                 AUDIO_AudioPathOn();
                 BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, true);
             }
             if (ib & BK4819_REG_02_SQUELCH_FOUND) {
                 g_SquelchLost = false;
-                AUDIO_AudioPathOff();
+                if (!msq_mute_at) msq_mute_at = millis10() + 200;   /* +2 s */
                 BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
             }
+        }
+        if (msq_mute_at && (int32_t)(millis10() - msq_mute_at) >= 0) {
+            msq_mute_at = 0;
+            AUDIO_AudioPathOff();
         }
 
         /* This loop is what receives 0x06D6 (UART_HandleCommand() above, when
@@ -1264,7 +1538,12 @@ void APP_RunAprs(void)
          * popup auto-opens on the very packet being repeated) would sit
          * queued until popup_s expires or the 3 s staleness timeout kills
          * it, whichever comes first -- effectively never sent. */
+        APRS_ApplySquelch();             /* the tick can't -- keep the APRS-band
+                                          * fast squelch on so packets that
+                                          * arrive while this screen is open are
+                                          * not chopped (cheap: 1 reg read) */
         APRS_DigipeatTimeSlice();
+        APRS_MsgTimeSlice();             /* keep the "121 MHz report" retrying */
 
         /* "Light on frame": the one-shot BACKLIGHT_TurnOn() from
          * aprs_rx_arrived() (fired once, the instant the frame decodes) was
@@ -1275,26 +1554,33 @@ void APP_RunAprs(void)
          * this port's aprs.c has the identical code. */
         if (gAprsCfg.opts & APRS_OPT_BL_DECODE)
             BACKLIGHT_TurnOn();
-        /* a new packet: while the auto-close timer is running, re-arm it and
-         * pull the RX view back up (a keypress has cleared close_at, so a
-         * user who navigated away is left alone) */
+        /* a new decoded packet: only an AUTO-popup reacts to it -- keep it on
+         * the RX view and re-arm its close timer while traffic flows. A
+         * MANUAL open (F+5) stays put on whatever the user is looking at:
+         * decoding (and the report-ack match) runs in the background either
+         * way; press * for the last RX frame. */
         if (s_rx_pkts != last_pkts) {
             last_pkts = s_rx_pkts;
             if (close_at) {
                 close_at = millis10() + gAprsCfg.popup_s * 100u;
-                if (!editing) view = 1;
+                if (!editing && !s_wiz) view = 1;
             }
         }
         if (close_at && (int32_t)(millis10() - close_at) >= 0)
             break;
+
+        /* the message state advances from the tick / this loop's own
+         * APRS_MsgTimeSlice(); redraw the F_SEND row when it changes */
+        if (s_msg.state != last_msg) { last_msg = s_msg.state; dirty = true; }
 
         if (sel < first)                    first = sel;
         if (sel > first + APRS_VIS_ROWS - 1) first = sel - (APRS_VIS_ROWS - 1);
         if (view == 1 && s_rx_dirty) { s_rx_dirty = false; dirty = true; }
         if (dirty) {
             dirty = false;
-            if (view == 1) draw_rx(!popup);   /* popup: hide the "APRS RX" line */
-            else           draw_config(sel, editing, callcur, first);
+            if      (s_wiz)     draw_wizard();
+            else if (view == 1) draw_rx(!popup);   /* popup: hide the "APRS RX" line */
+            else               draw_config(sel, editing, callcur, first);
         }
 
         KEY_Code_t k = KEYBOARD_Poll();
@@ -1310,6 +1596,34 @@ void APP_RunAprs(void)
         BACKLIGHT_TurnOn();
         gKeyLockCountdown = 30;
 
+        if (s_wiz) {                          /* "Send report" wizard */
+            if (s_wiz == 1) {                 /* step 1: signal digit 0-9 */
+                if (k <= KEY_9) {
+                    s_wizsig = (uint8_t)k;
+                    if (s_wizsig == 0) { APRS_MsgStart(0, 0); s_wiz = 0; }
+                    else               { s_wiz = 2; s_klen = 0; }
+                } else if (k == KEY_EXIT) {
+                    s_wiz = 0;
+                }
+            } else {                          /* step 2: direction 0-359 */
+                if (k <= KEY_9 && s_klen < 3) {
+                    int v = 0;
+                    for (int i = 0; i < s_klen; i++) v = v * 10 + (s_kbuf[i] - '0');
+                    v = v * 10 + (int)k;
+                    if (v <= 359) s_kbuf[s_klen++] = (char)('0' + (int)k);
+                } else if (k == KEY_MENU && s_klen) {   /* A: send (need a value) */
+                    int v = 0;
+                    for (int i = 0; i < s_klen; i++) v = v * 10 + (s_kbuf[i] - '0');
+                    APRS_MsgStart(s_wizsig, (uint16_t)v);
+                    s_wiz = 0;
+                } else if (k == KEY_EXIT) {
+                    s_wiz = 0;
+                }
+            }
+            SYSTEM_DelayMs(20);
+            continue;
+        }
+
         if (view == 1) {                      /* RX view */
             if      (k == KEY_STAR) view = 0;         /* -> config */
             else if (k == KEY_EXIT) { run = false; closed_by_key = true; }  /* -> close */
@@ -1321,6 +1635,13 @@ void APP_RunAprs(void)
             case KEY_UP:   sel = (sel + F_N - 1) % F_N; break;
             case KEY_DOWN: sel = (sel + 1) % F_N;       break;
             case KEY_MENU:
+                if (sel == F_SEND) {          /* launch the report wizard */
+                    if (gAprsCfg.call[0] && strcmp(gAprsCfg.call, "NOCALL") != 0 &&
+                        gAprsCfg.msg_to[0] > ' ') {
+                        s_wiz = 1; s_wizsig = 0; s_klen = 0;
+                    }
+                    break;
+                }
                 editing = 1; callcur = 0; s_klen = 0;
                 s_kneg = (sel == F_LAT) ? (gAprsCfg.lat_e5 < 0) :
                          (sel == F_LON) ? (gAprsCfg.lon_e5 < 0) : 0;
@@ -1330,15 +1651,16 @@ void APP_RunAprs(void)
             case KEY_EXIT: run = false; closed_by_key = true; break;
             default: break;
             }
-        } else if (sel == F_CALL || sel == F_TEXT) {
-            const bool txt = (sel == F_TEXT);
-            char *buf = txt ? gAprsCfg.comment : gAprsCfg.call;
-            const int  fw = txt ? 14 : 6;
+        } else if (sel == F_CALL || sel == F_TEXT || sel == F_MSGTO) {
+            const bool txt  = (sel == F_TEXT);
+            const bool addr = (sel == F_MSGTO);
+            char       *buf = addr ? gAprsCfg.msg_to
+                                   : txt ? gAprsCfg.comment : gAprsCfg.call;
+            const int   fw  = addr ? 9 : txt ? 14 : 6;
+            const char *set = addr ? ADDRSET : txt ? TEXTSET : CALLSET;
             switch (k) {
-            case KEY_UP:   buf[callcur] = cyc_char(buf[callcur], +1,
-                                                  txt ? TEXTSET : CALLSET); break;
-            case KEY_DOWN: buf[callcur] = cyc_char(buf[callcur], -1,
-                                                  txt ? TEXTSET : CALLSET); break;
+            case KEY_UP:   buf[callcur] = cyc_char(buf[callcur], +1, set); break;
+            case KEY_DOWN: buf[callcur] = cyc_char(buf[callcur], -1, set); break;
             case KEY_STAR: callcur = (callcur + 1) % fw; break;
             case KEY_MENU: editing = 0; APRS_Save(); APRS_PushConfig(); break;
             case KEY_EXIT: editing = 0; APRS_Init();    break;   /* reload */

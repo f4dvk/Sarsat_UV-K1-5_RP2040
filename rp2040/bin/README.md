@@ -76,6 +76,30 @@ tick (test canal occupé = `g_SquelchLost`), abandon après ~3 s, puis émise
 sur le canal 170 comme la propre balise de la radio. Détail complet dans
 `docs/protocol.md` (section « Digipeater WIDEn-N »). **Non testé sur l'air.**
 
+## Mode TNC KISS (optionnel)
+
+Menu APRS de la radio (F+5), champ **KISS TNC** : `on` / `off` (défaut). En
+`on`, la radio coupe son propre tracker (auto-balise, report 121, popup RX) et
+la C-Board devient un **TNC KISS** sur son port série USB : l'hôte (Direwolf,
+APRSdroid via USB-OTG, un client APRS-IS…) parle l'AX.25, la C-Board n'est que
+le modem Bell-202.
+
+- **RX** : chaque trame AX.25 décodée (front-end + 3 slicers + réparations,
+  comme d'habitude) est encapsulée SLIP/KISS (`FEND 0x00 …data… FEND`) et
+  poussée telle quelle sur l'USB-CDC — pas de parsing APRS, pas de `0x06D3`.
+- **TX** : les trames KISS reçues de l'hôte (commande data uniquement ;
+  TXDELAY/persist/… acceptées et ignorées) sont dé-slippées et envoyées à la
+  radio en `0x06D6`, qui les émet sur le canal 170 via son chemin digipeat
+  (FCS ajouté, garde CSMA `g_SquelchLost`). File à un seul emplacement : une
+  rafale de trames rapprochées est tronquée. Half-duplex.
+- **Log** : les lignes console `[…]` sont **tues** en mode KISS (elles
+  pollueraient le flux binaire KISS sur le même port). Repasse `KISS TNC off`
+  pour retrouver la console.
+
+Codec : `../src/kiss.c`/`.h`, testé hôte `../test/host/test_kiss`. Détail dans
+`docs/protocol.md` (section « Mode TNC KISS »). **Validé sur matériel
+(2026-09-06) : RX et TX confirmés bout en bout avec `kissutil`.**
+
 La C-Board de KD8CEC utilise une **RP2040-Zero**, donc `sarsat_rp2040-pico.uf2`
 est celui à y flasher.
 
@@ -98,7 +122,7 @@ lignes sont étiquetées :
 | `[tx]` | au décodage, et keepalive 5 s | `CLEAR`, `TEXT L0 "..."`, totaux d'octets, `HELLO` (avec compteur d'ack) |
 | `[link]` | réponse radio, et battement 20 s | `link UP/DOWN`, `acks=N`, et une ligne `status:` au changement (VFO / modulation / fréquence RX / écran de la radio). Alerte seulement si la radio n'est pas en FM. Aucune restriction de fréquence — balises d'exercice 406 ou 434 MHz OK. |
 | `[meter]` | tant que le mètre est actif (`m`) | par fenêtre : `rms/peak/dc/clip/adc` + une barre, pour régler le volume radio |
-| `[aprs]` | mode APRS : sur chaque paquet + statut ~3 s | `#N SRC` puis info enroulée ; statut = `CARRIER/idle  mod=FM  hdlc=N -> pkts=N (M fix) fcs_bad=N  clip=X.X%  cdt=N env=N` (`mod` = démod courante de la radio d'après sa réponse HELLO — doit lire `FM` ou `DSC` ; `cdt` = énergie de détection de porteuse, `env` = enveloppe du discriminateur) |
+| `[aprs]` | mode APRS : sur chaque paquet + statut ~3 s | `#N SRC direct/via …` puis info enroulée ; un **message** affiche `#N SRC direct  to [ADRESSEE] : TEXTE` (utile pour voir à qui / quel `ackNN` un accusé du « report 121 » est adressé) ; statut = `CARRIER/idle  mod=FM  hdlc=N -> pkts=N (M fix) fcs_bad=N  clip=X.X%  cdt=N env=N` (`mod` = démod courante de la radio d'après sa réponse HELLO — doit lire `FM` ou `DSC` ; `cdt` = énergie de détection de porteuse, `env` = enveloppe du discriminateur) |
 | `[aprs.rx]` | **provisoire** (`CFG_APRS_RX_DIAG`) : chaque candidat de trame HDLC non trivial | `chC RES len=L ui=U src=CALL \| <hex tête>` — `RES` = `OK`/`FIX`(1 bit réparé)/`BAD`(échec FCS)/`LNG`(débordement)/`DUP` (les fragments `SHT` sont comptés mais pas affichés). `ui=1` = la structure d'octets ressemble à une trame UI AX.25 valide. Lecture : `hdlc=0` en permanence → rien de démodulé (niveau/accord/squelch) ; `BAD` avec `ui=1` + `src` lisible mais la **longueur varie fortement pour la même station** → erreurs de bits corrompant le framing HDLC. Causes habituelles, dans l'ordre : le squelch radio qui **fait des bagots** en pleine salve (chaque ouverture/fermeture masque ~10–20 ms = 12–24 bits — utiliser l'option APRS `Squelch fast`, qui met désormais le délai de fermeture au max, et/ou baisser le `SQL` radio), pente de dé-emphase FM (`Demodu → DSC` + `W/N → Wide`), décalage d'accord. Mets `CFG_APRS_RX_DIAG 0` pour l'usage normal — les écritures console coûtent du temps de décodage. |
 | `[aprs.raw]` | **provisoire** (`CFG_APRS_RX_DIAG`, commande `w`) | capture ADC brute one-shot de la prochaine salve, `begin … <hex 12 bits, 32 échantillons/ligne> … end`. Enregistre la console dans un fichier et décode-la hors-ligne avec `test/host/test_aprs_wav` pour une instrumentation bit par bit complète. |
 | `[digi]` | niveau de digipeat reçu de la radio (`0x06D0`, au changement) ; chaque trame effectivement répétée | `level: off/WIDE1/WIDE1+2/WIDE1+2+3` ; `repeating #N (L bytes)` avant l'envoi `0x06D6` à la radio. |

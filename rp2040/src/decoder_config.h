@@ -120,9 +120,13 @@
 /* ---- APRS (RP2040 decodes 144.8 MHz packets, pushes text to the radio) --- */
 #define CMD_APRS_CONFIG      0x06D0   /* radio -> RP2040: {call[6], ssid:u8,    */
                                       /*  path:u8, sym_table:u8, sym_code:u8,   */
-                                      /*  digi_level:u8}. digi_level: 0 off,    */
-                                      /*  1 repeat WIDE1-N, 2 also WIDE2-N,     */
-                                      /*  3 also WIDE3-N (cumulative).          */
+                                      /*  digi_level:u8, flags:u8}.             */
+                                      /*  digi_level: 0 off, 1 WIDE1-N, 2 also  */
+                                      /*  WIDE2-N, 3 also WIDE3-N (cumulative). */
+                                      /*  flags bit0 = KISS TNC mode (USB-CDC   */
+                                      /*  becomes a binary KISS stream; the     */
+                                      /*  RP2040 stops decoding-for-display and */
+                                      /*  digipeating -- see kiss.h).           */
 #define CMD_APRS_RXTEXT      0x06D2   /* RP2040 -> radio: {line:u8, ascii[...]} */
                                       /* line 0xFF = clear the RX view          */
 #define CMD_APRS_RXINFO      0x06D3   /* RP2040 -> radio: structured decode     */
@@ -140,7 +144,8 @@
                                       /* only when APRS_CONFIG's digi_level     */
                                       /* allowed repeating this frame (see      */
                                       /* aprs_digi.h) and it is not a recent    */
-                                      /* duplicate of an already-repeated one.  */
+                                      /* duplicate -- OR, in KISS mode, for     */
+                                      /* every frame the host asks to send.     */
 
 /* ---- GPS (NMEA in on UART1, C-Board GPS header GP4/GP5) --------------- */
 #define CFG_GPS_ENABLE        1

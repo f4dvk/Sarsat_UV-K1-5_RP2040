@@ -449,3 +449,198 @@ retente à chaque tick **et** à chaque itération de la boucle de
 
 `test_aprs_digi` : 19 cas verts. Build vert, 0 warning : `text 59672 o`.
 **Non testé sur l'air.**
+
+
+## Message « report balise 121 MHz » (2026-09-06)
+
+Demandé : un menu pour envoyer un message APRS canned à un destinataire fixe,
+chemin fixe `WIDE1-1,WIDE2-2`, pour un compte-rendu de radiogoniométrie sur
+balise de détresse 121,5 MHz. **FAIT, non testé matériel.** 100 % côté radio,
+aucun changement RP2040 (l'accusé de réception passe par le décodage message
+0x06D3 déjà en place).
+
+- **`aprs_cfg_t` +16 o** (40 -> 56, 7 pages EEPROM) : `char msg_to[10]` =
+  destinataire (adressee APRS, <= 9 car., ex. `F4DVK-7`) + `_rsv[6]` de
+  bourrage (la boucle d'écriture EEPROM de `APRS_Save()` traite la struct par
+  blocs de 8 o, donc la taille doit rester multiple de 8). `APRS_Init()`
+  assainit `msg_to` (une EEPROM d'un build antérieur y a du 0xFF / des restes
+  DTMF -> vidé si un octet n'est pas ` A-Z0-9-`).
+- **Deux nouveaux champs menu** (F+5) : `To <call>` (édition caractère par
+  caractère, jeu ` A-Z 0-9 -`) et `Send report` (montre l'état :
+  `Send report` / `Report TX n/3` / `Report ACK OK` / `Report no ack`).
+- **Assistant d'envoi** (MENU sur `Send report`) : demande `Signal ?` (1 chiffre
+  0-9) ; si > 0, demande `Direction ?` (0-359, les chiffres qui feraient
+  dépasser 359 sont refusés) ; si 0, pas de question direction et `Dir: KO`.
+  `A` = envoyer, `EXIT` = annuler. Saisie sur le même schéma clavier que
+  Lat/Lon.
+- **Trame** : `INDICATIF-SSID>APZSAR,WIDE1-1,WIDE2-2:` + info
+  `:DESTINATAIRE:Report Balise 121 MHz S: <n> Dir: <ddd|KO> <lat> <lon>{NN`.
+  Chiffres bruts (pas de zéro de tête), « 121 MHz » littéral, `{NN` = numéro
+  de message APRS (cycle 1..99). `<lat> <lon>` = position résolue
+  (`APRS_MyPosition()` : fix GPS si mode GPS, sinon lat/lon manuel) en
+  **degrés décimaux, 4 décimales, signées** (`-` = S / O), tronquées ; ajoutée
+  telle quelle, `0.0000 0.0000` si aucune position n'est réglée. Construite
+  avec `ax25_build_ui()` + émise par `APRS_TxFrame()` (partagés avec la
+  balise), garde NOCALL + CSMA (`APRS_CanTransmitNow()`). Longueur pire cas
+  ~68 o < `AX25_MAX_INFO` (80).
+- **Accusé de réception** : `APRS_MsgTimeSlice()` (appelée du tick **et de la
+  boucle `APP_RunAprs()`** -- donc les trames rentrantes sont bien traitées
+  même en restant dans le menu APRS : la boucle appelle
+  `UART_IsCommandAvailable()/UART_HandleCommand()` à chaque itération)
+  ré-émet **3 fois**, **30 s** d'intervalle (`APRS_MSG_RETRY_10MS`, sur les
+  ~90 premières s), puis **reste en écoute jusqu'à 5 min**
+  (`APRS_MSG_WAIT_10MS`) avant de conclure `Report no ack`. Un vrai accusé
+  APRS (digipeaté aller-retour, ou renvoyé par un i-gate) arrive
+  couramment après la fenêtre de ré-émission -- la 1ʳᵉ version passait en
+  `FAIL` à ~90 s et `APRS_MsgCheckAck()` ignorait alors l'accusé tardif
+  (bug remonté : « le popup `ack01` arrive après avoir quitté le menu mais
+  la ligne ne passe pas OK »). `APRS_MsgCheckAck()` accepte désormais aussi
+  un accusé reçu **après** l'abandon (`FAIL -> ACK`), et compare l'**indicatif
+  de base** de l'adressee (SSID toléré : certains clients accusent l'indicatif
+  nu) + le numéro de message. `ackNN` -> `Report ACK OK`.
+- **Numéro de message affiché** (2ᵉ remontée : « ack `dans les temps`, log
+  `[aprs] #29 F4DVK direct ack01`, mais ne passe pas OK ») : `s_msg.seq`
+  s'incrémente à **chaque** report envoyé (rebond 1..99) et les 3 ré-émissions
+  d'une session partagent ce numéro. Après plusieurs essais, la radio attend
+  p.ex. `ack03` -- un `ack01` tardif (le destinataire n'a accusé le tout
+  premier essai que maintenant) ne correspond alors plus. La ligne `Send
+  report` affiche désormais **`Rpt #NN TX n/3`** / `Rpt #NN wait ack` /
+  `Rpt #NN ACK OK` / `Rpt #NN no ack` pour que l'opérateur voie quel `ackNN`
+  attendre. `s_msg.seq` repart de 1 après un reboot radio. Rétroéclairage
+  rallumé au verdict. Sans C-Board branchée le résultat est `no ack` au bout
+  des 5 min.
+- **RP2040** `main.c` : la ligne `[aprs]` d'un **message** affiche
+  `#N SRC direct  to [ADRESSEE] : TEXTE` (au lieu du format position) pour
+  voir à quel indicatif / `ackNN` un accusé est adressé. `.uf2` régénérés.
+- **3ᵉ remontée** (« le ack n'est toujours pas pris en compte », log
+  `[aprs] #3 F4DVK direct to [F4DVK-14 ] : ack01` -- l'adressee est bien
+  `F4DVK-14`, correctement formaté). Trois durcissements de
+  `APRS_MsgCheckAck()` :
+  1. **numéro accepté `1..s_msg.seq`** (au lieu de `== s_msg.seq`) : les
+     reports retestés portent le même texte S/Dir, un client lent qui
+     ré-accuse `ack01` (ou dédoublonne nos ré-émissions) confirme quand même
+     la réception ; seul un numéro **au-delà** de notre seq est rejeté.
+  2. **indicatif comparé base à base, les deux côtés élagués** :
+     `gAprsCfg.call` peut traîner une espace en fin (éditeur char-cycle) ->
+     `strcmp("F4DVK", "F4DVK ")` échouait.
+  3. **diagnostic visible** : `APRS_MsgCheckAck()` mémorise `last_ack_no`
+     (tout `ackNN` vu pendant l'attente) ; si la ligne reste bloquée elle
+     affiche `#03 wait  got a01` / `#03 no ack got a01` -> l'opérateur voit
+     que l'accusé est bien arrivé mais n'a pas matché (et quel numéro).
+- **Menu APRS ouvert manuellement : décodage en arrière-plan, pas de popup**
+  (demandé après plusieurs allers-retours). Un paquet reçu pendant qu'on est
+  dans l'écran config (F+5) **ne bascule pas** sur la vue RX -- seul un
+  auto-popup (écran fermé -> tick l'ouvre sur une trame) le fait, avec son
+  timeout `popup_s` habituel. Le décodage et la reconnaissance de l'accusé de
+  report (`APRS_MsgCheckAck` depuis `APRS_HandleUART` dans la boucle)
+  tournent quand même : la ligne `Send report` passe à `ACK OK` sans rien
+  interrompre. `*` montre la dernière trame RX à la demande.
+- **Audio de la trame dans le menu** (remontées successives : « pas d'audio »
+  -> « léger souffle, aucun souffle FM » -> « squelch met plusieurs secondes
+  à couper le souffle » -> « le squelch s'ouvre mais pas d'audio de la
+  trame »). **Cause racine** : le `RADIO_SetupRegisters()` de KD8CEC
+  **n'appelle jamais `RADIO_SetModulation()` / `BK4819_SetAF()`** (seul
+  `APP_StartListening()` le fait) -- donc après un TX AFSK (qui met
+  `BK4819_SetAF(AF_MUTE)` dans `APRS_SendTones()`), le BF du BK4819 reste
+  **muté**, et la boucle principale qui le rétablirait est bloquée par
+  `APP_RunAprs()`. `APRS_TxFrame()` appelle maintenant
+  `RADIO_SetModulation(gRxVfo->Modulation)` après son `RADIO_SetupRegisters()`
+  -- toutes les voies d'émission laissent le BF ré-ouvert.
+  Ouverture **manuelle** de l'écran sur 144-148 MHz -> `RADIO_SelectVfos()` +
+  `RADIO_SetupRegisters(true)` + **`RADIO_SetModulation(gRxVfo->Modulation)`**
+  (dé-mute le BF) + `gEnableSpeaker` + `APRS_ApplySquelch()` (fast-squelch) +
+  `APRS_ApplyAfGain()` (réglage opérateur **conservé**). Le HP démarre
+  **coupé**, le mini-squelch de la boucle ne l'ouvre que sur une vraie
+  porteuse (silence entre paquets, pas de souffle permanent), coupure
+  différée ~2 s. `APP_StartListening()` (essayé) forçait le HP ouvert ->
+  souffle continu jusqu'à une transition squelch, retiré. `#include
+  "app/app.h"` laissé (inoffensif).
+- Host : `rp2040/test/host/test_aprs_parse` -- cas `ack` ajouté (adressee
+  9 car. + corps `ack07` extraits).
+
+**Place flash récupérée** (le message + la position avaient laissé ~24 o de
+marge) : `build.sh` désactive maintenant `ENABLE_COPY_CHAN_TO_VFO` (~110 o,
+raccourci « copier le canal courant vers le VFO ») et passe
+`MAIN_SCREEN=moto` -> **`id91`** (~340 o : même disposition icom, mais
+réutilise la police gros chiffres stock + le S-mètre horizontal stock au
+lieu des tables de police propres à `moto`).
+
+**Écran `id91` -- 2 derniers digits de la fréquence en demi-hauteur** (sur
+demande, comme le faisait `moto`) : `patch/ui_main.c.diff`, branche de rendu
+fréquence id91 -- au lieu de `UI_DisplayFrequency(e, ...)` sur les 9 chiffres,
+on tronque à `"DDD.DDD"` (gros chiffres stock 13 px, l.1-2) et on dessine les
+2 derniers (100 Hz + 10 Hz) via `UI_PrintStringSmallNormal()` calé en x sur la
+fin du bloc gros chiffres, l.2 (bas des gros chiffres). Aucune table de police
+ajoutée -- que des helpers stock déjà liés. La saisie manuelle de fréquence
+faisait déjà ça (`a + 6` en petit).
+
+**Réception coupée dans le menu APRS -- corrigé** (remonté : « dès que je suis
+dans le menu APRS, pas de réception : la LED s'allume, du souffle, mais la
+trame ne passe pas »). Deux causes :
+1. **Émission depuis la boucle du menu** (une ré-émission de report -- surtout
+   depuis que la fenêtre d'accusé est passée à 5 min -- ou un digipeat)
+   appelle `RADIO_SetupRegisters(true)` à la fin de `APRS_TxFrame()`, qui
+   remet REG_4E au squelch du canal et re-force le gain AF. Le tick qui
+   ré-applique normalement le fast-squelch / gain APRS (`APRS_TimeSlice()`)
+   est bloqué tant que `APP_RunAprs()` est ouvert -> RX dégradée pour le
+   reste de la session menu. **Fix** : `APRS_TxFrame()` ré-applique
+   `APRS_ApplySquelch()` + `APRS_ApplyAfGain()` en fin -- toutes les voies
+   d'émission laissent maintenant une RX APRS propre. En plus, la boucle de
+   `APP_RunAprs()` appelle `APRS_ApplySquelch()` à chaque itération.
+2. **Le mini-squelch de la boucle coupait l'audio entre paquets rapprochés.**
+   `SQUELCH_FOUND` -> `AUDIO_AudioPathOff()` immédiat ; les trames APRS
+   arrivent en rafale à une fraction de seconde d'écart, couper le flux vers
+   la C-Board entre elles casse sa PLL de bit / le framing HDLC. **Fix** :
+   coupure du HP **différée de ~2 s** (`msq_mute_at`) -- le flux reste
+   continu sur les petits creux, le canal n'est silencé qu'après un vrai
+   blanc.
+
+Build V1 vert, 0 warning après ces lots (message + position, place
+récupérée, fenêtre d'accusé, RX menu) : `text 61060 o` -- marge ~380 o.
+
+**Encore de la place récupérée** (sur demande) : `build.sh` désactive aussi
+`ENABLE_SCAN_RANGES` (~250 o, balayage par plage de fréquences -- le balayage
+par canal mémoire reste). Avec `COPY_CHAN_TO_VFO` déjà off :
+marge ~630 o. Après les durcissements ack + RX-menu + mise en réception FM
+du menu : `text 60992 o`.
+
+**Passe d'optimisation flash** (sur demande) : `APRS_Beacon()` et `APRS_MsgTx()`
+partageaient le montage src/dst + `ax25_build_ui()` + `APRS_TxFrame()` -->
+factorisé en `APRS_TxInfo()` ; le diagnostic `last_ack_no` (« got aNN » sur la
+ligne `Send report`) retiré maintenant que l'accusé fonctionne ; `#include
+"app/app.h"` retiré (plus de `APP_StartListening`). **`text 60820 o`** --
+marge ~620 o. Le gros consommateur restant est `APP_RunAprs()` (~4 Ko : écran
+bloquant interactif -- assistant d'envoi, saisie clavier, mini-squelch, mise
+en réception) ; le réduire davantage = couper des fonctions. `moto` reste
+dispo (`MAIN_SCREEN=moto`) si un futur build a de la place.
+
+
+## Mode TNC KISS (2026-09-06)
+
+Demandé : un mode KISS activable au menu, qui désactive les autres fonctions
+(tracker, popup), l'hôte se connectant au RP2040. **FAIT et VALIDÉ SUR
+MATÉRIEL (2026-09-06) : RX et TX confirmés bout en bout avec `kissutil`**
+(trame RX décodée proprement côté hôte, trame TX émise par la radio et reçue
+par un autre poste).
+
+Le gros du travail est côté RP2040 (`rp2040/src/kiss.c`/`.h`, testé hôte
+`rp2040/test/host/test_kiss` -- 12 cas verts) : codec SLIP/KISS + bascule de
+mode. Côté radio, c'est minuscule (~170 o) parce que **la voie d'émission
+réutilise entièrement la file digipeat**.
+
+- **`aprs_cfg_t::opts` bit 6** (`APRS_OPT_KISS`, `0x40`) -- struct inchangée.
+- **Champ menu `KISS TNC on/off`** (`F_KISS`, après `Send report`). Toggle
+  immédiat -> `APRS_PushConfig()` (pas d'attente de la sauvegarde).
+- **`APRS_PushConfig()`** : 12ᵉ octet de charge = `flags`, bit 0 = KISS
+  (`b[2]` passe de 11 à 12).
+- **`APRS_TimeSlice()`** : `if (kiss) return;` après `APRS_DigipeatTimeSlice()`
+  -- garde le fast-squelch + le gain AF + le relais des trames (le chemin
+  `0x06D6 -> APRS_Digipeat -> APRS_TxFrame`), coupe l'auto-balise, le
+  « report 121 MHz » et l'animation du symbole GPS.
+- **`aprs_rx_arrived()`** : `if (kiss) return;` en tête (ceinture-bretelles :
+  le RP2040 n'envoie pas de `0x06D3`/`0x06D2` en KISS).
+- **`draw_config()`** : en-tête `KISS TNC  host USB` quand actif.
+- Pas besoin de garder un écran ouvert : le tick suffit. Un VFO sur 144.800 FM.
+
+Build V1 vert, 0 warning : **`text 60988 o`** (+168 o, marge ~450 o). Le
+dispatch `0x06D6` était déjà câblé (digipeater), rien à changer dans `build.sh`.

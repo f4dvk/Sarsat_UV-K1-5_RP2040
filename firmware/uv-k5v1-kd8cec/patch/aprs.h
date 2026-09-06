@@ -43,7 +43,7 @@ enum { APRS_PATH_NONE, APRS_PATH_W1, APRS_PATH_W2, APRS_PATH_W1W2, APRS_PATH_N }
  * memory channel (frequency, power, FM/narrow...) to change where it beacons. */
 #define APRS_TX_CHANNEL   169u
 
-/* exactly 40 bytes (5 x EEPROM 8-byte pages) */
+/* exactly 56 bytes (7 x EEPROM 8-byte pages) */
 typedef struct {
     uint8_t  magic;        /* 0xA5 when valid                                */
     char     call[7];      /* NUL-padded, <= 6, A-Z 0-9                       */
@@ -75,8 +75,19 @@ typedef struct {
                             *            applied by the RP2040 (aprs_digi.h,
                             *            it already parses the AX.25 path);
                             *            pushed here via APRS_PushConfig()
-                            *            so it can act on it.                 */
+                            *            so it can act on it;
+                            * bit6     : KISS TNC mode -- the RP2040 becomes a
+                            *            dumb Bell-202 modem on its USB, the
+                            *            radio disables its own tracker/popup
+                            *            and just relays frames. Pushed via
+                            *            APRS_PushConfig() flags byte.         */
     char     comment[15];
+    char     msg_to[10];   /* fixed recipient of the "121 MHz beacon report"
+                            * message (APRS screen -> "Send report"): an APRS
+                            * addressee, <= 9 chars, e.g. "F4DVK-7". Empty =
+                            * feature unavailable (like the NOCALL beacon guard) */
+    uint8_t  _rsv[6];      /* pad to 56 B (7 x 8-byte EEPROM pages) so
+                            * APRS_Save()'s 8-byte write loop stays exact      */
 } aprs_cfg_t;
 
 #define APRS_OPT_BL_DECODE  0x01u
@@ -85,6 +96,7 @@ typedef struct {
 #define APRS_OPT_GPS        0x08u   /* beacon from the GPS fix, not lat/lon    */
 #define APRS_OPT_DIGI_SHIFT 4
 #define APRS_OPT_DIGI_MASK  0x30u   /* 0 off, 1 WIDE1, 2 +WIDE2, 3 +WIDE3      */
+#define APRS_OPT_KISS       0x40u   /* KISS TNC mode (RP2040 is the modem)     */
 
 extern aprs_cfg_t gAprsCfg;
 extern bool       gAprsShowRequest;   /* set on an RX packet; app.c opens F+5 */

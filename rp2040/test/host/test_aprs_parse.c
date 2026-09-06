@@ -94,6 +94,17 @@ int main(void)
         chk("  symbol / >", p.sym_table == '/' && p.sym_code == '>');
     }
 
+    /* 4b. message ACK (the "121 MHz report" reply path): a 9-char padded
+     * addressee and an "ackNN" body must both come through so the radio can
+     * match its own pending report -- see firmware .../aprs.c APRS_MsgCheckAck */
+    {
+        const char *i = ":F4DVK-9  :ack07";
+        int fl = frame(f, "APZSAR", 0, i, (int)strlen(i));
+        chk("ack parses as message", aprs_parse(f, fl - 2, &p) && p.kind == APRS_KIND_MESSAGE);
+        chk("  addressee F4DVK-9", strncmp(p.name, "F4DVK-9", 7) == 0);
+        chk("  body ack07", strcmp(p.text, "ack07") == 0);
+    }
+
     /* 5b. digipeater path (H bit), WIDE aliases stripped */
     {
         ax25_addr_t dst = { "APZSAR", 0 }, src = { "F4DVK", 9 };
