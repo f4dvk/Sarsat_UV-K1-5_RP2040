@@ -1489,3 +1489,15 @@ pas de drapeau `SMALL_BOLD` — inutile ici, la marge flash suffit. Build vert,
 message report 121 MHz (suivi de `s_msg.tries`). La surbrillance grasse est
 conservée telle quelle (le F4HWN a `gFontSmallBold`, pas de `SMALL_BOLD` à
 couper). Build vert, 0 warning : `FLASH 119308/120832 o`.
+
+### (2026-09-07) Icône « digi » sélectionnable dans le menu APRS
+
+Demandé pour les deux firmwares. Une entrée `{ '/', '#', "digi" }` ajoutée à
+la table `SYMS[]` de `patch/aprs.c` (après `dot`) : le champ **Icon** du menu
+F+5 propose maintenant `digi` = l'étoile verte APRS du symbole digipeater
+(`/#`). Le bitmap 16×16 correspondant (`ICON_BMP[10]`) et le mappage
+`icon_index('/', '#') → 10` existaient déjà (utilisés pour afficher les digis
+entendus dans le popup RX) — seul manquait le choix pour sa propre balise.
+Aucun autre changement. Build vert, 0 warning : `FLASH 119280/120832 o`
+(+12 o) ; V1 `text 61068 o` (inchangé, absorbé par l'alignement). `.bin` +
+`sha256.txt` régénérés des deux côtés. **Non testé matériel.**

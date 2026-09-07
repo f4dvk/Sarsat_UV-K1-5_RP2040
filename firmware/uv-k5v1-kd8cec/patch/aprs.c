@@ -1109,6 +1109,7 @@ static const struct { char t, c; const char *n; } SYMS[] = {
     { '/', '>', "car"    }, { '/', '-', "house"  }, { '/', 'k', "truck" },
     { '/', '[', "runner" }, { '/', 'b', "bike"   }, { '/', 'Y', "yacht" },
     { '/', '\'',"plane"  }, { '/', '_', "wx"     }, { '/', '.', "dot"   },
+    { '/', '#', "digi"   },   /* green star -- APRS digipeater */
 };
 #define NSYM (int)(sizeof(SYMS)/sizeof(SYMS[0]))
 

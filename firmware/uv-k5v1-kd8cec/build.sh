@@ -29,6 +29,14 @@ cp "$HERE/patch/aprs.h"   app/aprs.h
 cp "$HERE/patch/ax25.c"   app/ax25.c
 cp "$HERE/patch/ax25.h"   app/ax25.h
 
+#    Replace the CTCSS/DCS + frequency scanner (DISPLAY_SCANNER) with stubs:
+#    ~1.5 KB of flash for a feature unrelated to SARSAT/APRS. The normal
+#    memory-channel scan (chFrScanner.c) is a separate module, untouched.
+#    SCANNER_TimeSlice10ms() bounces straight back out, so F+4 / F+* / the
+#    R-CTCS submenu scan key just flash for one tick and return.
+cp "$HERE/patch/scanner.c"    app/scanner.c
+cp "$HERE/patch/ui_scanner.c" ui/scanner.c
+
 # 3. apply the source hooks.
 #    ceccommon.c / ui_menu.{c,h} / app_menu.c : remove KD8CEC's "Live.S" (Live
 #    Seek) feature -- the mini RSSI-spectrum overlay shown while seeking. It is
@@ -44,7 +52,7 @@ done
 
 # 4. build (native arm-none-eabi-gcc; openocd targets are not invoked by 'all')
 #    Disabled to make room for SARSAT + APRS + the "121 MHz report" message
-#    (flash is 60 KB and now ~99 % full):
+#    (flash is 60 KB; ~3.1 KB free after the CTCSS/DCS-scanner removal above):
 #      SPECTRUM (~7 KB), FMRADIO broadcast (~3 KB), VOX + FLASHLIGHT (~1 KB),
 #      AUDIO_BAR (the TX mic-level bar overlay, unused here),
 #      COPY_CHAN_TO_VFO (~110 B, the "copy current channel to VFO" shortcut),

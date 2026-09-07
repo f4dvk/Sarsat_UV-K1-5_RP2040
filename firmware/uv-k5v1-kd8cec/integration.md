@@ -100,7 +100,7 @@ L'en-tête montre l'aide des touches contextuelle.
 | Call | HAUT/BAS changent le caractère, `*` déplace le curseur (6 caractères) |
 | SSID | HAUT/BAS 0..15 |
 | Path | HAUT/BAS none / WIDE1-1 / WIDE2-1 / WIDE1-1,WIDE2-1 |
-| Icon | HAUT/BAS voiture / maison / camion / coureur / vélo / yacht / avion / wx / point |
+| Icon | HAUT/BAS voiture / maison / camion / coureur / vélo / yacht / avion / wx / point / digi (étoile verte `/#`, symbole APRS digipeater) |
 | Interval | HAUT/BAS OFF / 30 / 60 / 120 / 300 / 600 / 900 / 1800 s (auto-balise) |
 | Popup | HAUT/BAS OFF / 5 / 10 / 20 s — popup auto de la vue RX sur un paquet décodé, se referme après N s (une touche annule le minuteur) |
 | AF gain | HAUT/BAS auto / 1..78 — un curseur combiné sur le BK4819 REG_48 AF Rx Gain-2 + gain DAC (~-52 dB à 1, stock à 78) ; il balaie d'abord Gain-2 63->8 (région linéaire), puis le gain DAC 15->0. Les deux sont ré-appliqués à chaque ouverture d'écran SARSAT / APRS et ~2x/s depuis le tick (`patch/radio.c.diff` empêche `RADIO_SetModulation()` de forcer le gain DAC au max, qui était le bug « plus fort après réouverture ») pour alimenter le tap C-Board. Mets le pot de volume au max et règle ça ; aussi ajustable sur l'écran niveau SARSAT contre la barre rms. `auto` = stock. Persiste via `gEeprom.DAC_GAIN` / `.VOLUME_GAIN` pour que `RADIO_SetupRegisters` le garde — pas de patch radio.c. **`auto` capture le gain du potentiomètre à l'ouverture de l'écran** (`APRS_ResyncAfGainKnob()`, appelée avant `APRS_ApplyAfGain()` dans `APP_RunSarsat()`/`APP_RunAprs()`) — avant ce correctif la capture ne se faisait qu'une seule fois par démarrage (première ouverture d'écran), restant figée même si le potentiomètre était tourné ensuite : `auto` reclampait alors silencieusement le gain bas, perçu comme une perte de sensibilité (bug trouvé sur le portage F4HWN, corrigé en miroir ici puisque le code était identique). |
@@ -378,6 +378,11 @@ Récupération :
 
 Nouveaux fichiers :
 - `app/sarsat.c`, `app/sarsat.h`  (`patch/sarsat.{c,h}`)
+- `app/aprs.c`, `app/aprs.h`, `app/ax25.c`, `app/ax25.h`  (`patch/*`)
+
+Fichiers **remplacés** par des stubs (`cp` dans `build.sh`) :
+- `app/scanner.c` ← `patch/scanner.c`, `ui/scanner.c` ← `patch/ui_scanner.c` —
+  retrait de l'écran scanner CTCSS/DCS `DISPLAY_SCANNER` (voir section dédiée)
 
 Fichiers patchés (`patch/*.diff`, appliqués avec `patch -p0`) :
 
@@ -802,3 +807,45 @@ seulement de `s_msg.state`). Même correctif sur le K1/K5V3.
 
 Build V1 vert, 0 warning : **`text 61068 o`**, **marge ~356 o — serrée**.
 `.bin` + `sha256.txt` régénérés.
+
+### Icône « digi » dans le menu APRS (2026-09-07)
+
+Entrée `{ '/', '#', "digi" }` ajoutée à `SYMS[]` (`patch/aprs.c`) : le champ
+**Icon** du menu F+5 propose `digi` = étoile verte APRS du digipeater (`/#`).
+Le bitmap et `icon_index()` existaient déjà (rendu des digis entendus). Même
+ajout à l'identique sur le K1/K5V3. Build V1 vert, 0 warning : `text 61068 o`
+(inchangé — +8 o absorbés par l'alignement de section). `.bin` + `.packed.bin`
++ `sha256.txt` régénérés.
+
+## Retrait du scanner CTCSS/DCS (`DISPLAY_SCANNER`) (2026-09-07)
+
+Deuxième coupe de place sur le V1 (après « Live Seek ») : l'écran **scanner
+CTCSS/DCS + chasse de fréquence** de KD8CEC/egzumer — le `F+*` « trouve la
+tonalité du signal entrant », le `F+4` « trouve une fréquence active », et
+l'auto-détection dans les sous-menus `R-CTCS` / `R-DCS`. Codé en dur (aucun
+flag), sans rapport avec SARSAT/APRS. Le **scan de canaux mémoire normal**
+(`app/chFrScanner.c`, ↑/↓) est un module distinct, **intact**.
+
+Deux fichiers remplacés par des stubs (`cp` dans `build.sh`, comme
+`sarsat.c`) :
+
+| fichier | modif |
+|---|---|
+| `patch/scanner.c` → `app/scanner.c` | toutes les fonctions vidées ; les globaux `gScan*` gardés (init sûr) ; `SCANNER_IsScanning()` = `gCssBackgroundScan \|\| écran==DISPLAY_SCANNER` inchangé ; **`SCANNER_TimeSlice10ms()`** (pompée sans condition par `APP_TimeSlice10ms()`) renvoie tout de suite à `DISPLAY_MAIN` si l'écran scanner s'ouvre ou si le CSS background scan s'arme, et restaure `gEeprom.CROSS_BAND_RX_TX` depuis `gBackup_CROSS_BAND_RX_TX` que le code de lancement avait planqué |
+| `patch/ui_scanner.c` → `ui/scanner.c` | `UI_DisplayScanner()` vide |
+
+L'enum `DISPLAY_SCANNER` et **tous les sites d'appel restent tels quels**
+(les tables de dispatch `app.c` / `ui.c`, les touches `F+*` / `F+4`,
+`MENU_StartCssScan()`) — aucun `.diff` sur `main.c` / `menu.c` / `app.c`.
+Effet à l'usage : `F+*` / `F+4` / la touche scan des sous-menus font clignoter
+l'écran ~1 tick puis reviennent au VFO, cross-band préservé.
+
+Vérifié après build : `SCANNER_ProcessKeys` 12 o, `UI_DisplayScanner` 2 o,
+`SCANNER_Start`/`Stop`/`TimeSlice*` éliminés par LTO ; `APP_RunSarsat`,
+`APP_RunAprs`, `APRS_Beacon`, `CHFRSCANNER_Start/Stop` intacts.
+
+Build V1 vert, 0 warning : **`text 58276 o`** (−2792 o — LTO élague aussi les
+tables de fréquences/DCS devenues inatteignables), `bss 5720` (−16),
+**marge ~3160 o** (était ~356). `.bin` + `.packed.bin` + `sha256.txt`
+régénérés. **Non testé matériel.** K1/K5V3 non touché (marge encore
+confortable là-bas).
