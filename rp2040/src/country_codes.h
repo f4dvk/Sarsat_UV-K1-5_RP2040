@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * country_codes.h — ITU-R M.585 Maritime Identification Digits (MID) lookup
  * for COSPAS-SARSAT beacon country codes.
  *

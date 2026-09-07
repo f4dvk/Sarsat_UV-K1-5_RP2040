@@ -1,12 +1,16 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * dec406_v1g.h — public interface for the COSPAS-SARSAT 1st-generation (FGB /
  * C/S T.001) frame decoder.
  *
  * Ported for the Sarsat_UV-K1-5_RP2040 project from
  *   github.com/moricef/Decode_sarsat_406_v1g_v2g  (src/dec406_v1g.c)
- * Original decoder core: F4EHY (dec406_v7, 2020). Upstream file headers carry a
- * "CC BY-NC-SA" notice; the repository LICENSE file is MIT (Fabien Morel, 2026).
- * This is a non-commercial amateur-radio / educational port — see README.
+ * Upstream LICENSE: MIT - Copyright (c) 2026 Fabrice Morel (copy kept at
+ * vendor/decode_sarsat/LICENSE.moricef-upstream). Original decoder core:
+ * F4EHY (dec406_v7, 2020).
+ * (Older upstream revisions carried a "CC BY-NC-SA" header; upstream is now
+ * MIT throughout -- LICENSE file and source headers.)
  *
  * The enum and struct below were moved out of dec406_v1g.c so that the decode
  * result can be consumed directly (radio screen formatting, host test harness)

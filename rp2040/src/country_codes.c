@@ -1,7 +1,10 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * country_codes.c — ITU-R M.585 MID -> country name table.
  * Ported verbatim (data only) from moricef/Decode_sarsat_406_v1g_v2g
- * include/country_codes.h. See country_codes.h for the rationale.
+ * include/country_codes.h (upstream LICENSE: MIT, (c) 2026 Fabrice Morel).
+ * See country_codes.h for the rationale.
  */
 #include "country_codes.h"
 #include <stddef.h>

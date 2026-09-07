@@ -132,14 +132,15 @@ Le code original de ce projet (patches firmware, modules RP2040 propres,
 `docs/`, `tools/`, `rp2040/test/`) est sous **Apache‑2.0** — voir `LICENSE` et
 `NOTICE`.
 
-Le dépôt agrège aussi du code amont sous d'autres licences (Apache‑2.0 pour les
-deux firmwares Quansheng, BSD‑3‑Clause pour le démodulateur AFSK porté de
-`pico_tnc`, MIT/CC‑BY‑NC‑SA pour le décodeur SARSAT porté de
-`moricef/Decode_sarsat_406_v1g_v2g`). **`CREDITS.md`** en fait l'inventaire
-complet.
+Le dépôt agrège aussi du code amont sous d'autres licences : **Apache‑2.0**
+pour les deux firmwares Quansheng, **BSD‑3‑Clause** pour le démodulateur AFSK
+porté de `pico_tnc`, **MIT** pour le décodeur SARSAT porté de
+`moricef/Decode_sarsat_406_v1g_v2g` (Copyright (c) 2026 Fabrice Morel ; cœur
+`dec406_v7` de **F4EHY**, 2020 — copie du `LICENSE` amont dans
+`vendor/decode_sarsat/LICENSE.moricef-upstream`). **`CREDITS.md`** en fait
+l'inventaire complet.
 
-> ⚠️ Le décodeur SARSAT 1G (`rp2040/src/dec406*.c`) a une licence amont
-> contradictoire (MIT côté fichier `LICENSE`, *CC BY‑NC‑SA* côté en‑têtes
-> source, cœur `dec406_v7` de **F4EHY**, 2020). Tant que ce n'est pas clarifié
-> avec les auteurs amont, **traiter tout le projet comme radioamateur /
-> éducatif non commercial**.
+> Des révisions amont antérieures du décodeur SARSAT portaient une mention
+> *CC BY‑NC‑SA* dans l'en‑tête des fichiers ; les en‑têtes des fichiers portés
+> ici sont alignés sur le `LICENSE` MIT amont. En cas de réutilisation,
+> vérifie l'état courant de la licence sur le dépôt amont.

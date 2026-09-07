@@ -11,24 +11,22 @@ l'inventaire.
 | Firmware Quansheng UV‑K5 V1 (base des patches) | `firmware/uv-k5v1-kd8cec/patch/*.diff` (patches contre KD8CEC `uvk5cec-0.3q`) | [github.com/kd8cec/uv-k5-firmware-cec](https://github.com/kd8cec/uv-k5-firmware-cec) — lignée DualTachyon / egzumer | **Apache‑2.0** |
 | Firmware Quansheng UV‑K1 / UV‑K5 V3 (base des patches) | `firmware/uv-k1-k5v3/patch/*` (patches contre `uv-k1-k5v3-firmware-custom`) | egzumer / F4HWN, lignée DualTachyon | **Apache‑2.0** |
 | Démodulateur AFSK 1200 Bell‑202 + dé‑framing AX.25 | `rp2040/src/aprs_rx.c` / `aprs_rx.h` (portage DSP entier) | [github.com/JN1DFF/pico_tnc](https://github.com/JN1DFF/pico_tnc) (bell202.c / decode.c / filter.c) | **BSD‑3‑Clause** — Copyright (c) 2021 Kazuhisa Yokota, JN1DFF |
-| Décodeur de trame COSPAS‑SARSAT 1ʳᵉ génération (T.001) + BCH | `rp2040/src/dec406.c` / `dec406_v1g.c` / `dec406_v1g.h` / `country_codes.c`, `vendor/decode_sarsat/` | [github.com/moricef/Decode_sarsat_406_v1g_v2g](https://github.com/moricef/Decode_sarsat_406_v1g_v2g) — cœur `dec406_v7` de **F4EHY** (2020) | **⚠️ ambigu — voir ci‑dessous** |
+| Décodeur de trame COSPAS‑SARSAT 1ʳᵉ génération (T.001) + BCH | `rp2040/src/dec406.c` / `dec406_v1g.c` / `dec406_v1g.h` / `country_codes.c`, `vendor/decode_sarsat/` | [github.com/moricef/Decode_sarsat_406_v1g_v2g](https://github.com/moricef/Decode_sarsat_406_v1g_v2g) — cœur `dec406_v7` de **F4EHY** (2020) | **MIT** — Copyright (c) 2026 Fabrice Morel (voir ci‑dessous) |
 | SDK Raspberry Pi Pico | dépendance de build (non incluse) | [github.com/raspberrypi/pico-sdk](https://github.com/raspberrypi/pico-sdk) | BSD‑3‑Clause |
 
-### ⚠️ Licence du décodeur SARSAT
+### Licence du décodeur SARSAT
 
-Le dépôt amont `moricef/Decode_sarsat_406_v1g_v2g` est **contradictoire** :
+Le fichier `LICENSE` du dépôt amont `moricef/Decode_sarsat_406_v1g_v2g` est
+**MIT** (Copyright (c) 2026 Fabrice Morel) — copie conservée ici dans
+`vendor/decode_sarsat/LICENSE.moricef-upstream`. C'est cette licence qui régit
+le portage présent dans ce dépôt.
 
-- le fichier `LICENSE` du dépôt est **MIT** (Copyright (c) 2026 Fabien Morel) —
-  copie conservée ici dans `vendor/decode_sarsat/LICENSE.moricef-upstream` ;
-- les en‑têtes des fichiers source (`dec406_v1g.c`, `dec406.c`) portent une
-  mention **« Licence Creative Commons CC BY‑NC‑SA »**, cœur de code attribué à
-  **F4EHY** (2020).
-
-CC BY‑NC‑SA est une licence **non commerciale** et **non recommandée pour du
-logiciel**. Tant que cette contradiction n'est pas levée avec les auteurs
-amont (moricef / F4EHY), **ce portage doit être considéré comme réservé à un
-usage amateur / éducatif non commercial**, et il ne peut pas être qualifié
-d'« open source » au sens de l'OSI.
+Des révisions amont **antérieures** portaient dans l'en‑tête de leurs fichiers
+source une mention *« Licence Creative Commons CC BY‑NC‑SA »* ; l'amont est
+désormais **MIT partout** (fichier `LICENSE` + en‑têtes de source). Les
+en‑têtes des fichiers portés ici sont alignés là‑dessus, l'attribution
+F4EHY (2020) / Fabrice Morel (2026) étant conservée. En cas de réutilisation,
+vérifie l'état courant de la licence sur le dépôt amont.
 
 ## Code original de ce projet
 
