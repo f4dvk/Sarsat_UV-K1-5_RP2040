@@ -29,8 +29,9 @@ KD8CEC pour l'UV-K5.
 
 - **Matériel :** la [C-Board (DSP-Board) pour UV-K5](https://www.hamskey.com/2024/03/c-board-for-uv-k5.html)
   de KD8CEC, *Basic Version* — une **RP2040-Zero**, l'audio HP à travers un
-  condo série de `0,1 µF` et un écrêteur à deux `1N4148` vers **GP26** (ADC0),
-  série sur **GP0/GP1** (UART0), carte alimentée par le rail ~3,3 V de la radio.
+  condo série (`1 µF` après modif, `0,1 µF` d'origine) + un pont `2× 22 kΩ` et un
+  écrêteur à deux `1N4148` vers **GP26** (ADC0), série sur **GP0/GP1** (UART0),
+  carte alimentée par le rail ~3,3 V de la radio.
   Voir [rp2040/src/decoder_config.h](rp2040/src/decoder_config.h) pour le
   brochage complet et les mises en garde électriques de KD8CEC (audio HP ≈ 8 V
   vs ADC 3,3 V — garder le volume bas ; correction possible d'un brown-out à
@@ -65,13 +66,28 @@ de trame 2G + BCH(250,202) portable sur MCU est conservé non compilé sous
 
 ### Notes de terrain
 
-- **Le pont de polarisation ADC est obligatoire.** La C-Board Basic Version n'en
-  a pas ; ajoute un pont (2× ~100-220 kΩ, 3V3 / GND) sur GP26 pour que l'ADC au
-  repos lise à mi-échelle (`[lvl] dc` ~ milieu, pas ~0). Sans lui l'audio est
-  écrêté demi-onde et rien ne décode.
-- Règle le volume radio pour qu'une fenêtre de balise logge `[burst] rms` bien
-  sous `CFG_DECODE_MAX_RMS` (4000) tandis que le souffle FM inter-salves reste
-  au-dessus (`[noise]`). Ajuste `CFG_DECODE_MAX_RMS` sur l'écart entre les deux.
+- **Deux modifs obligatoires sur la C-Board Basic Version** (elle ne les a pas) :
+  - **pont de polarisation 2× 22 kΩ** (3V3 → nœud ADC, nœud → GND) sur GP26,
+    pour que l'ADC au repos lise à mi-échelle (`[lvl] dc` ~ milieu, pas ~0) —
+    sans lui l'audio est écrêté demi-onde et rien ne décode. **Pas** 100 kΩ :
+    l'impédance d'entrée dynamique de l'ADC RP2040 (~100 kΩ) fausserait la mesure.
+  - **condensateur de liaison 1 µF** au lieu de 0,1 µF : avec R1‖R2 = 11 kΩ, un
+    0,1 µF fait un passe-haut à ~145 Hz qui rogne le bas du spectre Manchester
+    400 bps ; 1 µF → coupure ~14 Hz.
+
+  Détails, tableau des valeurs et choix du condensateur dans
+  [docs/hardware.md](docs/hardware.md).
+- **Raccourcis clavier** (ouverture manuelle des écrans, les deux firmwares) :
+  **F+8** → écran **SARSAT**, **F+5** → écran **APRS** (menu de config + vue RX).
+  L'écran SARSAT s'ouvre aussi tout seul à l'arrivée d'une trame décodée.
+- **Réglage du niveau audio** (une fois, mémorisé) : mets le **potentiomètre de
+  volume de la radio au maximum** et laisse-le là ; accorde la radio sur une
+  **fréquence UHF** où l'on entend le souffle FM (squelch ouvert) ; ouvre l'écran
+  **SARSAT** (**F+8**), appuie sur **`5`** pour passer en vue niveau, puis ajuste
+  avec **HAUT / BAS** jusqu'à ce que le **souffle** amène la barre à mi-échelle
+  (« reglage correct »). Une salve de balise, plus faible, décode alors sans y
+  retoucher. Le curseur pilote le gain AF de la C-Board côté BK4819 (sauvé en
+  EEPROM), indépendamment du potentiomètre.
 - Pourquoi l'APRS marche sur la même carte avec le firmware de KD8CEC mais qu'ici
   la correction de polarisation a été nécessaire : l'AFSK ne demande que
   ton/timing et ignore l'écrêtage ; le slicer par corrélation d'amplitude
@@ -119,9 +135,9 @@ Ce que les tests hôte prouvent actuellement :
   de la balise test ELT-DT standard) au **même** hex ID / pays / position
   composite que le `dec406_audio` amont, avec parité slicer fixe==double.
 
-Il reste besoin de matériel RP2040 : le front-end ADC (gain / seuils de
-détection de salve dans `decoder_config.h`, calés pour l'écrêteur AC de la
-C-Board sans résistance de polarisation) et le lien série vers la radio. Le
+Il reste besoin de matériel RP2040 : le front-end ADC (pont de polarisation
+2× 22 kΩ à ajouter + gain / seuils de détection de salve dans
+`decoder_config.h`) et le lien série vers la radio. Le
 générateur bi-phase-L synthétique de `test_slicer.c` n'est qu'un substitut
 approximatif pour le stress test fixe-vs-double — les vrais enregistrements sont
 la référence.

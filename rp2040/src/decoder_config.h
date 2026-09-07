@@ -5,14 +5,16 @@
  *   www.hamskey.com/2024/03/c-board-for-uv-k5.html
  *   - board            : RP2040-Zero (or a single-sided clone)
  *   - RX audio in       : radio speaker output (FM discriminator, flat AF) ->
- *                         0.1uF series cap -> node clamped by two 1N4148
- *                         (to GND and to 3V3) -> GP26
+ *                         1uF series cap (0.1uF stock -- swap it) -> node
+ *                         clamped by two 1N4148 (to GND and to 3V3) -> GP26,
+ *                         plus a 2x 22k bias divider (3V3 / GND) on the node
  *   - serial to radio   : GP0 = UART0 TX -> radio serial RX (2.5mm jack)
  *                         GP1 = UART0 RX <- radio serial TX (3.5mm jack ring)
  *   - power             : radio's ~3.3 V rail feeds the RP2040-Zero 3V3 pad
  *                         directly (mic-jack VCC). No on-board regulator used.
- *   - no bias resistor  : the AC-coupled input floats; DC is removed in
- *                         software (window_to_audio()).
+ *   - bias divider      : 2x 22k (3V3 -> GP26 node -> GND) MUST be added to the
+ *                         Basic Version; without it the AC-coupled input floats
+ *                         and the audio is half-wave clamped. See docs/hardware.md.
  *
  * Verified by static analysis of KD8CEC's stock C-Board image
  * (cboard_v032.uf2, "C-BOARD FOR UV-K5/CEC4 V0.32"):
@@ -39,14 +41,16 @@
 #ifndef SARSAT_DECODER_CONFIG_H
 #define SARSAT_DECODER_CONFIG_H
 
-/* ---- audio input (C-Board: SPK -> 0.1uF -> 1N4148 clamp -> GP26) ------- */
+/* ---- audio input (C-Board mod: SPK -> 1uF -> 1N4148 clamp + 2x22k bias -> GP26) */
 /*
  * IMPORTANT: the C-Board "Basic Version" has NO bias resistor on this node, so
  * the 0.1uF-coupled input floats near a rail and the audio gets half-wave
  * clamped by the 1N4148 to GND. Symptom in the log: idle ADC ~10-40 (not
  * ~2048) and every burst reads adc[0..4095]. Add a divider from 3V3 and GND to
- * the GP26 node (2x 100k-220k, or 1M to VREF/2) so it sits at mid-scale --
- * same fix as benshi-esp32-sim's Rb1/Rb2. Nothing downstream works without it.
+ * the GP26 node -- 2x 22k (NOT 100k: the RP2040 ADC's ~100k dynamic input
+ * impedance would skew the reading) -- so it sits at mid-scale (~1.65 V). Also
+ * bump the coupling cap 0.1uF -> 1uF (R1||R2 = 11k -> ~14 Hz high-pass, keeps
+ * the 400 bps Manchester low end). See docs/hardware.md. Nothing works without it.
  */
 #define CFG_ADC_GPIO          26      /* ADC0 = the audio node                  */
 #define CFG_ADC_CHANNEL       0

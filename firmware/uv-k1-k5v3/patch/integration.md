@@ -71,8 +71,13 @@ F4HWN assigne les fonctions custom à des touches via le menu (`F1Shrt` /
 `App/ui/menu.c` : `{"SARSAT", ACTION_OPT_SARSAT}` dans
 `gSubMenu_SIDEFUNCTIONS`). Sur la radio : **MENU → F1Shrt (ou F1Long/F2Shrt/
 F2Long) → choisir SARSAT**, puis la touche assignée ouvre l'écran à tout
-moment (comme F+8 sur le V1). L'ouverture **automatique** sur trame décodée
-(`gSarsatShowRequest`, hook `APP_TimeSlice10ms`) fonctionne aussi, indépendamment.
+moment. L'ouverture **automatique** sur trame décodée (`gSarsatShowRequest`,
+hook `APP_TimeSlice10ms`) fonctionne aussi, indépendamment.
+
+> **État final (voir la section « oui, F+8 sur UV-K1 » plus bas) :** comme
+> sur le V1, l'écran SARSAT est maintenant sur **F+8** et l'écran APRS sur
+> **F+5**, en dur (`case KEY_8` / `case KEY_5` de `App/app/main.c`).
+> L'assignation par le menu reste possible en plus.
 
 **Démodulation « DSC » (discriminateur à plat)** : déjà présente en amont sous
 le nom **`MODULATION_RAW`** (`App/driver/bk4829.c:BK4819_EnterRaw()`, câblée

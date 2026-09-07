@@ -136,8 +136,17 @@ LM1117 depuis la batterie 8,4 V (voir historique git de ce fichier).
 1. Sans signal, la console USB du RP2040 doit logger `[lvl] dc` **proche de
    2048** (mi-échelle 12 bits). Si `dc` ~10-40 : le pont R1/R2 n'est pas
    connecté ou une valeur est fausse.
-2. Volume radio : commande `m` (mètre), vise le **souffle** à `rms ~2000-3500`,
-   `clip 0 %`. Une salve de balise lit alors plus bas et décode.
+2. **Niveau audio** — se règle une fois depuis la radio, pas au potentiomètre :
+   - potentiomètre de volume **au maximum**, et on n'y touche plus ;
+   - radio accordée sur une **fréquence UHF** avec le souffle FM audible
+     (squelch ouvert) ;
+   - écran **SARSAT** (**F+8**) → touche **`5`** (vue niveau) → **HAUT / BAS**
+     jusqu'à ce que le **souffle** place la barre à mi-échelle. Le curseur agit
+     sur le gain AF C-Board (BK4819 REG_48 + gain DAC), sauvé en EEPROM,
+     indépendamment du potentiomètre.
+   - Contre-vérification côté RP2040 : commande `m` (mètre) → souffle
+     `rms ~2000-3500`, `clip 0 %`. Une salve de balise lit alors plus bas et
+     décode.
 3. GPS : sur `/dev/ttyACM0`, `[aprs] … mod=…` puis, une fois le fix acquis,
    `0x06D5` envoyé toutes les ~3 s et le symbole GPS de la barre haute passe de
    clignotant à fixe.
