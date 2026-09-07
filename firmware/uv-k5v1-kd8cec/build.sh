@@ -48,7 +48,10 @@ done
 #      SPECTRUM (~7 KB), FMRADIO broadcast (~3 KB), VOX + FLASHLIGHT (~1 KB),
 #      AUDIO_BAR (the TX mic-level bar overlay, unused here),
 #      COPY_CHAN_TO_VFO (~110 B, the "copy current channel to VFO" shortcut),
-#      SCAN_RANGES (~220 B, scan-by-frequency-range -- scan-by-channel stays).
+#      SCAN_RANGES (~220 B, scan-by-frequency-range -- scan-by-channel stays),
+#      SMALL_BOLD (~576 B, the bold variant of the 6 px font -- headers just
+#        render in normal weight; UI_PrintStringSmallBold() falls back cleanly).
+#        Freed for the ADRASEC coordinate screen + received-message auto-ACK.
 #    MAIN_SCREEN = stock | moto | id91  (redesigned main VFO screen; "stock"
 #    keeps the original). "id91" reuses the stock big-digit font + stock
 #    horizontal S-meter instead of moto's own font tables -> ~340 B lighter
@@ -65,6 +68,7 @@ make -j"$(nproc)" \
     ENABLE_AUDIO_BAR=0 \
     ENABLE_COPY_CHAN_TO_VFO=0 \
     ENABLE_SCAN_RANGES=0 \
+    ENABLE_SMALL_BOLD=0 \
     MAIN_SCREEN=id91 \
     VERSION_STRING=CEC3qSAR \
     AUTHOR_STRING=KD8CEC_SARSAT

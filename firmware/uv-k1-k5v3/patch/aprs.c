@@ -79,6 +79,12 @@ static char     s_rx[4][APRS_RX_CHARS + 1];  /* raw-text fallback (0x06D2)   */
 static uint8_t  s_rxn;
 static uint16_t s_rx_pkts;              /* total packets shown by the RP2040 */
 static bool     s_rx_dirty;             /* a new packet arrived             */
+static bool     s_adrasec;              /* a "REPORT ADRASEC" position request
+                                        * arrived -- show a sticky coordinate
+                                        * screen, EXIT only, no timeout/popup */
+static struct { int32_t lat, lon; uint16_t dist_hm, brg; uint8_t hasd;
+                char src[10]; } s_adr;  /* its own copy: a later ordinary frame
+                                        * overwrites s_rxi but not this screen  */
 
 /* structured decode from the RP2040 (0x06D3). s_rxi.kind mirrors the RP2040's
  * aprs_parse.h enum. */
@@ -1030,6 +1036,16 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
         s_rxn = 0;                                 /* the text fallback is stale */
         if (s_rxi.kind == APRS_RX_KIND_MESSAGE)
             APRS_MsgCheckAck(s_rxi.name, s_rxi.text);
+        if (s_rxi.flags & 0x10) {                  /* ADRASEC position request */
+            s_adr.lat     = s_rxi.lat;
+            s_adr.lon     = s_rxi.lon;
+            s_adr.dist_hm = s_rxi.dist_hm;
+            s_adr.brg     = s_rxi.bearing;
+            s_adr.hasd    = (s_rxi.flags & 8) ? 1 : 0;
+            memcpy(s_adr.src, s_rxi.src, sizeof s_adr.src);
+            s_adrasec        = true;
+            gAprsShowRequest = true;               /* open regardless of popup_s */
+        }
         aprs_rx_arrived();
         return;
     }
@@ -1427,6 +1443,49 @@ static void draw_icon(uint8_t idx, uint8_t col, uint8_t row)
 
 static bool APRS_HasRx(void) { return s_rxi.valid || s_rxn > 0; }
 
+/* int32 1e-5 deg -> "D MM SS.s H" (degrees / minutes / seconds) */
+static void adr_dms(char *o, int32_t e5, char pos, char neg)
+{
+    long v   = e5 < 0 ? -(long)e5 : (long)e5;
+    int  d   = (int)(v / 100000);
+    long r   = v % 100000;
+    long mx  = r * 60;                         /* arcmin * 1e5 */
+    int  m   = (int)(mx / 100000);
+    long sx  = (mx % 100000) * 60;             /* arcsec * 1e5 */
+    int  s10 = (int)(sx / 10000);              /* arcsec * 10  */
+    sprintf(o, "%d %02d %02d.%d %c", d, m, s10 / 10, s10 % 10, e5 < 0 ? neg : pos);
+}
+
+static void adr_dec(char *o, int32_t e5)
+{
+    long v = e5 < 0 ? -(long)e5 : (long)e5;
+    sprintf(o, "%s%ld.%05ld", e5 < 0 ? "-" : "", v / 100000, v % 100000);
+}
+
+/* sticky coordinate screen for a "REPORT ADRASEC" message from PCT_Report:
+ * decimal + degrees/minutes/seconds of the requested point. EXIT to close. */
+static void draw_adrasec(void)
+{
+    char s[24];
+    UI_DisplayClear();
+
+    if (s_adr.hasd)                            /* distance/bearing to the point */
+        sprintf(s, "ADRASEC %u.%ukm %03u",
+                s_adr.dist_hm / 10, s_adr.dist_hm % 10, s_adr.brg);
+    else
+        sprintf(s, "ADRASEC de %.9s", s_adr.src);
+    s[18] = 0;
+    UI_PrintStringSmallBold(s, 2, 0, 0);
+
+    /* row 1 blank: a gap under the header. rows 2/3 = lat, row 4 blank,
+     * rows 5/6 = lon. (EXIT closes -- the screen is sticky.) */
+    adr_dms(s, s_adr.lat, 'N', 'S'); UI_PrintStringSmallNormal(s, 2, 0, 2);
+    adr_dec(s, s_adr.lat);           UI_PrintStringSmallNormal(s, 2, 0, 3);
+    adr_dms(s, s_adr.lon, 'E', 'W'); UI_PrintStringSmallNormal(s, 2, 0, 5);
+    adr_dec(s, s_adr.lon);           UI_PrintStringSmallNormal(s, 2, 0, 6);
+    ST7565_BlitFullScreen();
+}
+
 /* Received-packet view. The RP2040 C-Board demodulates 144.8 MHz APRS and
  * pushes either a structured decode (0x06D3 -> s_rxi) or, when it cannot parse
  * the info field, raw wrapped text (0x06D2 -> s_rx[]).
@@ -1609,16 +1668,19 @@ void APP_RunAprs(void)
 
     /* auto-popup (from the tick, on a decoded packet) opens on the RX view;
      * a manual key always opens on the config menu (press * for the last RX). */
-    int sel = 0, editing = 0, callcur = 0, first = 0, view = popup ? 1 : 0;
+    int sel = 0, editing = 0, callcur = 0, first = 0,
+        view = s_adrasec ? 2 : (popup ? 1 : 0);
     bool armed = false, run = true, closed_by_key = false;
     KEY_Code_t prev = KEY_INVALID;
     bool dirty = true;
     uint16_t last_pkts = s_rx_pkts;
-    uint8_t  last_msg  = s_msg.state;
+    uint8_t  last_msg   = s_msg.state;
+    uint8_t  last_tries = s_msg.tries;   /* redraw the "Send report" row on each (re)send */
     s_wiz = 0;
 
-    /* auto-popups close themselves after gAprsCfg.popup_s (unless a key is hit) */
-    const bool timed = (popup && gAprsCfg.popup_s);
+    /* auto-popups close themselves after gAprsCfg.popup_s (unless a key is hit);
+     * the ADRASEC screen never auto-closes -- EXIT only */
+    const bool timed = (popup && gAprsCfg.popup_s && !s_adrasec);
     uint32_t close_at = timed ? millis10() + gAprsCfg.popup_s * 100u : 0;
     uint32_t msq_mute_at = 0;    /* deferred speaker mute (see mini squelch) */
 
@@ -1702,14 +1764,20 @@ void APP_RunAprs(void)
 
         /* the message state advances from the tick / this loop's own
          * APRS_MsgTimeSlice(); redraw the F_SEND row when it changes */
-        if (s_msg.state != last_msg) { last_msg = s_msg.state; dirty = true; }
+        if (s_msg.state != last_msg || s_msg.tries != last_tries) {
+            last_msg = s_msg.state; last_tries = s_msg.tries; dirty = true;
+        }
+
+        /* an ADRASEC request that arrived while this screen was already open */
+        if (s_adrasec && view != 2) { view = 2; close_at = 0; dirty = true; }
 
         if (sel < first)                    first = sel;
         if (sel > first + APRS_VIS_ROWS - 1) first = sel - (APRS_VIS_ROWS - 1);
-        if (view == 1 && s_rx_dirty) { s_rx_dirty = false; dirty = true; }
+        if ((view == 1 || view == 2) && s_rx_dirty) { s_rx_dirty = false; dirty = true; }
         if (dirty) {
             dirty = false;
             if      (s_wiz)     draw_wizard();
+            else if (view == 2) draw_adrasec();
             else if (view == 1) draw_rx(!popup);   /* popup: hide the "APRS RX" line */
             else               draw_config(sel, editing, callcur, first);
         }
@@ -1753,6 +1821,11 @@ void APP_RunAprs(void)
                 }
             }
             APRS_TickDelay(20);
+            continue;
+        }
+
+        if (view == 2) {                      /* ADRASEC: sticky, EXIT only */
+            if (k == KEY_EXIT) { run = false; closed_by_key = true; }
             continue;
         }
 
@@ -1829,6 +1902,7 @@ void APP_RunAprs(void)
      * refresh the frozen backlight / key-lock timers, and switch back to MAIN
      * now rather than "on request". */
     gAprsShowRequest      = false;
+    s_adrasec             = false;   /* consumed; a fresh request re-opens it */
     /* cooldown before the next auto-popup: 5 s if the user pressed EXIT (they
      * dismissed it), ~0.3 s on a plain timed close so a busy channel's next
      * frame still pops. */

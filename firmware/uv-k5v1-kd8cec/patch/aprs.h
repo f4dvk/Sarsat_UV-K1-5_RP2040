@@ -118,5 +118,12 @@ void APRS_MyPosition(int32_t *lat_e5, int32_t *lon_e5);  /* GPS fix or manual */
 bool APRS_GpsFixValid(void);          /* a fresh GPS fix is available          */
 uint8_t APRS_GpsState(void);          /* 0 no module / 1 searching / 2 locked  */
 
+/* inverse-video helpers (replace the bold font ENABLE_SMALL_BOLD=0 removed).
+ * Row 0..6 only. HiliteText: draw the string at x=1 first, this inverts x=0..
+ * text+1 (~1 px margin each side); InvertBar: full-width title bar. */
+void APRS_HiliteText(int row, unsigned textx, const char *s);  /* tight, gap below */
+void APRS_HiliteBar(int row, unsigned textx, const char *s);   /* + dark pad below */
+void APRS_InvertBar(int row);                                  /* full width */
+
 #endif /* ENABLE_APRS */
 #endif /* APP_APRS_H */

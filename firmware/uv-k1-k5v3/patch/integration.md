@@ -1472,3 +1472,20 @@ lente) / période numérique. Build K1/K5V3 vert, 0 warning :
 (`OUTPUT_POWER_LOW1`). Jamais par-dessus un canal utilisé. Build K1/K5V3 vert,
 0 warning : `FLASH 118664/120832 o (98,21 %)` (+88). `.bin` + `sha256.txt`
 régénérés. Non testé matériel.
+
+## Écran ADRASEC + accusé automatique des messages (2026-09-07)
+
+Identique au port V1 (voir `firmware/uv-k5v1-kd8cec/integration.md` et
+`docs/protocol.md`) : l'accusé automatique est 100 % RP2040 (0 o ici), l'écran
+ADRASEC collant est ajouté à `patch/aprs.c` (`s_adrasec` / `s_adr` /
+`draw_adrasec()` / `view == 2` dans `APP_RunAprs()`, EXIT seul). Le F4HWN n'a
+pas de drapeau `SMALL_BOLD` — inutile ici, la marge flash suffit. Build vert,
+0 warning : **`FLASH 119280/120832 o (98,72 %)`**, RAM inchangée. `.bin` +
+`sha256.txt` régénérés. **Non testé matériel.**
+
+### (2026-09-07) Rafraîchissement du compteur report
+
+`APP_RunAprs()` redessine la ligne « Send report » à chaque (ré)émission du
+message report 121 MHz (suivi de `s_msg.tries`). La surbrillance grasse est
+conservée telle quelle (le F4HWN a `gFontSmallBold`, pas de `SMALL_BOLD` à
+couper). Build vert, 0 warning : `FLASH 119308/120832 o`.

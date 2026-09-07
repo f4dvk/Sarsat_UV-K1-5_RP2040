@@ -60,7 +60,10 @@ est fourni pour une radio qui veut disposer les champs à sa façon.
 
 ```
 u8   kind             0 autre, 1 position, 2 objet, 3 statut, 4 message, 5 télémétrie
-u8   flags            bit0 has_pos, bit1 has_course/speed, bit2 has_alt, bit3 has_range
+u8   flags            bit0 has_pos, bit1 has_course/speed, bit2 has_alt, bit3 has_range,
+                      bit4 ADRASEC (message "ADRASEC // Lat: .. // Lon: .." de
+                      PCT_Report : lat_e5/lon_e5 = point demandé ; la radio ouvre
+                      un écran collant coordonnées DMS + décimal, EXIT pour sortir)
 char sym_table        '/', '\' ou caractère overlay
 char sym_code         code de symbole APRS
 i32  lat_e5           latitude  × 1e5  (+ = N)
@@ -149,6 +152,16 @@ relais revenir via un autre digipeater avant d'avoir épuisé tous les sauts.
 Aucune passerelle spécifique (aucune action sur un indicatif explicite en
 tête de chemin) : seuls les alias `WIDEn` génériques déclenchent une
 répétition, conformément au périmètre demandé.
+
+### Accusé automatique des messages reçus
+
+Tout message APRS **adressé à notre indicatif** (indicatif de base comparé,
+SSID toléré) et **portant un numéro `{NN`** est accusé automatiquement — c'est
+le comportement APRS standard. Fait **côté RP2040** : il construit
+`::<expéditeur>:ackNN` (`aprs_build_ui()`, chemin `WIDE1-1`) et le remet à la
+radio par `0x06D6 APRS_DIGI` (la radio ajoute le FCS, CSMA, émet sur le canal
+170). Rien à faire côté firmware radio. Inactif en mode KISS (l'hôte gère
+l'APRS).
 
 ### Message « report balise 121 MHz »
 

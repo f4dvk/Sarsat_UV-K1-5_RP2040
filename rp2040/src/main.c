@@ -512,6 +512,46 @@ static void aprs_try_digipeat(const uint8_t *ax25, int len)
     link_poll();
 }
 
+/* base callsign (before '-' / space), case-insensitive, up to 6 chars */
+static bool call_base_eq(const char *a, const char *b)
+{
+    int i = 0;
+    for (; i < 6; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca == '-' || ca == ' ' || ca == 0) ca = 0;
+        if (cb == '-' || cb == ' ' || cb == 0) cb = 0;
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
+        if (cb >= 'a' && cb <= 'z') cb -= 32;
+        if (ca != cb) return false;
+        if (ca == 0) return true;
+    }
+    return true;
+}
+
+/* Send a standard APRS ACK for a message addressed to us (":<sender>:ackNN"),
+ * via the radio's TX queue (CMD_APRS_DIGI: it appends the FCS + does CSMA). */
+static void aprs_auto_ack(const char *sender, const char *num)
+{
+    char info[32];
+    int k = 0, sl = 0;
+    while (sender[sl]) sl++;
+    info[k++] = ':';
+    for (int i = 0; i < 9; i++)                       /* addressee padded to 9 */
+        info[k++] = (i < sl) ? sender[i] : ' ';
+    info[k++] = ':';
+    info[k++] = 'a'; info[k++] = 'c'; info[k++] = 'k';
+    for (int i = 0; num[i] && k < (int)sizeof info - 1; i++) info[k++] = num[i];
+    info[k] = 0;
+
+    uint8_t f[64];
+    int fl = aprs_build_ui(f, sizeof f, g_aprs_my_call, g_aprs_my_ssid, info);
+    if (fl <= 0)
+        return;
+    LOG("[aprs]   auto-ack -> %s  ack%s\n", sender, num);
+    radio_send(CMD_APRS_DIGI, f, (size_t)fl);
+    link_poll();
+}
+
 /* Called from aprs_rx on a full FCS-valid AX.25 frame. Parse the APRS info and
  * push a structured 0x06D3 to the radio (falls back to 0x06D2 raw text if the
  * info field wasn't understood). */
@@ -534,12 +574,17 @@ static void aprs_on_packet(const uint8_t *ax25, int len, void *user)
     aprs_info_t ai;
     bool parsed = aprs_parse(ax25, len, &ai);
 
-    if (parsed && (ai.has_pos || ai.kind == APRS_KIND_STATUS ||
+    /* auto-ACK a message addressed to us (any message with a "{NN" number) */
+    if (parsed && ai.kind == APRS_KIND_MESSAGE && ai.msg_no[0] &&
+        call_base_eq(ai.name, g_aprs_my_call))
+        aprs_auto_ack(ai.src, ai.msg_no);
+
+    if (parsed && (ai.has_pos || ai.is_adrasec || ai.kind == APRS_KIND_STATUS ||
                    ai.kind == APRS_KIND_MESSAGE)) {
         uint32_t dist_m = 0; uint16_t brg = 0; bool has_dist = false;
         int32_t my_lat, my_lon;
         my_position(&my_lat, &my_lon);
-        if (ai.has_pos && (my_lat || my_lon))
+        if ((ai.has_pos || ai.is_adrasec) && (my_lat || my_lon))
             has_dist = aprs_geo(my_lat, my_lon, ai.lat_e5, ai.lon_e5, &dist_m, &brg);
 
         char via[28];
@@ -549,7 +594,8 @@ static void aprs_on_packet(const uint8_t *ax25, int len, void *user)
         int n = 0;
         p[n++] = ai.kind;
         p[n++] = (uint8_t)((ai.has_pos ? 1 : 0) | (ai.has_course ? 2 : 0) |
-                           (ai.has_alt ? 4 : 0) | (has_dist ? 8 : 0));
+                           (ai.has_alt ? 4 : 0) | (has_dist ? 8 : 0) |
+                           (ai.is_adrasec ? 16 : 0));
         p[n++] = (uint8_t)ai.sym_table;
         p[n++] = (uint8_t)ai.sym_code;
         aprs_put_i32(p + n, ai.lat_e5); n += 4;

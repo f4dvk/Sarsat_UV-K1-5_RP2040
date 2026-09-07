@@ -737,3 +737,68 @@ s'ils sont vierges — `SAREX` 434.200 MHz DSC / `SARSAT` 406.028 MHz DSC, tous
 deux large + puissance basse. Jamais écrit par-dessus un canal déjà utilisé.
 Build V1 vert, 0 warning : `text 60732 o` (+100). `.bin` + `sha256.txt`
 régénérés. Non testé matériel.
+
+## Écran ADRASEC + accusé automatique des messages (2026-09-07)
+
+Deux évolutions, décrites côté protocole dans `docs/protocol.md`.
+
+**Accusé automatique — 100 % RP2040, 0 o sur la radio.** `aprs_parse.c` extrait
+le numéro `{NN` d'un message (depuis l'info brute, avant la troncature de
+`text[64]`). `main.c` : si le message est adressé à notre indicatif de base et
+porte un `{NN`, `aprs_auto_ack()` construit `::<expéditeur>:ackNN`
+(`aprs_build_ui()` dans `aprs_digi.c`, chemin `WIDE1-1`) et le remet à la radio
+par `0x06D6` — la radio ajoute le FCS + CSMA + émet, exactement comme un
+digipeat. Inactif en KISS.
+
+**Écran ADRASEC — `patch/aprs.c`.** Sur un message dont le texte commence par
+`ADRASEC`, le RP2040 parse `Lat:` / `Lon:` (décimaux signés) dans `lat_e5` /
+`lon_e5` et pose le **bit 4** du flag `0x06D3`. La radio : `s_adrasec` +
+`gAprsShowRequest` (ouvre quel que soit `popup_s`), une copie locale `s_adr`
+des coordonnées (une trame ordinaire ultérieure écrase `s_rxi` mais pas
+l'écran), un `view == 2` **collant** dans `APP_RunAprs()` — pas de `close_at`,
+insensible aux nouvelles trames, **EXIT seul** ferme (`s_adrasec` remis à 0 à
+la sortie). `draw_adrasec()` : en-tête `ADRASEC <dist> <azimut>` puis
+latitude/longitude en **degrés-minutes-secondes** et **degrés décimaux**
+(calcul entier depuis `lat_e5`/`lon_e5`, helpers `adr_dms()` / `adr_dec()`).
+
+**Place.** Pour tenir sur le V1 (~700 o libres) : `ENABLE_SMALL_BOLD=0` ajouté
+à `build.sh` (−576 o ; police 6 px gras retirée, `UI_PrintStringSmallBold()`
+retombe proprement sur `gFontSmall`). Build V1 vert, 0 warning :
+**`text 60940 o`**, marge ~480 o. `.bin` + `sha256.txt` régénérés. **Non testé
+matériel.**
+
+### Surbrillance sans la police grasse (2026-09-07)
+
+`ENABLE_SMALL_BOLD=0` retire la graisse qui marquait la ligne sélectionnée et
+les en-têtes, remplacée par de la **vidéo inverse**. `gFontSmall` fait 7 px de
+haut (bits 0..6), le pixel du bas est toujours vide. Helpers dans `aprs.c`
+(exposés par `aprs.h`, réutilisés par `sarsat.c` quand les deux sont compilés),
+`invert_span(row, x0, x1, mask)` en primitive (rangées 0..6, jamais 7) :
+- `APRS_InvertBar(row)` : barre de titre pleine largeur, `mask 0x7F` → 1 px
+  clair sous la barre (séparation avec la ligne suivante) ;
+- `APRS_HiliteText(row, textx, s)` : bloc serré au texte, `[textx-1 ..
+  textx+len*7+1]`, `mask 0x7F` — pour une ligne sélectionnée entourée d'autres
+  lignes ;
+- `APRS_HiliteBar(row, textx, s)` : idem serré au texte mais `mask 0xFF` →
+  1 px inversé (sombre) sous le texte ; à coupler avec une rangée vide en
+  dessous pour l'espace clair.
+
+- config APRS (`draw_config`) : rangée 0 = `APRS_InvertBar`, ligne courante =
+  `APRS_HiliteText` (texte x=2, 1 px de marge L/R) ;
+- écran RX APRS / assistant report : `APRS_InvertBar` ;
+- **écran ADRASEC** : en-tête `APRS_HiliteBar` (1 px inversé à gauche/droite/
+  bas), **rangée 1 laissée vide** = gros espace sous la barre ; lat rangées
+  2/3, rangée 4 vide, lon rangées 5/6 (ligne « EXIT » retirée — écran collant,
+  EXIT ferme). Idem mise en page sur le K1/K5V3.
+- écran SARSAT (`sarsat.c`) : en-tête / verdict / lignes `s_invert` en
+  `APRS_HiliteText`, **texte décalé à x=1**.
+
+Marge inversée **au-dessus** du texte : impossible (rangée LCD 8 px, glyphes
+7 px sur les bits 0..6 — le bit du haut sert à `1 4 B D E F H`…).
+
+Aussi : `APP_RunAprs()` redessine la ligne « Send report » **à chaque
+(ré)émission** du message report 121 MHz (suivi de `s_msg.tries`, pas
+seulement de `s_msg.state`). Même correctif sur le K1/K5V3.
+
+Build V1 vert, 0 warning : **`text 61068 o`**, **marge ~356 o — serrée**.
+`.bin` + `sha256.txt` régénérés.

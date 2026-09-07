@@ -171,6 +171,24 @@ void SARSAT_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 
 /* every string here is <= SARSAT_LINE_CHARS (18) glyphs -- see the note in
  * sarsat.h: UI_PrintStringSmall* does not clip and overruns the row buffer. */
+
+/* ENABLE_SMALL_BOLD=0 (V1) removed the bold used to emphasise a line; replaced
+ * by inverse video tight to the text (see aprs.h). Shared with the APRS screen
+ * when both are built; a stand-alone fallback keeps SARSAT-only builds working. */
+#ifdef ENABLE_APRS
+#define SARSAT_Hilite(row, s)  APRS_HiliteText((row), 1, (s))
+#else
+static void SARSAT_Hilite(int row, const char *s)
+{
+	if (row < 0 || row > 6)
+		return;
+	unsigned x1 = 1 + (unsigned)strlen(s) * 7u + 1;
+	if (x1 > 128) x1 = 128;
+	for (unsigned i = 0; i < x1; i++)
+		gFrameBuffer[row][i] ^= 0x7Fu;   /* 7 px font: keep bottom pixel -> 1 px gap */
+}
+#endif
+
 static void SARSAT_DrawLevel(void)
 {
 	static const char *const verd[5] = {   /* all <= 18 glyphs, order = SARSAT_LVL_* */
@@ -184,7 +202,8 @@ static void SARSAT_DrawLevel(void)
 	unsigned f;
 
 	UI_DisplayClear();
-	UI_PrintStringSmallBold("NIVEAU 5:txt UP/DN", 2, 0, 0);
+	UI_PrintStringSmallNormal("NIVEAU 5:txt UP/DN", 1, 0, 0);
+	SARSAT_Hilite(0, "NIVEAU 5:txt UP/DN");
 
 	sprintf(s, "rms%-6u pk%u", s_lvl.rms, s_lvl.peak);
 	UI_PrintStringSmallNormal(s, 2, 0, 1);
@@ -211,7 +230,11 @@ static void SARSAT_DrawLevel(void)
 	UI_PrintStringSmallNormal(s, 2, 0, 5);
 
 	/* row 6 is the last usable content row (gFrameBuffer has only 7) */
-	UI_PrintStringSmallBold(verd[s_lvl.verdict < 5 ? s_lvl.verdict : 0], 2, 0, 6);
+	{
+		const char *v = verd[s_lvl.verdict < 5 ? s_lvl.verdict : 0];
+		UI_PrintStringSmallNormal(v, 1, 0, 6);
+		SARSAT_Hilite(6, v);
+	}
 	ST7565_BlitFullScreen();
 }
 
@@ -234,7 +257,8 @@ static void SARSAT_Draw(void)
 		        s_scroll > 0 ? '^' : ' ',
 		        last < s_nlines ? 'v' : ' ');
 	}
-	UI_PrintStringSmallBold(hdr, 2, 0, 0);
+	UI_PrintStringSmallNormal(hdr, 1, 0, 0);
+	SARSAT_Hilite(0, hdr);
 
 	/* rows 1..SARSAT_VIS_ROWS: the visible slice of the line buffer */
 	for (uint8_t r = 0; r < SARSAT_VIS_ROWS; r++)
@@ -242,10 +266,12 @@ static void SARSAT_Draw(void)
 		const uint8_t li = s_scroll + r;
 		if (li >= s_nlines || !s_line[li][0])
 			continue;
-		if (s_invert & (1u << li))
-			UI_PrintStringSmallBold(s_line[li], 2, 0, r + 1);
-		else
+		if (s_invert & (1u << li)) {
+			UI_PrintStringSmallNormal(s_line[li], 1, 0, r + 1);
+			SARSAT_Hilite(r + 1, s_line[li]);
+		} else {
 			UI_PrintStringSmallNormal(s_line[li], 2, 0, r + 1);
+		}
 	}
 
 	ST7565_BlitFullScreen();

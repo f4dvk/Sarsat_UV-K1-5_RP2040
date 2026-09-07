@@ -42,6 +42,11 @@ typedef struct {
 
     char     name[10];       /* object / item name, or message addressee      */
     char     text[64];       /* comment / status / message body               */
+
+    char     msg_no[8];      /* APRS message number after '{' ("" if none)     */
+    bool     is_adrasec;     /* message body begins "ADRASEC" (PCT_Report      */
+                             /* position request): lat_e5 / lon_e5 hold the   */
+                             /* parsed coordinates for a clear on-screen show  */
 } aprs_info_t;
 
 /* Parse `ax25` (the frame WITHOUT the 2 FCS bytes, as delivered by aprs_rx).

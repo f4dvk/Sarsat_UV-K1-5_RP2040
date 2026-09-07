@@ -281,6 +281,21 @@ int main(void)
         chk("different info field -> not a dup", !dup);
     }
 
+    /* aprs_build_ui: the auto-ACK frame -> "F4DVK-7>APZSAR,WIDE1-1::F1ABC-2 :ack09" */
+    {
+        uint8_t f[64];
+        int fl = aprs_build_ui(f, sizeof f, "F4DVK", 7, ":F1ABC-2  :ack09");
+        chk("build_ui returns a length", fl == 7 + 7 + 7 + 2 + 16);
+        chk("  dst APZSAR", (f[0] >> 1) == 'A' && (f[5] >> 1) == 'R');
+        chk("  src F4DVK-7", (f[7] >> 1) == 'F' && ((f[13] >> 1) & 0x0F) == 7);
+        chk("  via WIDE1-1, last", (f[14] >> 1) == 'W' && ((f[20] >> 1) & 0x0F) == 1 && (f[20] & 1));
+        chk("  UI control + PID", f[21] == 0x03 && f[22] == 0xF0);
+        chk("  info field", memcmp(f + 23, ":F1ABC-2  :ack09", 16) == 0);
+
+        chk("build_ui rejects a blank call", aprs_build_ui(f, sizeof f, "      ", 0, ":x:ack1") == 0);
+        chk("build_ui rejects overflow", aprs_build_ui(f, 20, "F4DVK", 0, ":x:ack1") == 0);
+    }
+
     printf(fails ? "\nFAIL\n" : "\nPASS\n");
     return fails ? 1 : 0;
 }

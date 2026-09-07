@@ -81,6 +81,15 @@ enum {
 int aprs_digi_process(uint8_t *d, int len, int max_len, int digi_level,
                       const char *my_call, uint8_t my_ssid);
 
+/* Build a bare APRS UI frame (no FCS -- the radio's TX path appends it):
+ *   dst APZSAR-0, src <my_call>-<my_ssid>, one via "WIDE1-1", control 0x03,
+ *   PID 0xF0, then the ASCII `info` field.
+ * Used for the auto-ACK of a received message ("::<addressee>:ackNN").
+ * Returns the frame length, or 0 if it would not fit `cap` or `my_call` is
+ * blank/NULL (never transmit an unconfigured identity). */
+int aprs_build_ui(uint8_t *out, int cap, const char *my_call, uint8_t my_ssid,
+                  const char *info);
+
 /* Duplicate suppression: a digipeater that hears its own already-repeated
  * frame come back (relayed by another digi further down a multi-hop path)
  * must not repeat it again, even though aprs_digi_process() alone cannot

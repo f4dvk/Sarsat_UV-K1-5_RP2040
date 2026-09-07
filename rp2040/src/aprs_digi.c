@@ -43,6 +43,23 @@ static void write_addr(uint8_t *d, int pos, const char *call, uint8_t ssid,
     d[pos + 6] = (uint8_t)(0x60 | (used ? 0x80 : 0) | ((ssid & 0x0F) << 1) | extbit);
 }
 
+int aprs_build_ui(uint8_t *out, int cap, const char *my_call, uint8_t my_ssid,
+                  const char *info)
+{
+    int ilen = 0;
+    while (info[ilen]) ilen++;
+    int flen = 7 + 7 + 7 + 2 + ilen;     /* dst + src + one digi + ctrl + pid */
+    if (flen > cap || !has_callsign(my_call))
+        return 0;
+    write_addr(out,  0, "APZSAR", 0,       false, 0);
+    write_addr(out,  7, my_call, my_ssid,  false, 0);
+    write_addr(out, 14, "WIDE1",  1,       false, 1);   /* ext bit: last address */
+    out[21] = 0x03;                                     /* UI control */
+    out[22] = 0xF0;                                     /* no layer-3 protocol */
+    for (int i = 0; i < ilen; i++) out[23 + i] = (uint8_t)info[i];
+    return flen;
+}
+
 /* true if the 6-callsign-bytes + SSID-nibble at d+pos match my_call/my_ssid.
  * `my_call` is known non-blank by every caller here (checked up front). */
 static bool addr_is_mycall(const uint8_t *addr, const char *my_call, uint8_t my_ssid)

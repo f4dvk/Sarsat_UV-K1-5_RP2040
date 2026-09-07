@@ -69,11 +69,22 @@ int main(void)
 
     /* 4. message */
     {
-        const char *i = ":F1ABC    :hello there{1";
+        const char *i = ":F1ABC    :hello there{12";
         int fl = frame(f, "APZSAR", 0, i, (int)strlen(i));
         chk("message parses", aprs_parse(f, fl - 2, &p) && p.kind == APRS_KIND_MESSAGE);
         chk("  addressee", strncmp(p.name, "F1ABC", 5) == 0);
-        chk("  body", strncmp(p.text, "hello there", 11) == 0);
+        chk("  body (number stripped)", strcmp(p.text, "hello there") == 0);
+        chk("  msg number 12", strcmp(p.msg_no, "12") == 0);
+    }
+
+    /* 4c. PCT_Report position request -> is_adrasec + parsed coordinates */
+    {
+        const char *i = ":F4DVK    :ADRASEC // Lat: 45.12345 // Lon: -1.36440{03";
+        int fl = frame(f, "APZSAR", 0, i, (int)strlen(i));
+        chk("adrasec parses", aprs_parse(f, fl - 2, &p) && p.is_adrasec);
+        chk("  msg number 03", strcmp(p.msg_no, "03") == 0);
+        near_e5("  lat 45.12345", p.lat_e5, 4512345);
+        near_e5("  lon -1.36440", p.lon_e5, -136440);
     }
 
     /* 5. MIC-E : 33 25.64 N, 112 07.90 W (dest SSRUVT) */

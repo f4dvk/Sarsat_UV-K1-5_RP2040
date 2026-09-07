@@ -20,6 +20,24 @@ static void copy_str(char *dst, int cap, const char *src, int n)
 /* base-91 digit used by compressed APRS */
 static int b91(char c) { return (c >= '!' && c <= '{') ? (c - '!') : 0; }
 
+/* "<sp>-45.12345..." -> signed 1e-5 degrees; reads up to 5 fraction digits and
+ * stops at the first character that is not part of the number. */
+static int32_t parse_dec_e5(const char *p)
+{
+    while (*p == ' ') p++;
+    int sign = 1;
+    if      (*p == '-') { sign = -1; p++; }
+    else if (*p == '+') p++;
+    long ip = 0;
+    while (isdig(*p)) ip = ip * 10 + (*p++ - '0');
+    long frac = 0, scale = 10000;
+    if (*p == '.') {
+        p++;
+        for (int k = 0; k < 5 && isdig(*p); k++) { frac += (long)(*p++ - '0') * scale; scale /= 10; }
+    }
+    return (int32_t)(sign * (ip * 100000 + frac));
+}
+
 /* course "CSE/SPD" (deg / knots) trailing an uncompressed position */
 static void take_course_speed(aprs_info_t *o, const char *p, int n)
 {
@@ -305,6 +323,32 @@ bool aprs_parse(const uint8_t *ax25, int len, aprs_info_t *out)
         int c = 10;
         while (c < n && info[c] != ':') c++;
         copy_str(out->text, sizeof out->text, (const char *)info + c + 1, n - c - 1);
+
+        /* trailing "{NN" (or "{aa}") message number -> msg_no. Read from the RAW
+         * info field (out->text may be truncated) and also trim it from text. */
+        for (int i = n - 1; i > c && i >= n - 7; i--) {
+            if (info[i] != '{') continue;
+            int k = 0;
+            for (int j = i + 1; j < n && info[j] != '}' &&
+                                k < (int)sizeof out->msg_no - 1; j++)
+                out->msg_no[k++] = (char)info[j];
+            out->msg_no[k] = 0;
+            int tl = (int)strlen(out->text);
+            for (int m = tl - 1; m >= 0 && m >= tl - 7; m--)
+                if (out->text[m] == '{') { out->text[m] = 0; break; }
+            break;
+        }
+
+        /* PCT_Report position request: "ADRASEC // Lat: <dec> / ... // Lon: <dec> ..." */
+        if (strncmp(out->text, "ADRASEC", 7) == 0) {
+            const char *la = strstr(out->text, "Lat:");
+            const char *lo = strstr(out->text, "Lon:");
+            if (la && lo) {
+                out->lat_e5     = parse_dec_e5(la + 4);
+                out->lon_e5     = parse_dec_e5(lo + 4);
+                out->is_adrasec = true;
+            }
+        }
         return true;
     }
 
