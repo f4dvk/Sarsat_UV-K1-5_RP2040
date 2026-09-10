@@ -111,10 +111,16 @@ void APP_RunAprs(void);               /* blocking config / status screen     */
 void APRS_SaveConfig(void);           /* persist gAprsCfg to EEPROM          */
 bool APRS_QuietBacklight(void);       /* true => suppress the RX-squelch backlight */
 void APRS_ApplySquelch(void);         /* APRS-band fast-squelch tweak (from tick) */
+void APRS_ApplyRxAudio(void);         /* APRS-band RX-register hook (currently inert -- see aprs.c) */
 bool APRS_KeepAwake(void);            /* true => block battery-save (RX on 144-148) */
 void APRS_MyPosition(int32_t *lat_e5, int32_t *lon_e5);  /* GPS fix or manual */
 bool APRS_GpsFixValid(void);          /* a fresh GPS fix is available          */
 uint8_t APRS_GpsState(void);          /* 0 no module / 1 searching / 2 locked  */
+
+/* Cache the last SARSAT 1G beacon the RP2040 decoded (SARSAT_CMD_BEACON /
+ * 0x06C2) so the "Send SARSAT" APRS message can relay its position. */
+void APRS_NoteBeacon(const char *hex_id, int32_t lat_e5, int32_t lon_e5,
+                     uint16_t country, uint8_t has_pos, uint8_t is_test);
 
 #endif /* ENABLE_APRS */
 #endif /* APP_APRS_H */

@@ -260,6 +260,36 @@ static void radio_push_result(const sarsat_result_t *r)
         (CFG_RADIO_UART == uart0) ? 0 : 1, CFG_RADIO_UART_BAUD);
 }
 
+/* CMD_SARSAT_BEACON (0x06C2): machine-readable decode for the radio's "Send
+ * SARSAT" APRS message. Packed little-endian, 29 bytes (docs/protocol.md):
+ *   0 frame_bits, 1 protocol, 2 is_test, 3 has_position,
+ *   4..5 country_code(u16), 6..9 lat_e5(i32), 10..13 lon_e5(i32),
+ *   14..28 hex_id[15] (ASCII, zero-padded). */
+static void radio_push_beacon(const sarsat_result_t *r)
+{
+    const BeaconInfo1G *in = &r->info;
+    const bool pos = in->has_position && !in->position_default;
+    int32_t la = pos ? (int32_t)(in->lat * 100000.0) : 0;
+    int32_t lo = pos ? (int32_t)(in->lon * 100000.0) : 0;
+
+    uint8_t p[29];
+    memset(p, 0, sizeof p);
+    p[0] = (uint8_t)r->frame_bits;
+    p[1] = (uint8_t)in->protocol;
+    p[2] = in->is_test_message ? 1 : 0;
+    p[3] = pos ? 1 : 0;
+    p[4] = (uint8_t)in->country_code;
+    p[5] = (uint8_t)(in->country_code >> 8);
+    p[6]  = (uint8_t)la;         p[7]  = (uint8_t)(la >> 8);
+    p[8]  = (uint8_t)(la >> 16); p[9]  = (uint8_t)(la >> 24);
+    p[10] = (uint8_t)lo;         p[11] = (uint8_t)(lo >> 8);
+    p[12] = (uint8_t)(lo >> 16); p[13] = (uint8_t)(lo >> 24);
+    for (int i = 0; i < 15 && r->hex_id[i]; i++) p[14 + i] = (uint8_t)r->hex_id[i];
+
+    radio_send(CMD_SARSAT_BEACON, p, sizeof p);
+    LOG("[tx]     BEACON %s  %s\n", r->hex_id, pos ? "(pos)" : "(no pos)");
+}
+
 /* ---- audio capture --------------------------------------------------- */
 static void adc_capture_init(void)
 {
@@ -1051,6 +1081,7 @@ int main(void)
         }
 
         radio_push_result(&r);
+        radio_push_beacon(&r);
         rearm_at = make_timeout_time_ms(CFG_REARM_MS);
     }
 }

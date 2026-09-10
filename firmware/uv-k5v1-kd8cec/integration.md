@@ -24,21 +24,37 @@ une icône symbole 16x16 ; `ENABLE_AUDIO_BAR` est désactivé dans `build.sh`
   Text **56 892 o** (le plus lourd — la fonction d'origine est grosse).
 - **`moto`** — idiome MOTOTRBO DP/GP : en-tête inversé à coins arrondis (l.0) ;
   **fréquence dans une police condensée-grasse 24 px** (`MOTO_DIG`, ~450 o,
-  générée par `tools/gen_bigdigits.py`) sur les l.1-3 ; ligne de détails centrée
-  (l.4) ; S-mètre **antenne + 5 barres montantes** avec `-84 dBm S6` (l.5, corps
-  alternatif de `DisplayRSSIBar`) ; l'autre VFO sur la l.6. Text **56 712 o**
-  (−180 vs stock).
+  générée par `tools/gen_bigdigits.py`) sur les l.1-3 ; tous les drapeaux dans
+  le bandeau (pas de ligne de détail) ; S-mètre **antenne + 5 barres montantes**
+  avec `-84 dBm S6` (l.5, corps alternatif de `DisplayRSSIBar`) ; l'autre VFO
+  sur la l.6.
 - **`id91`** — même disposition, mais réutilise des primitives déjà dans le
   firmware : `UI_DisplayFrequency` / `gFontBigDigits` (16 px, l.1-2) pour la
   fréquence et le **S-mètre segmenté horizontal stock** (`DrawLevelBar`) sur la
-  l.4. Text **56 492 o** (**−400 vs stock, −220 vs moto**).
+  l.4. C'est le mode retenu dans `build.sh`.
 
-Helpers partagés `MainHeader` / `MainDetail` / `MainIdleVfo`. Les deux
-redessins gèrent fréquence / canal MR (tous les `MDF_*`) / saisie de fréquence /
-chaînes `VfoState` / plages de scan ; toutes les écritures restent dans
+Helpers partagés `MainHeader` / `MainIdleVfo`. Les deux redessins gèrent
+fréquence / canal MR (tous les `MDF_*`) / saisie de fréquence / chaînes
+`VfoState` / plages de scan ; toutes les écritures restent dans
 `gFrameBuffer[0..6]` ; pas de barre de touches en bas (l'UV-K5 n'en a pas sous
 le LCD). Les trois compilent `-Wextra` propres. Pas encore testé sur matériel ;
 `gDTMF_InputMode` (saisie DTMF manuelle) n'est pas dessiné en moto/id91.
+
+**Ligne sous la fréquence supprimée en `id91` (2026-09-09)** — modulation,
+puissance, CTCSS, sens de décalage et largeur de bande figurent déjà dans le
+bandeau inversé ; l'ancienne « ligne de détail » (`MainDetail()`) qui les
+répétait sous la fréquence est retirée (fonction supprimée). Seul le cas
+`MDF_NAME`/`MDF_NAME_FREQ` garde une ligne (la fréquence en clair, sous le nom
+de canal). En `id91` la ligne de puissance affichée pendant le TX disparaît
+aussi (elle était redondante avec le bandeau). Le mode `moto` faisait déjà
+ainsi.
+
+**Bandeau : `+`/`-`, `CT`, `R` espacés (2026-09-09)** — `MainHeader()` place
+maintenant le sens de décalage, l'indicateur CTCSS et le drapeau *reverse*
+derrière un curseur mobile `floor_x` (~4 px entre chaque champ réellement
+dessiné) au lieu de colonnes fixes qui collaient `+ CT`, et la modulation
+calée à droite ne recule que du strict nécessaire. Même schéma que le bandeau
+`MainHeaderIcom()` du port UV-K1/K5V3.
 
 > **Note :** la disposition `moto` a été retravaillée en plusieurs itérations
 > terrain (voir l'historique git et le plan de projet) : en-tête en police 6 px
@@ -849,3 +865,60 @@ tables de fréquences/DCS devenues inatteignables), `bss 5720` (−16),
 **marge ~3160 o** (était ~356). `.bin` + `.packed.bin` + `sha256.txt`
 régénérés. **Non testé matériel.** K1/K5V3 non touché (marge encore
 confortable là-bas).
+
+## Battery-save sur la bande APRS — inhibition sur les deux VFO (2026-09-09)
+
+Symptôme (remonté sur le V3, même code ici) : « il faut une 1ʳᵉ trame ratée
+pour en recevoir une » — le duty-cycle de `FUNCTION_POWER_SAVE`
+(`BK4819_Sleep()` périodique) coupe l'audio ; une trame arrivant pendant la
+sieste ne réveille le RX qu'à moitié.
+
+`APRS_KeepAwake()` (déjà câblée dans la liste d'inhibition `gSchedulePowerSave`
+de `app/app.c`) ne testait que `gEeprom.RX_VFO` → en Dual Watch, où `RX_VFO`
+alterne, l'économiseur pouvait se déclencher sur la demi-période « autre
+VFO ». Corrigé : `APRS_KeepAwake()` teste **les deux VFO**. En plus,
+`APRS_TimeSlice()` force `FUNCTION_Select(FUNCTION_FOREGROUND)` si la radio
+est déjà en `FUNCTION_POWER_SAVE` sur 144–148 MHz.
+
+**Limite** : le Dual Watch écoute quand même ~50 % du temps — utiliser
+**MAIN ONLY** (F+3, dual watch off) pour une RX APRS fiable. `text 57988 o`
+(+72). `.bin` + `sha256.txt` régénérés. **Non testé matériel.**
+
+## F+5 bascule le RX sur le canal APRS 170 + « mode APRS » élargi (2026-09-09)
+
+Demandé (prérequis pour l'accusé du futur message « position balise SARSAT »).
+Même changement que sur le V3 :
+
+- **`APP_RunAprs()`** : ouverture **manuelle** (F+5) → emprunte le slot
+  `TX_VFO` pour `APRS_TX_CHANNEL` (MR 170) le temps du menu, recette
+  `APRS_TxFrame()` (sauvegarde `VfoInfo`/`ScreenChannel`/`MrChannel`/`RX_VFO`,
+  `RADIO_ConfigureChannel(VFO_CONFIGURE_RELOAD)`, restauration à la sortie).
+  `monitor = !popup` → RX FM sur 144.800 dès l'ouverture, quelle que soit la
+  fréquence de départ. Auto‑popup inchangé.
+- **Reconnaissance « mode APRS »** (helper `aprs_vfo_is_aprs(v)`) :
+  - **mode mémoire** : vrai **uniquement** sur le canal 170. Inchangé.
+  - **mode VFO** : vrai **uniquement** si la fréquence RX est **exactement
+    égale** à celle du canal 170 — pas toute la bande 144–148 MHz. Fréquence
+    du canal 170 lue via `SETTINGS_FetchChannelFrequency()` et mise en cache
+    (`s_aprs_ch_freq`, rafraîchie par `APRS_Init()` + chaque emprunt F+5).
+  - `aprs_on_band()` = `aprs_vfo_is_aprs(RX_VFO)` ;
+    `APRS_KeepAwake()` = les deux VFO.
+
+Build V1 vert, 0 warning : `text 58168 o` (marge ~3,3 Ko). `.bin` +
+`sha256.txt` régénérés. **Non testé matériel.**
+
+## Message APRS « Send SARSAT » (position de balise décodée) (2026-09-09)
+
+Même implémentation que sur le V3 (détail complet dans son `integration.md`) :
+
+- `patch/sarsat.c` : handler `SARSAT_CMD_BEACON` (`0x06C2`) → `APRS_NoteBeacon()`.
+- `patch/aprs.c` : cache `s_bcn`, `s_msg.kind` (report 121 / balise SARSAT,
+  exclusifs), branche `APRS_MsgInfo()` → `:DEST:SARSAT <hexID> <lat> <lon>
+  c<pays>[ TEST]{NN` (ou `NOPOS`), réutilise toute la mécanique report
+  (3×/30 s, écoute 5 min, `WIDE1-1,WIDE2-2`, accusé via `0x06D3`).
+- Menu F+5 : champ `F_SENDB` (`Send SARSAT`), confirmation `s_wiz == 3`
+  (« Send SARSAT ? » + hexID + position + « A = send / EXIT »).
+- Destinataire = `gAprsCfg.msg_to` (le même que le report 121).
+
+`text 59220 o` (+1052, **marge ~2,2 Ko**). `.bin` + `sha256.txt` régénérés.
+`docs/protocol.md` à jour. **Non testé matériel.**

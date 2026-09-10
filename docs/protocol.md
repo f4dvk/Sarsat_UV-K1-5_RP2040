@@ -31,7 +31,7 @@ Le firmware radio (Phase 3/4) ajoute un gestionnaire pour les ID ci-dessous dans
 | `0x06CF` | `SARSAT_HELLO` | `proto_ver:u8` | keepalive, ~toutes les 5 s. La radio peut afficher un indicateur de lien. |
 | `0x06C0` | `SARSAT_CLEAR` | — | efface le tampon d'écran SARSAT |
 | `0x06C1` | `SARSAT_TEXT` | `line:u8, invert:u8, ascii[0..20]` | définit une ligne d'affichage (0 = haut). `invert` = rendu inversé. ASCII uniquement, ≤ 21 glyphes. |
-| `0x06C2` | `SARSAT_BEACON` | struct compacte (ci-dessous) | résultat de décodage lisible par la machine ; la radio le met en forme elle-même. Alternative optionnelle à `0x06C1`. |
+| `0x06C2` | `SARSAT_BEACON` | struct compacte 29 o (ci-dessous) | résultat de décodage lisible par la machine, poussé après chaque décodage propre. La radio le met en cache pour son message APRS « Send SARSAT ». |
 | `0x06C3` | `SARSAT_LEVEL` | `peak:u16,rms:u16,dc:u16,clip:u8,adcmin:u16,adcmax:u16,verdict:u8` LE | télémétrie de niveau audio pour l'écran de réglage de la radio, ~1/s, sans ACK |
 | `0x06D0` | `APRS_CONFIG` | `call[6], ssid:u8, path:u8, sym_table:u8, sym_code:u8, digi_level:u8, flags:u8` (12 o) | radio → RP2040, sans ACK : poussé à chaque sauvegarde du menu APRS **et** à `APRS_Init()` (donc aussi après un reboot radio, le RP2040 n'ayant pas d'état persistant). `call`/`ssid` servent au digipeat « traçable » (voir plus bas), `path`/`sym_table`/`sym_code` sont gardés côté RP2040 mais inexploités pour l'instant. `digi_level` : 0 off, 1 répète WIDEn-N pour n=1, 2 aussi n=2, 3 aussi n=3 (cumulatif). `flags` bit 0 = **mode TNC KISS** (voir plus bas). La config côté radio vit en EEPROM `0x1D00` (56 o ; **pas** `0x1D50`, que `SETTINGS_SaveSettings()` écrase) sur le V1, adresse dédiée équivalente sur le K1/K5V3. |
 | `0x06D2` | `APRS_RXTEXT` | `line:u8, ascii[0..18]` | RP2040 → radio : une ligne d'un paquet APRS 144.8 MHz décodé, utilisée seulement quand le champ info n'a **pas** pu être parsé. `line = 0xFF` efface la vue RX ; `line = 0` est l'indicatif source, `1..3` le champ info enroulé. Sans ACK. |
@@ -221,20 +221,45 @@ Menu APRS (F+5) → champ **`KISS TNC on/off`**. Quand il est actif :
   ferait perdre des trames RX (`PICO_STDIO_USB_STDOUT_TIMEOUT_US` limite ce
   risque).
 
-### Charge utile `SARSAT_BEACON` (little-endian)
+### Charge utile `SARSAT_BEACON` (little-endian, compact, 29 octets)
+
+Envoyé par le RP2040 après chaque décodage propre (en plus de `SARSAT_TEXT`).
+La radio le met en cache (`APRS_NoteBeacon()`) pour son message APRS
+**« Send SARSAT »** (voir plus bas).
 
 ```
-u8   frame_bits        112 ou 144
-u8   protocol           enum ProtocolType (dec406_v1g.h)
-u8   is_test            1 = trame test/auto-test
-u8   has_position
-u16  country_code
-i32  lat_1e4            latitude  × 1e4 (0 si pas de position)
-i32  lon_1e4            longitude × 1e4
-char hex_id[15]         ID de balise COSPAS 15-hex
-char ident[24]          chaîne d'identification (tronquée)
+off  type  champ            note
+0    u8    frame_bits       112 ou 144
+1    u8    protocol         enum ProtocolType (dec406_v1g.h)
+2    u8    is_test          1 = trame test/auto-test/exercice
+3    u8    has_position     1 = lat/lon valides
+4    u16   country_code
+6    i32   lat_e5           latitude  × 1e5, signé  (0 si has_position=0)
+10   i32   lon_e5           longitude × 1e5, signé
+14   char  hex_id[15]       ID balise COSPAS 15-hex, ASCII, zéro-complété
 ```
-Total 55 octets.
+Total **29 octets**. (L'ancien projet de struct 55 o avec `ident[24]` /
+`lat_1e4` n'a jamais été implémenté ; le format ci-dessus est celui du code.)
+
+### Message APRS « Send SARSAT » (radio, sur validation opérateur)
+
+Champ **`Send SARSAT`** du menu APRS (F+5), à côté de `Send report`. Sur
+appui → confirmation « Send SARSAT ? » (A = envoyer / EXIT). Émet un message
+APRS vers `gAprsCfg.msg_to` (le **même destinataire** que le report 121),
+chemin `WIDE1-1,WIDE2-2`, avec un numéro de message → accusé automatique du
+client destinataire, repéré via `0x06D3` (`APRS_MsgCheckAck()`, mêmes 3
+ré-émissions / 30 s puis écoute 5 min que le report). État sur la ligne :
+`Bcn #NN TX n/3` / `Bcn #NN wait ack` / `Bcn #NN ACK OK` / `Bcn #NN no ack`.
+
+Corps du message :
+```
+:DEST     :SARSAT <hexID 15> <lat> <lon> c<pays>[ TEST]{NN
+:DEST     :SARSAT <hexID 15> NOPOS c<pays>[ TEST]{NN        (sans position)
+```
+`<lat> <lon>` = degrés décimaux signés, 4 décimales (même format que le
+report 121). Exemple : `:F4DVK    :SARSAT 1C72091A2B3FDFF 42.9544 1.3644 c227 TEST{03`.
+Prérequis : indicatif ≠ NOCALL, `msg_to` renseigné, une balise en cache, et
+la radio sur le canal APRS 170 (F+5 y bascule — voir `integration.md`).
 
 ## Phase 2 — le sens radio → RP2040 (ACK / statut)
 

@@ -224,7 +224,8 @@ static void APRS_EnsureChannel(void)
         SETTINGS_SaveChannelName(APRS_TX_CHANNEL, "APRS");
 }
 
-static void APRS_PushConfig(void);   /* forward decl: used by APRS_Init() below */
+static void APRS_PushConfig(void);       /* forward decl: used by APRS_Init() below */
+static void aprs_refresh_ch_freq(void);  /* forward decl: caches channel 170's freq */
 
 void APRS_Init(void)
 {
@@ -244,6 +245,7 @@ void APRS_Init(void)
         gAprsCfg.msg_to[sizeof gAprsCfg.msg_to - 1] = 0;
     }
     APRS_EnsureChannel();
+    aprs_refresh_ch_freq();
     s_next_beacon_10ms = millis10() + 6000;   /* first beacon 60 s after boot */
     s_inited = true;
     APRS_ApplyAfGain();
@@ -588,16 +590,43 @@ void APRS_Beacon(void)
 #define APRS_MSG_DIR_KO       0xFFFFu
 
 enum { APRS_MSG_IDLE = 0, APRS_MSG_WAIT, APRS_MSG_ACK, APRS_MSG_FAIL };
+enum { APRS_MSG_K_REPORT = 0, APRS_MSG_K_BEACON };   /* s_msg.kind */
 
 static struct {
     uint8_t  state;               /* APRS_MSG_*                             */
+    uint8_t  kind;                 /* APRS_MSG_K_* : 121 report vs SARSAT bcn */
     uint8_t  seq;                 /* APRS message number, cycles 1..99      */
     uint8_t  tries;               /* (re)transmits done so far (max _TRIES) */
-    uint8_t  sig;                 /* signal 0..9                            */
-    uint16_t dir;                 /* 0..359, or APRS_MSG_DIR_KO             */
+    uint8_t  sig;                 /* signal 0..9  (report)                  */
+    uint16_t dir;                 /* 0..359, or APRS_MSG_DIR_KO  (report)   */
     uint32_t next_at_10ms;        /* next (re)transmit due                  */
     uint32_t deadline_10ms;       /* declare "no ack" past this             */
 } s_msg;
+
+/* Last SARSAT 1G beacon the RP2040 decoded and pushed over 0x06C2. Fed by
+ * APRS_NoteBeacon() (sarsat.c's SARSAT_CMD_BEACON handler); read by the
+ * "Send SARSAT" menu row / APRS_MsgInfo(). */
+static struct {
+    char     hex_id[16];
+    int32_t  lat_e5, lon_e5;      /* degrees x 1e5 (0 if no position)       */
+    uint16_t country;
+    uint8_t  has_pos;
+    uint8_t  is_test;
+    uint8_t  valid;
+} s_bcn;
+
+void APRS_NoteBeacon(const char *hex_id, int32_t lat_e5, int32_t lon_e5,
+                     uint16_t country, uint8_t has_pos, uint8_t is_test)
+{
+    memset(s_bcn.hex_id, 0, sizeof s_bcn.hex_id);
+    for (int i = 0; i < 15 && hex_id[i]; i++) s_bcn.hex_id[i] = hex_id[i];
+    s_bcn.lat_e5  = has_pos ? lat_e5 : 0;
+    s_bcn.lon_e5  = has_pos ? lon_e5 : 0;
+    s_bcn.country = country;
+    s_bcn.has_pos = has_pos ? 1 : 0;
+    s_bcn.is_test = is_test ? 1 : 0;
+    s_bcn.valid   = 1;
+}
 
 static int APRS_MsgInfo(char *info)
 {
@@ -606,6 +635,22 @@ static int APRS_MsgInfo(char *info)
     for (; n < 9 && gAprsCfg.msg_to[n]; n++) to[n] = gAprsCfg.msg_to[n];
     for (; n < 9; n++) to[n] = ' ';         /* addressee is exactly 9 chars */
     to[9] = 0;
+
+    if (s_msg.kind == APRS_MSG_K_BEACON) {
+        char pos[26];
+        if (s_bcn.has_pos) {
+            uint32_t la = (s_bcn.lat_e5 < 0) ? (uint32_t)(-s_bcn.lat_e5) : (uint32_t)s_bcn.lat_e5;
+            uint32_t lo = (s_bcn.lon_e5 < 0) ? (uint32_t)(-s_bcn.lon_e5) : (uint32_t)s_bcn.lon_e5;
+            sprintf(pos, "%s%u.%04u %s%u.%04u",
+                s_bcn.lat_e5 < 0 ? "-" : "", (unsigned)(la / 100000u), (unsigned)(la % 100000u / 10u),
+                s_bcn.lon_e5 < 0 ? "-" : "", (unsigned)(lo / 100000u), (unsigned)(lo % 100000u / 10u));
+        } else {
+            strcpy(pos, "NOPOS");
+        }
+        return sprintf(info, ":%s:SARSAT %.15s %s c%u%s{%02u",
+                       to, s_bcn.hex_id, pos, s_bcn.country,
+                       s_bcn.is_test ? " TEST" : "", s_msg.seq);
+    }
 
     char dir[8];
     if (s_msg.dir == APRS_MSG_DIR_KO) strcpy(dir, "KO");
@@ -638,20 +683,40 @@ static void APRS_MsgTx(void)
     APRS_TxInfo(info, ilen, digi, 2);
 }
 
-/* begin a report; sig 0 forces "Dir: KO" and the caller skips the direction */
-static void APRS_MsgStart(uint8_t sig, uint16_t dir)
+/* true if a message can be sent at all (callsign + recipient set) */
+static bool APRS_MsgCanSend(void)
 {
-    if (gAprsCfg.call[0] == 0 || strcmp(gAprsCfg.call, "NOCALL") == 0)
-        return;
-    if (gAprsCfg.msg_to[0] <= ' ')            /* no recipient set */
-        return;
-    s_msg.sig   = (sig > 9) ? 9 : sig;
-    s_msg.dir   = (sig == 0) ? APRS_MSG_DIR_KO : (dir > 359 ? 359 : dir);
+    return gAprsCfg.call[0] != 0 && strcmp(gAprsCfg.call, "NOCALL") != 0 &&
+           gAprsCfg.msg_to[0] > ' ';
+}
+
+static void APRS_MsgArm(void)
+{
     s_msg.seq   = (uint8_t)(s_msg.seq % 99u) + 1u;
     s_msg.tries = 0;
     s_msg.state = APRS_MSG_WAIT;
     s_msg.next_at_10ms  = millis10();                       /* first TX next slice */
     s_msg.deadline_10ms = millis10() + APRS_MSG_WAIT_10MS;
+}
+
+/* begin a 121 MHz report; sig 0 forces "Dir: KO" and the caller skips direction */
+static void APRS_MsgStart(uint8_t sig, uint16_t dir)
+{
+    if (!APRS_MsgCanSend())
+        return;
+    s_msg.kind  = APRS_MSG_K_REPORT;
+    s_msg.sig   = (sig > 9) ? 9 : sig;
+    s_msg.dir   = (sig == 0) ? APRS_MSG_DIR_KO : (dir > 359 ? 359 : dir);
+    APRS_MsgArm();
+}
+
+/* begin a "SARSAT beacon position" report from the last 0x06C2 decode */
+static void APRS_MsgStartBeacon(void)
+{
+    if (!s_bcn.valid || !APRS_MsgCanSend())
+        return;
+    s_msg.kind = APRS_MSG_K_BEACON;
+    APRS_MsgArm();
 }
 
 /* pumped from APRS_TimeSlice() and the APP_RunAprs() loop, like digipeat.
@@ -839,6 +904,13 @@ void APRS_TimeSlice(void)
      * own beacon / "121 MHz report" / RX popup. */
     const bool kiss = (gAprsCfg.opts & APRS_OPT_KISS) != 0;
 
+    /* Kick the radio out of battery-save on the APRS band: the inhibit list
+     * (app/app.c, APRS_KeepAwake()) stops us entering it, but if it was
+     * already dozing when it reached 144.8 a packet would only half-wake the
+     * RX. */
+    if (gCurrentFunction == FUNCTION_POWER_SAVE && APRS_KeepAwake())
+        FUNCTION_Select(FUNCTION_FOREGROUND);
+
     APRS_ApplySquelch();               /* APRS-band fast-squelch (cheap: 1 reg read) */
     APRS_DigipeatTimeSlice();          /* retry a queued frame until the channel
                                         * is clear -- also the KISS TX path   */
@@ -919,11 +991,32 @@ void APRS_TimeSlice(void)
     APRS_Beacon();
 }
 
-/* RX VFO in the 144-148 MHz APRS band? (10 Hz freq units) */
+/* Channel 170's RX frequency, cached: SETTINGS_FetchChannelFrequency() reads
+ * EEPROM and aprs_vfo_is_aprs() runs every tick. Refreshed by APRS_Init() and
+ * by APP_RunAprs() when it borrows the channel. */
+static uint32_t s_aprs_ch_freq = APRS_DEFAULT_FREQ;
+
+static void aprs_refresh_ch_freq(void)
+{
+    uint32_t f = SETTINGS_FetchChannelFrequency(APRS_TX_CHANNEL);
+    if (f > 1000000u && f < 100000000u)          /* sane, not blank 0xFFFFFFFF */
+        s_aprs_ch_freq = f;
+}
+
+/* Is VFO `v` in "APRS mode"?  Memory mode: only the dedicated APRS channel
+ * (MR 170). VFO mode: only tuned exactly to channel 170's frequency -- NOT
+ * the whole 144-148 MHz band (so 145.500 simplex etc. is untouched). */
+static bool aprs_vfo_is_aprs(unsigned int v)
+{
+    const uint8_t sc = gEeprom.ScreenChannel[v & 1u];
+    if (IS_MR_CHANNEL(sc))
+        return sc == APRS_TX_CHANNEL;
+    return gEeprom.VfoInfo[v & 1u].freq_config_RX.Frequency == s_aprs_ch_freq;
+}
+
 static bool aprs_on_band(void)
 {
-    uint32_t f = gEeprom.VfoInfo[gEeprom.RX_VFO & 1u].freq_config_RX.Frequency;
-    return f >= 14400000u && f <= 14800000u;
+    return aprs_vfo_is_aprs(gEeprom.RX_VFO & 1u);
 }
 
 static void aprs_rx_arrived(void)      /* common: count + rate-limited popup */
@@ -962,13 +1055,19 @@ bool APRS_QuietBacklight(void)
 }
 
 /* Block the K5 battery-save on the APRS band: FUNCTION_POWER_SAVE cycles the
- * receiver off, which chops the audio the C-Board needs to demodulate a packet
- * (frames were missed until the user turned BATSAVE off). Wired into the
- * gSchedulePowerSave inhibit list in app/app.c, same idea as the fast-squelch.
- * Only while the RX VFO sits in 144-148 MHz -> no effect on normal use. */
+ * receiver off, which chops the audio the C-Board needs -- a packet landing
+ * mid-doze only half-wakes the RX, so the FIRST frame after a quiet spell is
+ * lost and the next decodes. Wired into the gSchedulePowerSave inhibit list
+ * in app/app.c.
+ *
+ * Checks BOTH VFOs, not just gEeprom.RX_VFO: in dual watch RX_VFO alternates,
+ * so a plain aprs_on_band() would let power-save trigger during the half-cycle
+ * the scanner sits on the other VFO. (Dual watch still only listens to 144.8
+ * ~half the time -- use "MAIN ONLY" for reliable APRS RX -- but the receiver
+ * never fully sleeps.) */
 bool APRS_KeepAwake(void)
 {
-    return aprs_on_band();
+    return aprs_vfo_is_aprs(0) || aprs_vfo_is_aprs(1);
 }
 
 /* APRS-band "fast squelch" (REG_4E): the stock BK4819 setup uses a long squelch
@@ -1089,7 +1188,7 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 
 /* ---------------------------------------------------------- config screen  */
 enum { F_CALL, F_SSID, F_PATH, F_SYM, F_TEXT, F_INT, F_POPUP, F_AFGAIN, F_SQL,
-       F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_KISS, F_N };
+       F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_SENDB, F_KISS, F_N };
 
 /* char cycling for the keypad-poor text fields: space, A-Z, 0-9, then a few
  * punctuation marks for the comment. */
@@ -1176,15 +1275,34 @@ static void field_str(int f, char *out)
         break;
     case F_SEND:
         /* show the message number so the operator can match it to the "ackNN" */
-        switch (s_msg.state) {
-        case APRS_MSG_WAIT:
-            sprintf(out, s_msg.tries < APRS_MSG_TRIES ? "Rpt #%02u TX %u/3"
-                                                      : "Rpt #%02u wait ack",
-                    s_msg.seq, s_msg.tries);
-            break;
-        case APRS_MSG_ACK:  sprintf(out, "Rpt #%02u ACK OK", s_msg.seq); break;
-        case APRS_MSG_FAIL: sprintf(out, "Rpt #%02u no ack", s_msg.seq); break;
-        default:            strcpy(out, "Send report");                  break;
+        if (s_msg.state != APRS_MSG_IDLE && s_msg.kind == APRS_MSG_K_REPORT) {
+            switch (s_msg.state) {
+            case APRS_MSG_WAIT:
+                sprintf(out, s_msg.tries < APRS_MSG_TRIES ? "Rpt #%02u TX %u/3"
+                                                          : "Rpt #%02u wait ack",
+                        s_msg.seq, s_msg.tries);
+                break;
+            case APRS_MSG_ACK:  sprintf(out, "Rpt #%02u ACK OK", s_msg.seq); break;
+            case APRS_MSG_FAIL: sprintf(out, "Rpt #%02u no ack", s_msg.seq); break;
+            }
+        } else {
+            strcpy(out, "Send report");
+        }
+        break;
+    case F_SENDB:
+        if (!s_bcn.valid) { strcpy(out, "SARSAT: no bcn"); break; }
+        if (s_msg.state != APRS_MSG_IDLE && s_msg.kind == APRS_MSG_K_BEACON) {
+            switch (s_msg.state) {
+            case APRS_MSG_WAIT:
+                sprintf(out, s_msg.tries < APRS_MSG_TRIES ? "Bcn #%02u TX %u/3"
+                                                          : "Bcn #%02u wait ack",
+                        s_msg.seq, s_msg.tries);
+                break;
+            case APRS_MSG_ACK:  sprintf(out, "Bcn #%02u ACK OK", s_msg.seq); break;
+            case APRS_MSG_FAIL: sprintf(out, "Bcn #%02u no ack", s_msg.seq); break;
+            }
+        } else {
+            sprintf(out, "Send SARSAT %.4s", s_bcn.hex_id);
         }
         break;
     case F_KISS:
@@ -1396,6 +1514,16 @@ static void draw_wizard(void)
 {
     char s[22];
     UI_DisplayClear();
+    if (s_wiz == 3) {                          /* confirm SARSAT beacon send */
+        UI_PrintStringSmallNormal("Send SARSAT ?", 2, 0, 1);
+        APRS_HiliteText(1, 2, "Send SARSAT ?");
+        sprintf(s, "%.15s", s_bcn.hex_id);
+        UI_PrintStringSmallNormal(s, 2, 0, 3);
+        UI_PrintStringSmallNormal(s_bcn.has_pos ? "with position" : "no position", 2, 0, 4);
+        UI_PrintStringSmallNormal("A = send   EXIT", 2, 0, 6);
+        ST7565_BlitFullScreen();
+        return;
+    }
     if (s_wiz == 1) {
         UI_PrintStringSmallNormal("Signal 0-9 ?  0=KO", 2, 0, 2);
         APRS_HiliteText(2, 2, "Signal 0-9 ?  0=KO");
@@ -1642,15 +1770,33 @@ void APP_RunAprs(void)
         return;
     }
 
-    /* Manual F+5 open on the APRS band -> re-tune the BK4819 for FM RX on the
-     * current VFO. The APRS screen otherwise just inherits whatever RX state
-     * it opened on -- BK4819 AF muted after a TX, not even demodulating:
-     * "leger souffle, aucun souffle FM, pas de trame". RADIO_SetupRegisters()
-     * sets the FM demod (un-mutes the BK4819 AF) + the squelch and leaves the
-     * SPEAKER muted -- the mini-squelch loop below then opens it only on a
-     * real carrier (so no persistent idle hiss). The operator's own AF-gain
+    /* F+5 lands the RX VFO on the dedicated APRS channel (MR 170) for the whole
+     * time the menu is open, so APRS RX is live immediately whatever frequency
+     * the radio was on (406 MHz SARSAT, a random channel...). Borrow the TX_VFO
+     * slot exactly like APRS_TxFrame(); the exit cleanup below restores it.
+     * Not done for an auto-popup: the radio is already on 144.8 (that is how a
+     * packet decoded to open the popup in the first place). */
+    const uint8_t borrow_vfo = gEeprom.TX_VFO;
+    const bool    borrowed   = !popup;
+    VFO_Info_t saved_vfo = gEeprom.VfoInfo[borrow_vfo];
+    uint8_t    saved_sc  = gEeprom.ScreenChannel[borrow_vfo];
+    uint8_t    saved_mrc = gEeprom.MrChannel[borrow_vfo];
+    uint8_t    saved_rxv = gEeprom.RX_VFO;
+    if (borrowed) {
+        aprs_refresh_ch_freq();                           /* channel may have been edited */
+        gEeprom.ScreenChannel[borrow_vfo] = APRS_TX_CHANNEL;
+        gEeprom.RX_VFO                    = borrow_vfo;   /* single-VFO for APRS */
+        RADIO_ConfigureChannel(borrow_vfo, VFO_CONFIGURE_RELOAD);
+        RADIO_SelectVfos();
+    }
+
+    /* Manual open -> re-tune the BK4819 for FM RX on channel 170. The screen
+     * otherwise inherits whatever RX state it opened on -- AF muted after a TX,
+     * not demodulating. RADIO_SetupRegisters() sets the FM demod + the squelch
+     * and leaves the SPEAKER muted; the mini-squelch loop below opens it only
+     * on a real carrier (no persistent idle hiss). The operator's own AF-gain
      * setting is kept so the level matches what the C-Board sees. */
-    const bool monitor = !popup && aprs_on_band();
+    const bool monitor = borrowed;
 
     if (monitor) {
         RADIO_SelectVfos();
@@ -1800,7 +1946,10 @@ void APP_RunAprs(void)
         gKeyLockCountdown = 30;
 
         if (s_wiz) {                          /* "Send report" wizard */
-            if (s_wiz == 1) {                 /* step 1: signal digit 0-9 */
+            if (s_wiz == 3) {                 /* confirm the SARSAT beacon send */
+                if      (k == KEY_MENU) { APRS_MsgStartBeacon(); s_wiz = 0; }
+                else if (k == KEY_EXIT) { s_wiz = 0; }
+            } else if (s_wiz == 1) {          /* step 1: signal digit 0-9 */
                 if (k <= KEY_9) {
                     s_wizsig = (uint8_t)k;
                     if (s_wizsig == 0) { APRS_MsgStart(0, 0); s_wiz = 0; }
@@ -1844,10 +1993,11 @@ void APP_RunAprs(void)
             case KEY_DOWN: sel = (sel + 1) % F_N;       break;
             case KEY_MENU:
                 if (sel == F_SEND) {          /* launch the report wizard */
-                    if (gAprsCfg.call[0] && strcmp(gAprsCfg.call, "NOCALL") != 0 &&
-                        gAprsCfg.msg_to[0] > ' ') {
-                        s_wiz = 1; s_wizsig = 0; s_klen = 0;
-                    }
+                    if (APRS_MsgCanSend()) { s_wiz = 1; s_wizsig = 0; s_klen = 0; }
+                    break;
+                }
+                if (sel == F_SENDB) {         /* confirm + send the SARSAT beacon */
+                    if (s_bcn.valid && APRS_MsgCanSend()) s_wiz = 3;
                     break;
                 }
                 editing = 1; callcur = 0; s_klen = 0;
@@ -1911,6 +2061,14 @@ void APP_RunAprs(void)
      * frame still pops. */
     s_autopop_block_10ms  = millis10() + (closed_by_key ? 500u : 30u);
     gMonitor = false;
+
+    if (borrowed) {                    /* give channel 170's slot back to the VFO */
+        gEeprom.VfoInfo[borrow_vfo]       = saved_vfo;
+        gEeprom.ScreenChannel[borrow_vfo] = saved_sc;
+        gEeprom.MrChannel[borrow_vfo]     = saved_mrc;
+        gEeprom.RX_VFO                    = saved_rxv;
+    }
+
     FUNCTION_Select(FUNCTION_FOREGROUND);
     RADIO_ConfigureChannel(0, VFO_CONFIGURE);
     RADIO_ConfigureChannel(1, VFO_CONFIGURE);

@@ -333,8 +333,21 @@ echo "== build (preset=$PRESET, ENABLE_SARSAT=ON, ENABLE_APRS=ON, ENABLE_BYP_RAW
 # la plus lourde du preset et la moins liee au projet SARSAT/APRS -- meme
 # arbitrage que celui deja fait sur le port V1 (SPECTRUM/FMRADIO/VOX/
 # FLASHLIGHT coupes la-bas). Les autres extras F4HWN restent actifs.
+#
+# GAME / QRCODE / LOGO / LOGO_SAV / K5VIEWER / RXTX_LOG coupes (2026-09-09,
+# demande utilisateur) : extras F4HWN sans rapport avec SARSAT/APRS, pour
+# rendre de la marge flash (le build etait a 99,0 %). D'autres extras
+# coupables au besoin : FMRADIO, AIRCOPY, VOX, FOXHUNT, BEAM, AUDIO_SCOPE,
+# MENU_CAT, PMR/GMRS...
 cmake --preset "$PRESET" -DENABLE_SARSAT=ON -DENABLE_APRS=ON -DENABLE_BYP_RAW_DEMODULATORS=ON \
     -DENABLE_SPECTRUM=OFF \
+    -DENABLE_FEAT_F4HWN_GAME=OFF \
+    -DENABLE_FEAT_F4HWN_QRCODE=OFF \
+    -DENABLE_FEAT_F4HWN_LOGO=OFF \
+    -DENABLE_FEAT_F4HWN_LOGO_SAV=OFF \
+    -DENABLE_FEAT_F4HWN_K5VIEWER=OFF \
+    -DENABLE_FEAT_F4HWN_RXTX_LOG=OFF \
+    -DENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER=OFF \
     -DVERSION_STRING_2="v${TAG#v}.SAR1" \
     > /tmp/uvk1k5v3-sarsat-cfg.log 2>&1 \
     || { echo "!! configure a échoué -- voir /tmp/uvk1k5v3-sarsat-cfg.log"; tail -40 /tmp/uvk1k5v3-sarsat-cfg.log; exit 1; }

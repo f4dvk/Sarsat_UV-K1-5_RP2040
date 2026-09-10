@@ -427,9 +427,21 @@ canal 170 est re-forcé à `"APRS"` à chaque boot.
 (constaté à la compilation : dépassement de ~2,3 Ko). `build.sh` désactive
 donc `ENABLE_SPECTRUM` (`-DENABLE_SPECTRUM=OFF`) — l'extra F4HWN le plus lourd
 et le moins lié à ce projet, même arbitrage que celui déjà fait sur le V1
-(SPECTRUM/FMRADIO/VOX/FLASHLIGHT coupés là-bas). Tous les autres extras
-`Fusion` (Game, FoxHunt, Beam, RxTxLog, K5Viewer, Aircopy, FM broadcast...)
-restent actifs.
+(SPECTRUM/FMRADIO/VOX/FLASHLIGHT coupés là-bas).
+
+**2026-09-09 — coupes supplémentaires** (le travail d'alignement registres RX
+V1/V3 avait fait remonter le flash à 99,0 %). `build.sh` désactive maintenant
+aussi, à la demande de l'utilisateur et par étapes :
+`ENABLE_FEAT_F4HWN_GAME`, `ENABLE_FEAT_F4HWN_QRCODE`, `ENABLE_FEAT_F4HWN_LOGO`,
+`ENABLE_FEAT_F4HWN_LOGO_SAV` (jeu, QR code, logo de boot), puis
+`ENABLE_FEAT_F4HWN_K5VIEWER`, `ENABLE_FEAT_F4HWN_RXTX_LOG`,
+`ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER` (visualiseur d'écran série, journal
+d'activité RX/TX) — aucun rapport avec SARSAT/APRS.
+→ `FLASH 109676/120832 o (90,77 %)`, `RAM 14400/16384 o (87,89 %)`,
+soit **−~9,9 Ko flash / −~700 o RAM** par rapport au build à 99,0 %. Un build
+d'essai « tous les extras non liés coupés » (FMRADIO, AIRCOPY, VOX, FoxHunt,
+Beam, AudioScope, MenuCat, PMR/GMRS en plus) descend à
+`FLASH 92 092 o (76,2 %)` / `RAM 84,2 %` — réserve disponible si besoin.
 
 **Build vert, 0 warning**, preset `Fusion` (sans le spectre) :
 
@@ -635,10 +647,10 @@ extension aux canaux mémoire/NOAA/DTMF, menu).
 
 **Retour terrain suivant : « c'est mieux »** — VFO lisible. Deux points
 notés :
-- **Mode mémoire n'a pas le nouvel habillage** — attendu, pas un bug :
-  `icomMode` exclut délibérément `IS_MR_CHANNEL` pour l'instant (portée
-  étroite de cette étape, voir plus haut). Extension au canal mémoire à
-  faire dans une étape ultérieure.
+- **Mode mémoire n'a pas le nouvel habillage** — attendu à cette étape :
+  `icomMode` excluait délibérément `IS_MR_CHANNEL` (portée étroite de cette
+  étape). **Étendu au canal mémoire le 2026-09-09** — voir la section
+  « Habillage « Icom » étendu au canal mémoire » plus bas.
 - **Bug corrigé : le badge de bande de fréquence (« F6 », coin haut-gauche)
   débordait de ~1-2 px dans le bandeau d'en-tête.** Cause :
   `UI_PrintStringSmallNormalInverse()` (utilisée pour ce badge) inverse non
@@ -1041,6 +1053,55 @@ bandeau d'en-tête (VFO/puissance/modulation...) continue de s'afficher
 normalement pendant la saisie ; seuls les chiffres de fréquence reflètent le
 tampon de saisie en cours au lieu de la fréquence validée. Build vert, 0
 warning : `FLASH 116280/120832 o (96,23 %)`. **Non testé sur l'air.**
+
+### Habillage « Icom » étendu au canal mémoire (2026-09-09)
+
+Remonté : « l'affichage n'est plus style icom si un canal mémoire est mis en
+principal ». C'était la limitation volontaire de la 1ʳᵉ passe (voir plus haut :
+« Mode mémoire n'a pas le nouvel habillage — attendu »). Levée maintenant, sur
+le même modèle que l'écran principal du V1 (KD8CEC), qui habille déjà ses
+canaux mémoire.
+
+- Porte de `s_icomMode` : `IS_FREQ_CHANNEL(...)` devient
+  `IS_FREQ_CHANNEL(...) || (IS_MR_CHANNEL(...) && gInputBoxIndex == 0)` — un
+  canal mémoire actif passe en mode icom sauf pendant la saisie d'un numéro de
+  canal (chemin distinct) ; les canaux NOAA restent sur le rendu F4HWN
+  d'origine.
+- `MainHeaderIcom()` : slot de gauche = `MR <n>` pour un canal mémoire (juste
+  le numéro, comme le bandeau du V1), `APRS` pour le canal 170, `VFO A/B`
+  sinon.
+- Boucle par-VFO : les deux tests `IS_MR_CHANNEL(...)` du rendu canal (le
+  badge numéro inversé ligne 1, et le gros bloc « scan-list + compander +
+  switch `MDF_*` ») prennent `&& !icomMode`. En `icomMode` le canal est rendu
+  exactement comme un VFO fréquence — gros chiffres de la fréquence du canal
+  sur `line + 1` — quel que soit `CHANNEL_DISPLAY_MODE`. Le **nom** du canal
+  (s'il y en a un) est écrit en petit sur la ligne 3, dans l'espace libre
+  sous la fréquence.
+- Le VFO inactif (`MainIdleVfoIcom()`, ligne 6) gérait déjà le cas canal
+  (`A  M12 nom`) — inchangé.
+
+Build vert, 0 warning : `FLASH 119456/120832 o (98,86 %)`, `RAM inchangée`
+(+176 o flash). `.bin` + `sha256.txt` régénérés. **Non testé sur l'air.**
+
+### (2026-09-09) Badge « F3 » retiré + fréquence centrée en mode icom
+
+Demandé : « retirer le F3 à gauche de la fréquence principale et centrer
+l'affichage (comme le v1) ».
+- La branche `else if (IS_FREQ_CHANNEL(...))` (badge de bande inversé, coin
+  haut-gauche) prend `&& !icomMode` → plus de « F3 » / « F6 » en mode icom.
+- La fréquence en gros chiffres est maintenant **centrée** (bloc = gros
+  chiffres + 2 petits digits de fin, `fx = (LCD_WIDTH - bw - 14) / 2`) comme
+  l'écran icom du V1 — dans les 3 chemins (état stable, saisie de fréquence,
+  fréquence > 1 GHz via `UI_PrintString` centré). `sprintf` maison
+  (`"%u.%05u"`, sans le pad `%3u` de `UI_FormatFrequency`) pour qu'une
+  fréquence < 100 MHz reste centrée aussi.
+- **Scan** : inchangé — la porte de `s_icomMode` exige déjà
+  `gScanStateDir == SCAN_OFF`, donc pendant un balayage l'écran repasse
+  automatiquement au rendu F4HWN standard (bandeau non dessiné, S-mètre à sa
+  position stock).
+
+Build vert, 0 warning : `FLASH 109752/120832 o (90,83 %)`. `.bin` +
+`sha256.txt` régénérés. **Non testé sur l'air.**
 
 ### Parité canaux avec le V1 (2026-09-05)
 
@@ -1506,3 +1567,184 @@ entendus dans le popup RX) — seul manquait le choix pour sa propre balise.
 Aucun autre changement. Build vert, 0 warning : `FLASH 119280/120832 o`
 (+12 o) ; V1 `text 61068 o` (inchangé, absorbé par l'alignement). `.bin` +
 `sha256.txt` régénérés des deux côtés. **Non testé matériel.**
+
+### (2026-09-09) Chaîne audio RX alignée sur le V1 pour SARSAT et APRS
+
+Constat de l'opérateur : à antenne/signal comparables, **le V1 (UV‑K5 V1,
+BK4819/KD8CEC) décode mieux — surtout l'APRS** — et il faut un gain AF fixe
+différent (11 sur V1, 16 sur V3) pour le même niveau RMS lu par le RP2040.
+Le code démod RP2040 est identique pour les deux radios : la différence est
+uniquement dans l'audio que chaque firmware sort vers la C‑Board. Écarts
+relevés dans la chaîne RX :
+
+| | V1 (BK4819 / KD8CEC) | V3 (BK4829 / F4HWN) — avant |
+|---|---|---|
+| REG 0x54 / 0x55 (filtre/EQ AF) | jamais touché (défaut puce `0x9009`/`0x31A9`) | `RADIO_SetModulation()` les réécrit depuis « SetRxA » (défaut `FLAT` = `0x9009`/`0x3200`) |
+| REG 0x43 (filtre FI/RF, « WIDE ») | `0x45A8` (pilote BK4819, fort 4 / faible 2) | `0x3028` (pilote BK4829, fort 3 / faible 0) — plus étroite, et se resserre plus sur signal faible |
+| REG 0x7B (temps AGC) | `0x8420` (`InitAGC` profil FM) | `0x73DC` (`InitAGC` profil unique « stock BK4829 », AM+FM) |
+| REG 0x49 (seuils RSSI AGC) | `0x2A38` (84/56, profil FM) | `0x2AB2` (85/50, profil unique) |
+| REG 0x10..0x14 (tables de gain AGC) | tables BK4819 | tables BK4829 — **non alignées** (les crans LNA/PGA ne se correspondent pas 1:1) |
+| REG 0x73 (AFC : plage + dynamique) | jamais écrit → défaut puce, seul le bit 4 (on/off) est basculé | init `0x4691` (→ `0x4681` en FM) |
+| AFC on/off écran SARSAT | active | désactivée (correctif BK4829 confirmé air) |
+| AFC on/off APRS | active (FM) | active (FM) — identique |
+| Courbe gain AF | écriture REG_48 identique — l'écart 11/16 vient du niveau discri / AGC amont (silicium), pas d'un réglage |
+
+**Non, l'AFC et l'AGC ne sont PAS à la même vitesse.** `BK4819_InitAGC()` de
+ce firmware utilise **un seul** profil (« stock BK4829 », `REG_7B = 0x73DC`)
+pour AM et FM ; le V1 a un profil FM dédié (`REG_7B = 0x8420`). REG_7B porte
+les constantes de temps attaque/décroissance de l'AGC → vitesse différente.
+Idem pour l'AFC : le V1 laisse REG_73 au défaut puce (seul le bit 4 bascule),
+le V3 l'initialise à `0x4691` — plage et dynamique de correction de fréquence
+différentes.
+
+**⚠️ TOUT L'ALIGNEMENT REGISTRE A ÉTÉ ANNULÉ EN BLOC (2026-09-09).**
+
+Les forçages successifs (REG 0x54/0x55 → `0x31A9`, REG 0x43 → `0x45A8`,
+REG 0x7B → `0x8420` + REG 0x49 → `0x2A38`, REG 0x2B bits 10:8 débrayés,
+REG 0x2A → `0x6600`, REG 0x4E bit 8 nettoyé), appliqués un à un dans
+`APRS_ApplyRxAudio()` et l'écran SARSAT, ont fini par **tuer complètement le
+décodage APRS** sur le matériel de l'opérateur. Cause exacte non isolée — trop
+de variables changées à l'aveugle sur un chip (BK4829) sans doc de registres,
+et en particulier forcer le profil AGC du BK4819 (REG 0x7B/0x49, calibrés
+pour des tables de gain REG 0x10..14 *différentes*) était probablement le plus
+dangereux.
+
+**État après annulation :**
+- `APRS_ApplyRxAudio()` → **corps vide** (no-op), gardée pour ne pas toucher
+  aux 4 sites d'appel / `aprs.h`. La chaîne RX APRS du V3 est maintenant
+  exactement celle de F4HWN stock (`RADIO_SetModulation` + `RADIO_SetupRegisters`),
+  même philosophie que le V1 (qui ne force rien ici au-delà du délai
+  d'ouverture squelch de `APRS_ApplySquelch()`).
+- `APRS_ApplySquelch()` → masque revenu à **`~0x3E00`** (identique au V1,
+  délai d'ouverture 0 / fermeture 3, rien d'autre).
+- `patch/sarsat.c` → écritures `0x54/0x55` retirées ; le profil SetRxA
+  (FLAT par défaut) tient, comme l'état validé sur l'air.
+- **Conservé** (sûr, pur gain, aucune divergence par rapport au V1) :
+  correctif battery-save (`APRS_KeepAwake()` sur les deux VFO + réveil forcé),
+  et le garde-fou scramble/compander était dans `APRS_ApplyRxAudio()` — donc
+  retiré aussi avec le reste ; à re-ajouter seul si un jour un canal APRS
+  compandé pose problème.
+
+**Le tableau comparatif ci-dessus reste valable comme référence** (écarts
+réels entre BK4819 et BK4829), mais **aucun n'est plus corrigé en firmware**.
+Pour ré-essayer : ré-ajouter **un seul** registre à la fois dans
+`APRS_ApplyRxAudio()`, avec un test sur l'air entre chaque.
+
+**« Un DSP qui amène de la latence ? »** Oui — les filtres audio de la puce
+(REG 0x2B dé-emphase/HPF/LPF, REG 0x54/0x55) ont un retard de groupe
+(sous-ms à ~1 ms), mais le BK4829 fait de toute façon plus de traitement
+numérique interne (FI numérique, squelch numérique) que le BK4819 — pipeline
+plus long, squelch plus lent, sortie discri plus faible/bruitée. **Non
+corrigeable en firmware** — c'est du silicium.
+
+Build vert, 0 warning : `FLASH 109576/120832 o (90,68 %)`,
+`RAM 14400/16384 o`. `.bin` + `sha256.txt` régénérés. Le V1 garde uniquement
+le correctif battery-save (sûr).
+
+### (2026-09-09) Squelch APRS — REG_4E bit 8
+
+Remonté : « le squelch me paraît plus long à s'ouvrir sur la V3 ». Le champ
+*délai d'ouverture* de REG_4E est déjà mis à 0 par `APRS_ApplySquelch()` sur
+les deux firmwares (code identique). Différence trouvée : le
+`BK4819_SetupSquelch()` de **ce firmware (BK4829)** pose en plus **REG_4E
+bit 8** (`(1u << 8)`, commenté « matches stock BK4829 ») ; le pilote BK4819
+du V1 laisse ce bit à 0. `APRS_ApplySquelch()` ne le nettoyait pas (masque
+`~0x3E00`, bits 13:9 seulement) → il restait à 1 sur le V3.
+
+Masque élargi à `~0x3F00` (bits 13:8) — puis **ANNULÉ** avec le reste des
+essais d'alignement RX quand l'opérateur a perdu tout décodage. `APRS_ApplySquelch()`
+est revenu au masque **`~0x3E00`** (identique au V1 : délai d'ouverture 0 /
+fermeture 3, rien d'autre).
+
+**Rappel** : pour zéro perte de flags, le plus sûr reste `SQL = 0` (monitor)
+dans le menu radio.
+
+### (2026-09-09) Battery-save — « il faut une 1ʳᵉ trame ratée pour en recevoir une »
+
+Symptôme classique du duty-cycle de l'économiseur de batterie
+(`FUNCTION_POWER_SAVE` / `gRxIdleMode` → `BK4819_Sleep()` + GPIO RX bas
+périodiquement). Une trame qui arrive pendant la sieste ne réveille le RX
+qu'à moitié → la 1ʳᵉ est perdue, la suivante décode.
+
+`APRS_KeepAwake()` (câblée dans la liste d'inhibition `gSchedulePowerSave` de
+`app/app.c` depuis le début du port) existait déjà, mais ne testait que
+`gEeprom.RX_VFO` — **en Dual Watch `RX_VFO` alterne**, donc l'économiseur
+restait libre de se déclencher pendant la demi-période où le scanner est sur
+l'autre VFO. Corrigé (deux firmwares) : `APRS_KeepAwake()` teste **les deux
+VFO** (si l'un est dans 144–148 MHz → inhibition). En complément,
+`APRS_TimeSlice()` fait `FUNCTION_Select(FUNCTION_FOREGROUND)` si on est déjà
+en `FUNCTION_POWER_SAVE` sur la bande APRS (cas : radio déjà endormie au
+moment d'arriver sur 144.8).
+
+**Limite** : le Dual Watch écoute quand même 144.8 seulement ~50 % du temps —
+pour une RX APRS fiable, utiliser **Main Only**. `BATSAVE` peut rester ON.
+V3 `FLASH 109764/120832 o (90,84 %)` ; V1 `text 57988 o` (+72). `.bin` +
+`sha256.txt` régénérés des deux côtés. **Non testé sur l'air.**
+
+### (2026-09-09) F+5 bascule le RX sur le canal APRS 170 + « mode APRS » élargi
+
+Demandé (pour que l'accusé du futur message « position balise SARSAT »
+fonctionne) : à l'ouverture du menu APRS, la RX doit être sur 144.800, et les
+traitements bande‑APRS doivent s'appliquer dès qu'on est sur le canal 170.
+
+- **`APP_RunAprs()` (deux firmwares)** : à l'ouverture **manuelle** (F+5, pas
+  auto‑popup), emprunte le slot `TX_VFO` pour le canal `APRS_TX_CHANNEL`
+  (MR 170) pendant toute la durée du menu — même recette que `APRS_TxFrame()`
+  (sauvegarde `VfoInfo`/`ScreenChannel`/`MrChannel`/`RX_VFO`,
+  `RADIO_ConfigureChannel(VFO_CONFIGURE_RELOAD)`, restauration dans la séquence
+  de sortie existante). `monitor` devient `!popup` (on retune toujours vers
+  170 → RX FM live immédiatement, quel que soit la fréquence de départ :
+  406 MHz SARSAT, un canal quelconque…). `RX_VFO` forcé sur le VFO actif
+  (mono‑VFO le temps du menu). L'auto‑popup, lui, hérite de l'état RX comme
+  avant (il s'est ouvert parce qu'une trame a décodé → radio déjà sur 144.8).
+- **Reconnaissance « mode APRS » — précisée (demande utilisateur)** :
+  helper `aprs_vfo_is_aprs(v)` (deux firmwares) :
+  - **mode mémoire** : vrai **uniquement** sur le canal 170
+    (`ScreenChannel[v] == APRS_TX_CHANNEL`). Aucun changement.
+  - **mode VFO** : vrai **uniquement** si `freq_config_RX.Frequency` est
+    **exactement égale** à la fréquence du canal 170 — **pas** toute la bande
+    144–148 MHz (donc 145.500 simplex, etc. ne déclenchent rien).
+  La fréquence du canal 170 est lue via `SETTINGS_FetchChannelFrequency()` et
+  **mise en cache** (`s_aprs_ch_freq`, `aprs_refresh_ch_freq()` — rafraîchie
+  par `APRS_Init()` et à chaque emprunt de canal par F+5) : `aprs_on_band()`
+  tourne à chaque tick, on évite une lecture EEPROM répétée. Respecte un canal
+  170 dont la fréquence a été éditée (ex. 144.390 en Amérique du Nord).
+  `aprs_on_band()` = `aprs_vfo_is_aprs(RX_VFO)` ;
+  `APRS_KeepAwake()` = `aprs_vfo_is_aprs(0) || aprs_vfo_is_aprs(1)` (les deux
+  VFO, pour le Dual Watch).
+
+Builds verts, 0 warning : V3 `FLASH 109940/120832 o (90,99 %)`,
+`RAM inchangée` ; V1 `text 58168 o` (marge ~3,3 Ko). `.bin` + `sha256.txt`
+régénérés des deux côtés. **Non testé sur l'air.**
+
+### (2026-09-09) Message APRS « Send SARSAT » (position de balise décodée)
+
+Demandé : relayer par **message APRS** (comme le report 121, même
+destinataire `gAprsCfg.msg_to`, avec accusé) la position d'une balise SARSAT
+décodée. Confirmation opérateur avant l'envoi.
+
+- **RP2040** (`main.c`) : `radio_push_beacon()` émet `CMD_SARSAT_BEACON`
+  (`0x06C2`, 29 o packé LE — cf. `docs/protocol.md`) après chaque décodage
+  propre, en plus des lignes `0x06C1`.
+- **Radio `sarsat.c`** : le handler `SARSAT_CMD_BEACON` (jusqu'ici un simple
+  ACK) parse la charge et appelle `APRS_NoteBeacon()`.
+- **Radio `aprs.c`** : cache `s_bcn` (hexID, lat/lon e5, pays, flags). La
+  machine à états `s_msg` gagne un champ **`kind`** (`APRS_MSG_K_REPORT` /
+  `_BEACON`) — un seul état, report 121 et balise mutuellement exclusifs.
+  `APRS_MsgInfo()` branche sur `kind` :
+  `:DEST     :SARSAT <hexID> <lat> <lon> c<pays>[ TEST]{NN`
+  (ou `NOPOS` sans position ; lat/lon = degrés décimaux signés 4 déc., même
+  format que le report). Réutilise `APRS_MsgTx/TimeSlice/CheckAck` tels quels
+  (3 ré‑émissions / 30 s, écoute 5 min, `WIDE1-1,WIDE2-2`, accusé via
+  `0x06D3`).
+- **Menu F+5** : nouveau champ `F_SENDB` après `Send report` :
+  `SARSAT: no bcn` / `Send SARSAT <4 hex>` / `Bcn #NN TX n/3` / `wait ack` /
+  `ACK OK` / `no ack`. Appui → `s_wiz = 3` = écran de confirmation
+  « Send SARSAT ? » + hexID + « with/no position » + « A = send / EXIT ».
+  L'ack RX marche parce que F+5 met déjà la radio sur le canal 170 (voir
+  section ci‑dessus).
+
+Builds verts, 0 warning : V3 `FLASH 110688/120832 o (91,60 %)` (+748 o) ;
+V1 `text 59220 o` (+1052, **marge ~2,2 Ko**) ; RP2040 pico `text 85476` /
+pico2 `text 80060`. `.bin` / `.uf2` + `sha256.txt` régénérés partout,
+`docs/protocol.md` à jour. `make check` vert. **Non testé sur l'air.**

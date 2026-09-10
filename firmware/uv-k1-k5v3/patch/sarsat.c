@@ -188,6 +188,24 @@ void SARSAT_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 		{
 			const uint8_t ok = 0;
 			SARSAT_Reply(SARSAT_CMD_BEACON | 0x8000u, &ok, 1);
+#ifdef ENABLE_APRS
+			/* packed LE, 29 bytes -- see docs/protocol.md:
+			 *  0 frame_bits, 1 protocol, 2 is_test, 3 has_position,
+			 *  4..5 country(u16), 6..9 lat_e5(i32), 10..13 lon_e5(i32),
+			 *  14..28 hex_id[15]. Feeds the "Send SARSAT" APRS message. */
+			if (size >= 29) {
+				char id[16];
+				memcpy(id, data + 14, 15);
+				id[15] = 0;
+				int32_t la = (int32_t)(data[6]  | (data[7]  << 8) |
+				                      (data[8]  << 16) | (data[9]  << 24));
+				int32_t lo = (int32_t)(data[10] | (data[11] << 8) |
+				                      (data[12] << 16) | (data[13] << 24));
+				APRS_NoteBeacon(id, la, lo,
+				                (uint16_t)(data[4] | (data[5] << 8)),
+				                data[3], data[2]);
+			}
+#endif
 			break;
 		}
 
@@ -352,6 +370,11 @@ void APP_RunSarsat(void)
 		r2b |= (1u << 10) | (1u << 9) | (1u << 8);
 		BK4819_WriteRegister(BK4819_REG_2B, r2b);
 	}
+	/* (A REG 0x54/0x55 pin to 0x9009/0x31A9 was tried here, to match the V1's
+	 * untouched audio filter -- reverted with the APRS RX-alignment batch that
+	 * killed decoding. The SetRxA profile -- FLAT by default -- stands, same as
+	 * the state this screen was validated on air with. Set SetRxA=FLAT if in
+	 * doubt.) */
 	/* EXPERIMENTAL (3rd guess), not yet confirmed on air: disable AFC
 	 * (Automatic Frequency Control). Reported symptom this targets: a frame
 	 * audible right after opening this screen, no longer audible on

@@ -1455,7 +1455,10 @@ static void MainHeaderIcom(unsigned int actVFO, const VFO_Info_t *v, uint16_t sc
     if (sc == APRS_TX_CHANNEL) strcpy(s, "APRS");
     else
 #endif
-    sprintf(s, "VFO %c", (char)('A' + actVFO));
+    if (IS_MR_CHANNEL(sc)) sprintf(s, "MR %u", sc + 1);   // channel number; the
+                                                         // name (if any) goes
+                                                         // on row 3 below
+    else                   sprintf(s, "VFO %c", (char)('A' + actVFO));
     HdrPut(s, 3);
 
     HdrPut(tx ? "TX" : rx ? "RX" : "", 43);
@@ -1634,7 +1637,10 @@ void UI_DisplayMain(void)
 #ifdef ENABLE_SCAN_RANGES
         && !gScanRangeStart
 #endif
-        && IS_FREQ_CHANNEL(gEeprom.ScreenChannel[activeTxVFO])
+        // frequency VFO, or a memory channel when not typing a channel number
+        // (NOAA channels stay on the stock layout)
+        && (IS_FREQ_CHANNEL(gEeprom.ScreenChannel[activeTxVFO])
+            || (IS_MR_CHANNEL(gEeprom.ScreenChannel[activeTxVFO]) && gInputBoxIndex == 0))
         && VfoState[activeTxVFO] == VFO_STATE_NORMAL;
     const bool icomMode = s_icomMode;
     if (icomMode)
@@ -1913,8 +1919,8 @@ void UI_DisplayMain(void)
                 memcpy(p_line0 + 24, BITMAP_VFO_Lock, sizeof(BITMAP_VFO_Lock));
         }
 
-        if (IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]))
-        {   // channel mode
+        if (IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]) && !icomMode)
+        {   // channel mode  (icomMode puts the channel number in the header)
             const unsigned int x = 1;
             const bool inputting = gInputBoxIndex != 0 && gEeprom.TX_VFO == vfo_num;
             if (!inputting || gScanStateDir != SCAN_OFF)
@@ -1940,8 +1946,10 @@ void UI_DisplayMain(void)
             }
             */
         }
-        else if (IS_FREQ_CHANNEL(gEeprom.ScreenChannel[vfo_num]))
-        {   // frequency mode
+        else if (IS_FREQ_CHANNEL(gEeprom.ScreenChannel[vfo_num]) && !icomMode)
+        {   // frequency mode -- the "F3" band-number badge. icomMode drops it
+            // (the V1 icom screen has no band badge; the frequency is centred
+            // instead, see the frequency-mode branch below).
             // show the frequency band number
             const unsigned int x = 2;
             const uint8_t f = 1 + gEeprom.ScreenChannel[vfo_num] - FREQ_CHANNEL_FIRST;
@@ -1949,10 +1957,7 @@ void UI_DisplayMain(void)
 
             sprintf(String, over1GHz ? "F%u+" : "F%u", f);
             //if (gSetting_set_gui) {
-                // UI_PrintStringSmallNormalInverse() also XORs a 1 px sliver
-                // into the row ABOVE (Line-1) -- with icomMode's header now
-                // sitting there, that showed up as a stray mark on row 0.
-                UI_PrintStringSmallNormalInverse(String, x, 0, icomMode ? line + 2 : line + 1);
+                UI_PrintStringSmallNormalInverse(String, x, 0, line + 1);
             /*
             }
             else
@@ -2014,17 +2019,26 @@ void UI_DisplayMain(void)
             const unsigned int freqRow = icomMode ? line + 1 : line;
 #ifdef ENABLE_BIG_FREQ
             if(!isGigaF) {
-                // show the remaining 2 small frequency digits
-                UI_PrintStringSmallNormal(String + 7, 113, 0, freqRow + 1);
-                String[7] = 0;
-                // show the main large frequency digits
-                UI_DisplayFrequency(String, 32, freqRow, false);
+                if (icomMode) {
+                    // "DDD.DDD" while typing -- centre the big block
+                    const int el = (int)strlen(String);        // e.g. 7
+                    const int bw = (el - 1) * 13 + 3;          // (el-1) digits * 13 px + 3 px dot
+                    int fx = (LCD_WIDTH - bw) / 2;
+                    if (fx < 2) fx = 2;
+                    UI_DisplayFrequency(String, fx, freqRow, false);
+                } else {
+                    // show the remaining 2 small frequency digits
+                    UI_PrintStringSmallNormal(String + 7, 113, 0, freqRow + 1);
+                    String[7] = 0;
+                    // show the main large frequency digits
+                    UI_DisplayFrequency(String, 32, freqRow, false);
+                }
             }
             else
 #endif
             {
                 // show the frequency in the main font
-                UI_PrintString(String, 32, 0, freqRow, 8);
+                UI_PrintString(String, icomMode ? 0 : 32, icomMode ? LCD_WIDTH : 0, freqRow, 8);
             }
 
             continue;
@@ -2037,8 +2051,9 @@ void UI_DisplayMain(void)
                     frequency = gEeprom.VfoInfo[vfo_num].pTX->Frequency;
             }
 
-            if (IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]))
-            {   // it's a channel
+            if (IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]) && !icomMode)
+            {   // it's a channel  (icomMode renders it like a frequency VFO:
+                //  big frequency + channel name on row 3, see below)
 
                 #ifdef ENABLE_FEAT_F4HWN_RESCUE_OPS
                     if(gEeprom.MENU_LOCK == false) {
@@ -2216,17 +2231,35 @@ void UI_DisplayMain(void)
 
 #ifdef ENABLE_BIG_FREQ
                 if(frequency < _1GHz_in_KHz) {
-                    // show the remaining 2 small frequency digits
-                    UI_PrintStringSmallNormal(String + 7, 113, 0, freqRow + 1);
-                    String[7] = 0;
-                    // show the main large frequency digits
-                    UI_DisplayFrequency(String, 32, freqRow, false);
+                    if (icomMode) {
+                        // centre the whole block (big digits + 2 small trailing
+                        // digits) like the V1's icom screen, now that the "F3"
+                        // band badge no longer takes the left edge. Own sprintf
+                        // (no "%3u" space pad, unlike UI_FormatFrequency) so a
+                        // sub-100 MHz frequency stays centred too.
+                        char e[12];
+                        sprintf(e, "%u.%05u",
+                            (unsigned)(frequency / 100000), (unsigned)(frequency % 100000));
+                        const int el = (int)strlen(e);
+                        const int bw = (el - 3) * 13 + 3;      // 13 px/digit, 3 px dot
+                        int fx = (LCD_WIDTH - bw - 14) / 2;    // 14 px = 2 small glyphs
+                        if (fx < 2) fx = 2;
+                        UI_PrintStringSmallNormal(e + el - 2, fx + bw, 0, freqRow + 1);
+                        e[el - 2] = 0;
+                        UI_DisplayFrequency(e, fx, freqRow, false);
+                    } else {
+                        // show the remaining 2 small frequency digits
+                        UI_PrintStringSmallNormal(String + 7, 113, 0, freqRow + 1);
+                        String[7] = 0;
+                        // show the main large frequency digits
+                        UI_DisplayFrequency(String, 32, freqRow, false);
+                    }
                 }
                 else
 #endif
                 {
                     // show the frequency in the main font
-                    UI_PrintString(String, 32, 0, freqRow, 8);
+                    UI_PrintString(String, icomMode ? 0 : 32, icomMode ? LCD_WIDTH : 0, freqRow, 8);
                 }
 
                 // show the channel symbols
@@ -2236,6 +2269,21 @@ void UI_DisplayMain(void)
                     memcpy(p_line0 + 120, BITMAP_compand, sizeof(BITMAP_compand));
 #else
                     memcpy(p_line0 + 120 + LCD_WIDTH, BITMAP_compand, sizeof(BITMAP_compand));
+#endif
+
+#ifdef ENABLE_FEAT_F4HWN
+                // icomMode memory channel: the number is in the header, the
+                // frequency is big above -- put the channel name (if any) in
+                // the free row under the frequency.
+                if (icomMode && IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]))
+                {
+                    SETTINGS_FetchChannelName(String, gEeprom.ScreenChannel[vfo_num]);
+                    if (String[0])
+                    {
+                        String[16] = 0;
+                        UI_PrintStringSmallNormal(String, 2, 0, line + 3);
+                    }
+                }
 #endif
             }
         }

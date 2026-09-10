@@ -118,6 +118,11 @@ void APRS_MyPosition(int32_t *lat_e5, int32_t *lon_e5);  /* GPS fix or manual */
 bool APRS_GpsFixValid(void);          /* a fresh GPS fix is available          */
 uint8_t APRS_GpsState(void);          /* 0 no module / 1 searching / 2 locked  */
 
+/* Cache the last SARSAT 1G beacon the RP2040 decoded (SARSAT_CMD_BEACON /
+ * 0x06C2) so the "Send SARSAT" APRS message can relay its position. */
+void APRS_NoteBeacon(const char *hex_id, int32_t lat_e5, int32_t lon_e5,
+                     uint16_t country, uint8_t has_pos, uint8_t is_test);
+
 /* inverse-video helpers (replace the bold font ENABLE_SMALL_BOLD=0 removed).
  * Row 0..6 only. HiliteText: draw the string at x=1 first, this inverts x=0..
  * text+1 (~1 px margin each side); InvertBar: full-width title bar. */

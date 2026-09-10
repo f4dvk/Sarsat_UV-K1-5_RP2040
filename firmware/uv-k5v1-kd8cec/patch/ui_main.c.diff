@@ -87,7 +87,7 @@
  	uint8_t           *p_line        = gFrameBuffer[line];
  	char               str[16];
  
-@@ -303,8 +372,424 @@
+@@ -303,8 +372,407 @@
  
  // ***************************************************************************
  
@@ -203,27 +203,6 @@
 +}
 +#endif  // MAIN_SCREEN_MOTO
 +
-+static void MainDetail(char *out, const VFO_Info_t *v, enum Vfo_txtr_mode mode)
-+{
-+	int n = 0;
-+	if (v->Modulation == MODULATION_FM) {
-+		const FREQ_Config_t *c = (mode == VFO_MODE_TX) ? v->pTX : v->pRX;
-+		static const char *const ct[] = { "FM", "CT", "DCS", "DCR" };
-+		n += sprintf(out + n, "%s", ct[c->CodeType < 4 ? c->CodeType : 0]);
-+	} else {
-+		n += sprintf(out + n, "%s",
-+			v->Modulation < MODULATION_UKNOWN ? gModulationStr[v->Modulation] : "?");
-+	}
-+	if (v->CHANNEL_BANDWIDTH == BANDWIDTH_NARROW) n += sprintf(out + n, "-N");
-+	{ static const char pw[] = "LMH"; n += sprintf(out + n, "  %c", pw[v->OUTPUT_POWER % 3]); }
-+	if (v->freq_config_RX.Frequency != v->freq_config_TX.Frequency) {
-+		static const char *const d[] = { "", "  +", "  -" };
-+		n += sprintf(out + n, "%s", d[v->TX_OFFSET_FREQUENCY_DIRECTION % 3]);
-+	}
-+	if (v->FrequencyReverse) n += sprintf(out + n, "  R");
-+	out[n] = 0;
-+}
-+
 +// 6 px header font (digits 0-9 then A-Z), 1 byte/column, bit0 = top
 +#define HDR6_MAXW  8
 +static const uint8_t HDR6_W[38] = { 5, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 5, 4, 6, 6, 1, 1, 6, 4, 7, 6, 6, 4, 6, 6, 5, 6, 6, 6, 8, 6, 5, 6, 7, 2 };
@@ -310,19 +289,28 @@
 +
 +	HdrPut(tx ? "TX" : rx ? "RX" : "", 43);            // TX / RX  (fixed)
 +
-+	{ static const char pw[] = "LMH";                  // power  (fixed)
-+	  s[0] = pw[v->OUTPUT_POWER % 3]; s[1] = 0; HdrPut(s, 60); }
++	int floor_x;
++	{ static const char pw[] = "LMH";                  // power (fixed slot)
++	  s[0] = pw[v->OUTPUT_POWER % 3]; s[1] = 0; HdrPut(s, 60);
++	  floor_x = 60 + HdrW(s); }
 +
++	// offset direction, CTCSS and reverse follow a moving cursor with a ~4 px
++	// gap between each (like the UV-K1 header), instead of fixed columns that
++	// left "+ CT" cramped against each other.
 +	if (v->freq_config_RX.Frequency != v->freq_config_TX.Frequency) {
-+		int d = v->TX_OFFSET_FREQUENCY_DIRECTION % 3; // offset dir  (fixed)
-+		HdrPut(d == 1 ? "+" : d == 2 ? "-" : "", 70);
++		int d = v->TX_OFFSET_FREQUENCY_DIRECTION % 3;
++		const char *ds = d == 1 ? "+" : d == 2 ? "-" : "";
++		if (ds[0]) { int x = floor_x + 4; HdrPut(ds, x); floor_x = x + HdrW(ds); }
 +	}
 +	{
 +		const bool tc = v->freq_config_TX.CodeType != CODE_TYPE_OFF;
 +		const bool rc = v->freq_config_RX.CodeType != CODE_TYPE_OFF;
-+		HdrPut(tc && rc ? "CT" : tc ? "T" : "", 78);   // CTCSS  (fixed)
++		const char *ct = tc && rc ? "CT" : tc ? "T" : "";
++		if (ct[0]) { int x = floor_x + 4; HdrPut(ct, x); floor_x = x + HdrW(ct); }
 +	}
-+	if (v->FrequencyReverse) HdrPut("R", 93);          // reverse  (fixed)
++	if (v->FrequencyReverse) {
++		int x = floor_x + 4; HdrPut("R", x); floor_x = x + HdrW("R");
++	}
 +
 +	{
 +		char hr[8];
@@ -330,7 +318,8 @@
 +			v->Modulation < MODULATION_UKNOWN ? gModulationStr[v->Modulation] : "",
 +			v->CHANNEL_BANDWIDTH == BANDWIDTH_NARROW ? " N" : "");
 +		int hx = LCD_WIDTH - 3 - HdrW(hr);
-+		HdrPut(hr, hx < 103 ? 103 : hx);               // modulation, right
++		if (hx < floor_x + 4) hx = floor_x + 4;         // modulation, right-anchored
++		HdrPut(hr, hx);
 +	}
 +	for (unsigned int x = 0; x < LCD_WIDTH; x++)
 +		gFrameBuffer[0][x] ^= 0xFF;
@@ -396,7 +385,6 @@
 +	const VFO_Info_t *v = &gEeprom.VfoInfo[actVFO];
 +	const uint8_t sc    = gEeprom.ScreenChannel[actVFO];
 +	const enum VfoState_t st   = VfoState[actVFO];
-+	const enum Vfo_txtr_mode m = tx ? VFO_MODE_TX : VFO_MODE_RX;
 +	const uint32_t f = (tx ? v->pTX : v->pRX)->Frequency;
 +
 +#ifndef MAIN_SCREEN_MOTO
@@ -482,22 +470,17 @@
 +#endif
 +	MainIdleVfo(idleVFO, 6);
 +#else
-+	// id91: a detail line on R_DET, the S-meter on row 4, idle VFO on row 6.
-+	{
-+		char d[24] = "";
-+		if (want_freq_line)
-+			sprintf(d, "%lu.%05lu  ",
-+				(unsigned long)(f / 100000), (unsigned long)(f % 100000));
-+		MainDetail(d + strlen(d), v, m);
-+		d[22] = 0;
++	// id91: modulation / power / CTCSS / offset / bandwidth all live in the
++	// header bar now -- nothing is repeated under the frequency.  Only a
++	// channel *name* still needs its frequency spelled out, on R_DET.
++	if (want_freq_line) {
++		char d[16];
++		sprintf(d, "%lu.%05lu",
++			(unsigned long)(f / 100000), (unsigned long)(f % 100000));
 +		UI_PrintStringSmallNormal(d, 0, LCD_WIDTH, R_DET);
 +	}
-+	if (tx) {
-+		static const char *const pw[] = { "PWR LOW", "PWR MID", "PWR HIGH" };
-+		UI_PrintStringSmallNormal(pw[v->OUTPUT_POWER % 3], 2, 0, 4);
-+	}
 +#ifdef ENABLE_RSSI_BAR
-+	else if (rx) {
++	if (rx) {
 +		center_line = CENTER_LINE_RSSI;
 +		DisplayRSSIBar(false);
 +	}
@@ -512,7 +495,7 @@
  	char               String[22];
  
  	center_line = CENTER_LINE_NONE;
-@@ -554,6 +1032,11 @@
+@@ -554,6 +1015,11 @@
  						break;
  
  					case MDF_CHANNEL:	// show the channel number
@@ -524,7 +507,7 @@
  						sprintf(String, "CH-%03u", gEeprom.ScreenChannel[vfo_num] + 1);
  						UI_PrintString(String, 32, 0, line, 8);
  						break;
-@@ -796,6 +1279,7 @@
+@@ -796,6 +1262,7 @@
  		DrawCommBuffToSpectrum();
  
  	ST7565_BlitFullScreen();
