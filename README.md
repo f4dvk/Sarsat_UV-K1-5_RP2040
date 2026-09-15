@@ -145,16 +145,22 @@ la référence.
 ## Provenance & licence
 
 Le code original de ce projet (patches firmware, modules RP2040 propres,
-`docs/`, `tools/`, `rp2040/test/`) est sous **Apache‑2.0** — voir `LICENSE` et
-`NOTICE`.
+`docs/`, `tools/`, `rp2040/test/`) est sous **GPL‑3.0** — voir `LICENSE` et
+`NOTICE`. Le dépôt était sous Apache‑2.0 jusqu'au 2026‑09‑11 ; il est repassé
+en GPL‑3.0 spécifiquement pour pouvoir porter les décodeurs radiosonde
+(DFM, M10/M20, vérification croisée du RS41) depuis les décodeurs C de
+référence de `radiosonde_auto_rx`/`rs1729 RS` (GPL‑3.0) — voir `CREDITS.md`
+pour l'attribution détaillée.
 
-Le dépôt agrège aussi du code amont sous d'autres licences : **Apache‑2.0**
+Le dépôt agrège aussi du code amont sous d'autres licences (toutes
+compatibles GPL‑3.0 dans le sens absorption, jamais l'inverse) : **Apache‑2.0**
 pour les deux firmwares Quansheng, **BSD‑3‑Clause** pour le démodulateur AFSK
 porté de `pico_tnc`, **MIT** pour le décodeur SARSAT porté de
 `moricef/Decode_sarsat_406_v1g_v2g` (Copyright (c) 2026 Fabrice Morel ; cœur
 `dec406_v7` de **F4EHY**, 2020 — copie du `LICENSE` amont dans
-`vendor/decode_sarsat/LICENSE.moricef-upstream`). **`CREDITS.md`** en fait
-l'inventaire complet.
+`vendor/decode_sarsat/LICENSE.moricef-upstream`), et **GPL‑3.0** pour les
+portions des décodeurs radiosonde portées depuis `radiosonde_auto_rx`/
+`rs1729 RS` (auteur zilog80). **`CREDITS.md`** en fait l'inventaire complet.
 
 > Des révisions amont antérieures du décodeur SARSAT portaient une mention
 > *CC BY‑NC‑SA* dans l'en‑tête des fichiers ; les en‑têtes des fichiers portés

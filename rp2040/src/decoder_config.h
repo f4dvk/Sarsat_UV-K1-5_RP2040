@@ -151,6 +151,84 @@
                                       /* duplicate -- OR, in KISS mode, for     */
                                       /* every frame the host asks to send.     */
 
+/* ---- Radiosondes (RS41 full decode, M10/M20 full GPS decode) ----------- */
+/* MODE_SONDE is a THIRD, explicitly-opened capture mode alongside SARSAT and
+ * APRS (see main.c) -- it shares the 400-406 MHz band with SARSAT, so unlike
+ * APRS (picked purely from the radio's RX frequency) it cannot be auto-
+ * selected that way; the radio's SARSAT_HELLO reply's screen-state byte
+ * (d[6]) carries a 3rd value (3 = "Sonde screen open") the RP2040 uses
+ * instead, alongside the existing 0/1/2. Two parallel demod chains share
+ * this one ADC stream: RS41 (+ the older header-only M10/M20 detector) at
+ * 4800 baud, and the full M10/M20 GPS decoder at 9600 baud (see
+ * sonde_sync.h / sonde_m10.h) -- DFM is not attempted (no confirmed sync
+ * word yet, see sonde_sync.h). Continuous streaming capture (like APRS, not
+ * a windowed burst capture like SARSAT): each sync hunter runs on every bit
+ * regardless of frame boundaries, and this also happens to be the right
+ * shape for DFM's continuous (non-bursty) transmission whenever it gets a
+ * sync word to hunt for.
+ *
+ * 96 kHz (not 48 kHz): the first on-air test of the 9600 baud M10/M20 chain
+ * at 48 kHz (5 samples/bit -- half RS41's margin) lost bit-lock partway
+ * through real captures (visible as a clean run of bytes degrading into a
+ * repeating FF FF FF... tail once the PLL drifted off a real, noisy
+ * signal -- a differentially-decoded constant bit stream produces exactly
+ * that pattern). 96 kHz gives M10/M20 the same 10 samples/bit margin RS41
+ * already has proven on air, at the cost of tighter ADC ring timing (see
+ * SONDE_RING_SAMPLES below, doubled to compensate).
+ *
+ * ⚠️ TEST (2026-09-11, diagnostic): reverted to 48 kHz here, on the same
+ * hardware where 96 kHz has since shown a reproducible, hardware-level
+ * flat-zero run (raw ADC pinned exactly at its floor for tens of ms,
+ * confirmed via a sentinel-fill test on the RP2040's own raw 'y' capture
+ * -- not a firmware bug, not a decode artifact, not tied to any BK4819
+ * register this project controls, not tied to the received signal
+ * content, not tied to power supply) -- present on two independently
+ * built C-Boards, but absent from SARSAT (16 kHz) and APRS (13.2 kHz),
+ * both of which share this exact same continuous free-running ADC+DMA
+ * ring architecture, just at 6-7x lower sample rates. If the RP2040's ADC
+ * has a small per-conversion glitch rate, running 6-7x more conversions
+ * per second would produce proportionally more (or none, if it's a rate
+ * threshold rather than a per-sample probability) -- this test isolates
+ * that variable directly.
+ *
+ * IMPORTANT CAVEAT, re-read from this same comment's history above: the
+ * 48 kHz "lost bit lock -> FF FF FF tail" symptom that justified the
+ * original move to 96 kHz was diagnosed from DECODED BITS alone, before
+ * this project had any way to look at the raw ADC values a capture was
+ * actually built from (the 'y' command / sonde.raw dump did not exist
+ * yet). A signal that flatlines to a constant DC value for a stretch
+ * produces *exactly* that same "clean bytes degrading into a repeating
+ * FF FF FF tail" signature once it goes through NRZI differential
+ * decoding -- so that old 48 kHz failure may well have been this same
+ * hardware-level flat-zero event the whole time, just not recognized as
+ * such yet.
+ *
+ * TESTED and REVERTED (2026-09-11): ran this at 48 kHz on air. The
+ * dropout still happened -- same order of magnitude in wall-clock ms on
+ * the raw 'y' capture as every 96 kHz capture this session, if anything
+ * covering a *larger* fraction of one M10/M20 capture window in chip
+ * units that specific time (though that's a single data point, could be
+ * natural variance in a real event rather than a rate effect). No
+ * measurable benefit, and a real cost (half the oversampling margin per
+ * chip) -- reverted to 96000 per this note's own criterion ("revert if
+ * this doesn't change anything measurable"). Sample rate is not the
+ * variable behind this dropout. */
+#define CFG_SONDE_SAMPLE_RATE_HZ 96000
+#define SONDE_RING_SAMPLES  16384        /* 2^14, ~170 ms @ 96 kHz -- same    */
+                                         /* time margin as the previous 8192  */
+                                         /* @ 48 kHz gave (doubled the rate,  */
+                                         /* doubled the buffer)               */
+#define SONDE_RING_BITS     14           /* log2(SONDE_RING_SAMPLES*2), must */
+                                         /* survive the blocking radio_send  */
+                                         /* burst on a decode (same rationale */
+                                         /* as APRS_RING_BITS, aprs_rx.c)    */
+
+#define CMD_SONDE_CLEAR      0x06E0u     /* no payload                       */
+#define CMD_SONDE_TEXT       0x06E1u     /* {line:u8, invert:u8, ascii[...]} */
+                                         /* -- same shape/line count as      */
+                                         /* CMD_SARSAT_TEXT, own line buffer */
+                                         /* on the radio side (app/sonde.c)  */
+
 /* ---- GPS (NMEA in on UART1, C-Board GPS header GP4/GP5) --------------- */
 #define CFG_GPS_ENABLE        1
 #define CFG_GPS_UART          uart1

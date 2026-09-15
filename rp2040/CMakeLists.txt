@@ -35,6 +35,11 @@ add_executable(sarsat_rp2040
     src/aprs_digi.c
     src/gps_nmea.c
     src/kiss.c
+    src/sonde_demod.c
+    src/sonde_rs41.c
+    src/sonde_sync.c
+    src/sonde_dfm.c
+    src/sonde_m10.c
 )
 
 target_include_directories(sarsat_rp2040 PRIVATE src)

@@ -41,15 +41,108 @@ cp "$HERE/patch/aprs.c"    App/app/aprs.c
 cp "$HERE/patch/aprs.h"    App/app/aprs.h
 cp "$HERE/patch/ax25.c"    App/app/ax25.c
 cp "$HERE/patch/ax25.h"    App/app/ax25.h
+cp "$HERE/patch/sonde.c"   App/app/sonde.c
+cp "$HERE/patch/sonde.h"   App/app/sonde.h
 cp "$HERE/patch/ui_main.c" App/ui/main.c
 
 echo "== points d'ancrage"
 # Chaque insertion est faite une seule fois (perl en mode "slurp", pas de /g)
 # sur un clone neuf ; un échec d'ancrage est fatal (contrôle plus bas).
 
-# App/app/app.c #0 : include de sarsat.h + afgain.h + aprs.h
+# App/frequencies.c : plafond RX réel du BK4829 (retour terrain : "souffle
+# mais pas de RX à 1297 MHz sur l'UV-K1, fonctionne sur le V1"). Ce fichier est
+# hérité tel quel du fork BK4819 (commentaire d'origine : "18MHz ~ 630MHz and
+# 760MHz ~ 1300MHz"), jamais revalidé pour le BK4829. Fiche technique BK4829
+# fournie par l'utilisateur : "Worldwide band: 18 MHz ~ 580 MHz, 760 MHz ~
+# 1160 MHz" -- 3 constantes à corriger en conséquence (le V1/BK4819 garde ses
+# valeurs d'origine, non concerné) :
+#   - BX4819_band2_upper (plafond haut, sert de fait à BAND7_470MHz.upper en
+#     ENABLE_WIDE_RX) : 1300 MHz -> 1160 MHz -- la cause directe du symptôme
+#     remonté (1297 MHz tombait dans une zone où le récepteur BK4829 n'a plus
+#     de front-end RF fonctionnel : souffle large-bande générique, jamais de
+#     signal utile).
+#   - BX4819_band1.upper (haut de la 1ʳᵉ bande, sert au "saut" automatique
+#     hors du trou PLL entre les deux bandes de synthèse) : 630 -> 580 MHz --
+#     au-delà, même symptôme latent (pas encore remonté) entre 580-630 MHz.
+#   - BX4819_band2.lower (bas de la 2ᵉ bande, même mécanisme de saut) :
+#     840 -> 760 MHz -- dans l'autre sens : le trou PLL actuel est trop large
+#     et fait sauter par-dessus 760-840 MHz, qui est en fait de la bande
+#     valide d'après la fiche technique.
+perl -0pi -e 's/#define BX4819_band2_upper 130000000/#define BX4819_band2_upper 116000000  \/* BK4829 datasheet: worldwide band 760-1160 MHz (pas 1300 comme le BK4819) *\//' App/frequencies.c
+perl -0pi -e 's/const freq_band_table_t BX4819_band1 = \{BX4819_band1_lower,  63000000\};/const freq_band_table_t BX4819_band1 = {BX4819_band1_lower, 58000000};  \/* BK4829: 18-580 MHz *\//' App/frequencies.c
+perl -0pi -e 's/const freq_band_table_t BX4819_band2 = \{84000000, BX4819_band2_upper\};/const freq_band_table_t BX4819_band2 = {76000000, BX4819_band2_upper};  \/* BK4829: reouvre a 760 MHz *\//' App/frequencies.c
+
+grep -q 'BX4819_band2_upper 116000000' App/frequencies.c || { echo "!! frequencies.c : plafond BK4829 1160 MHz"; exit 1; }
+grep -q 'BX4819_band1_lower, 58000000' App/frequencies.c  || { echo "!! frequencies.c : bas de bande 580 MHz"; exit 1; }
+grep -q '{76000000, BX4819_band2_upper}' App/frequencies.c || { echo "!! frequencies.c : haut de bande 760 MHz"; exit 1; }
+
+# App/driver/bk4829.c : BK4819_SetFilterBandwidth() ignore totalement son
+# parametre weak_no_different ("(void)weak_no_different;") -- sur ce driver,
+# le preset WIDE (25 kHz) retrecit donc TOUJOURS le filtre RF sur un jugement
+# signal-faible, meme pour un VFO normal FM/USB, contrairement a la V1
+# (ENABLE_AM_FIX -> weak_no_different=true pour un VFO normal). Confirme sur
+# l'air (2026-09-14, retour utilisateur) : le premier accrochage en FM Large
+# sur V3 est nettement plus lent qu en RAW ou que sur la V1, plausible a la
+# fois a cause de ceci et du cache AGC de RADIO_SetupAGC() (App/radio.c, non
+# touche ici -- pas de bug reproductible identifie de ce cote la, juste un
+# ecart d amorcage deja compense par le delai ajoute dans patch/sonde.c).
+# Correctif minimal, additif : quand weak_no_different est vrai, le champ RF
+# faible-signal (<11:9>) est elargi pour egaler le champ RF principal
+# (<14:12>), desactivant le retrecissement automatique -- exactement la
+# valeur 0x3628 deja utilisee a la main dans patch/sonde.c pour WIDE, ici
+# generalisee au driver pour que TOUT appelant (pas seulement Sonde/SARSAT)
+# puisse en beneficier. Quand weak_no_different est faux, val garde sa valeur
+# stock d origine -- comportement inchange pour tout appelant qui ne l a pas
+# encore demande.
+perl -0pi -e 's/(            val = 0x3028;\n)/$1            if (weak_no_different) val = 0x3628;   \/* Sarsat_UV-K1-5_RP2040: champ RF faible-signal <11:9> elargi a 0b011 (= champ principal), pas de retrecissement automatique *\/\n/' App/driver/bk4829.c
+perl -0pi -e 's/(            val = 0x4048;\n)/$1            if (weak_no_different) val = 0x4848;   \/* idem, champ faible-signal <11:9> elargi a 0b100 *\/\n/' App/driver/bk4829.c
+perl -0pi -e 's/(            val = 0x2058;\n)/$1            if (weak_no_different) val = 0x2458;   \/* idem, champ faible-signal <11:9> elargi a 0b010 *\/\n/' App/driver/bk4829.c
+
+grep -q 'if (weak_no_different) val = 0x3628;' App/driver/bk4829.c || { echo "!! bk4829.c : weak_no_different WIDE"; exit 1; }
+grep -q 'if (weak_no_different) val = 0x4848;' App/driver/bk4829.c || { echo "!! bk4829.c : weak_no_different NARROW"; exit 1; }
+grep -q 'if (weak_no_different) val = 0x2458;' App/driver/bk4829.c || { echo "!! bk4829.c : weak_no_different NARROWER"; exit 1; }
+
+# App/radio.c : les deux seuls appels a BK4819_SetFilterBandwidth() pour un
+# VFO FM/USB normal (hors AM, deja weak_no_different=true dans les deux cas)
+# passaient "false" faute de ENABLE_AM_FIX defini pour ce build (V3 ne
+# definit jamais cette macro, contrairement a V1) -- desormais que le driver
+# ci-dessus honore vraiment ce parametre, les passer a "true" est ce qui fait
+# reellement disparaitre le retrecissement pour un VFO normal, comme sur V1.
+perl -0pi -e 's/(                #else\n)                    BK4819_SetFilterBandwidth\(Bandwidth, false\);\n(                #endif\n)/$1                    BK4819_SetFilterBandwidth(Bandwidth, true);   \/* Sarsat_UV-K1-5_RP2040: pas de retrecissement faible-signal pour un VFO FM\/USB normal, voir bk4829.c *\/\n$2/' App/radio.c
+perl -0pi -e 's/(            #else\n)                BK4819_SetFilterBandwidth\(Bandwidth, false\);\n(            #endif\n)/$1                BK4819_SetFilterBandwidth(Bandwidth, true);   \/* idem *\/\n$2/' App/radio.c
+
+grep -q 'BK4819_SetFilterBandwidth(Bandwidth, false)' App/radio.c && { echo "!! radio.c : un appel weak_no_different=false subsiste (attendu : 0)"; exit 1; }
+[ "$(grep -c 'BK4819_SetFilterBandwidth(Bandwidth, true)' App/radio.c)" -ge 4 ] || { echo "!! radio.c : moins de 4 appels weak_no_different=true (2 AM deja presents + 2 patches)"; exit 1; }
+
+# App/radio.c : RADIO_SetupAGC() met en cache son dernier (listeningAM,
+# disable) dans un static et saute BK4819_InitAGC() -- une reecriture a chaud
+# de toute la table de gain AGC -- si le meme couple est redemande. Ce cache
+# est initialise a 0xFF sur ce firmware V3 : le tout premier appel FM/USB
+# normal (non-AM, non-disable, donc couple 0) apres N IMPORTE QUEL etat
+# different (AM, ou un TX/squelch-mute qui passe disable=true) tombe sur un
+# cache-miss et declenche une vraie reecriture de table -- source plausible
+# du temps de reaccrochage plus lent en FM Large observe sur V3 par rapport
+# a la V1 (confirme sur l'air, 2026-09-14/15 -- meme mecanisme que celui deja
+# neutralise pour l'ecran Sonde via un delai, voir patch/sonde.c). Sur la V1
+# (uv-k5v1-kd8cec, radio.c d'origine, non touche par ce projet), ce meme
+# static n'est PAS initialise explicitement et vaut donc 0 par defaut -- qui
+# se trouve deja egal au premier couple FM/USB normal, donc
+# BK4819_InitAGC() n'est quasiment jamais rappele en ecoute FM ordinaire la-
+# bas. Sur confirmation explicite de l'utilisateur ("si la v1 est comme
+# ceci, tu peux etendre le correctif") : aligne le seed V3 sur celui de la
+# V1 (0 au lieu de 0xFF) pour que tout VFO classique beneficie du meme
+# comportement, pas seulement l'ecran Sonde. Le delai de 300 ms dans
+# patch/sonde.c est laisse en place (filet de securite bon marche pour le
+# cas plus rare ou le cache a ete change par un AM/TX juste avant l'ouverture
+# de l'ecran) plutot que retire.
+perl -0pi -e 's/static uint8_t lastSettings = 0xFF;/static uint8_t lastSettings = 0;   \/* Sarsat_UV-K1-5_RP2040: aligne sur le comportement (non explicite) de la V1 -- voir commentaire ci-dessus *\//' App/radio.c
+
+grep -q 'static uint8_t lastSettings = 0;' App/radio.c || { echo "!! radio.c : seed lastSettings AGC"; exit 1; }
+
+# App/app/app.c #0 : include de sarsat.h + afgain.h + aprs.h + sonde.h
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#include "app/afgain.h"\n#endif\n}' App/app/app.c
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs.h"\n#endif\n}' App/app/app.c
+perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n}' App/app/app.c
 
 # App/app/app.c #1 : APP_TimeSlice10ms(), juste après le service UART_PORT_UART
 # -> AFGAIN_TimeSlice() en tache de fond (indep. de l'ecran, ~10 ms tick) pour
@@ -59,6 +152,10 @@ perl -0pi -e 's{        UART_HandleCommand\(UART_PORT_UART\);\n        // SCHEDU
 # meme point d'ancrage : APRS_TimeSlice() (beacon auto, squelch rapide, gain
 # fixe, icone GPS) + popup RX auto sur trame decodee (gAprsShowRequest).
 perl -0pi -e 's{        UART_HandleCommand\(UART_PORT_UART\);\n        // SCHEDULER_Enable\(\);\n    \}\n#endif\n}{$&\n#ifdef ENABLE_APRS\n    APRS_TimeSlice();\n    if (gAprsShowRequest)\n        APP_RunAprs();     /* popup auto : ouvre en vue RX, auto-temporise/garde */\n#endif\n}' App/app/app.c
+# meme point d'ancrage : ouvre l'ecran Sonde quand une trame 0x06E1 vient
+# d'arriver (gSondeShowRequest) -- pas de TimeSlice() dedie (pas de beacon/
+# squelch particulier a gerer hors ecran, contrairement a APRS).
+perl -0pi -e 's{        UART_HandleCommand\(UART_PORT_UART\);\n        // SCHEDULER_Enable\(\);\n    \}\n#endif\n}{$&\n#ifdef ENABLE_SONDE\n    if (gSondeShowRequest) {\n        gSondeShowRequest = false;\n        APP_RunSonde();    /* auto-guarde ; se rearme si la radio est occupee */\n    }\n#endif\n}' App/app/app.c
 
 # App/app/app.c #2 : inhibition de la veille batterie sur 144-148 MHz (sinon
 # FUNCTION_POWER_SAVE coupe periodiquement le RX -> audio hache pour le C-Board).
@@ -72,6 +169,7 @@ perl -0pi -e 's/if \(gSetting_backlight_on_tx_rx & BACKLIGHT_ON_TR_RX\) \{\n    
 # App/app/uart.c : include
 perl -0pi -e 's{#include "app/uart.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#endif\n}' App/app/uart.c
 perl -0pi -e 's{#include "app/uart.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs.h"\n#endif\n}' App/app/uart.c
+perl -0pi -e 's{#include "app/uart.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n}' App/app/uart.c
 
 # App/app/uart.c : rendre SendReply() non-static (sarsat.c le reutilise)
 perl -0pi -e 's/static void SendReply\(uint32_t Port, void \*pReply, uint16_t Size\)/void SendReply(uint32_t Port, void *pReply, uint16_t Size)/' App/app/uart.c
@@ -79,23 +177,32 @@ perl -0pi -e 's/static void SendReply\(uint32_t Port, void \*pReply, uint16_t Si
 # App/app/uart.c : cases du switch (juste avant "    } // switch")
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SARSAT\n        case SARSAT_CMD_CLEAR:\n        case SARSAT_CMD_TEXT:\n        case SARSAT_CMD_LEVEL:\n        case SARSAT_CMD_HELLO:\n        case SARSAT_CMD_BEACON:\n            SARSAT_HandleUART(pUART_Command->Header.ID,\n                              pUART_Command->Buffer + sizeof(Header_t),\n                              pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_APRS\n        case APRS_CMD_RXTEXT:\n        case APRS_CMD_RXINFO:\n        case APRS_CMD_GPS:\n        case APRS_CMD_DIGI:\n            APRS_HandleUART(pUART_Command->Header.ID,\n                            pUART_Command->Buffer + sizeof(Header_t),\n                            pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
+perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SONDE\n        case SONDE_CMD_CLEAR:\n        case SONDE_CMD_TEXT:\n            SONDE_HandleUART(pUART_Command->Header.ID,\n                             pUART_Command->Buffer + sizeof(Header_t),\n                             pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 
-# App/settings.h : nouvelles entrées ACTION_OPT_SARSAT / ACTION_OPT_APRS (juste
-# avant le sentinel LEN)
+# App/settings.h : nouvelles entrées ACTION_OPT_SARSAT / ACTION_OPT_APRS /
+# ACTION_OPT_SONDE (juste avant le sentinel LEN)
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SARSAT\n    ACTION_OPT_SARSAT,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_APRS\n    ACTION_OPT_APRS,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
+perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SONDE\n    ACTION_OPT_SONDE,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 
-# App/app/action.c : ouvrir l'écran SARSAT / APRS depuis une touche assignable
-# (F1/F2 court/long via le menu F4HWN standard "F1Shrt"/"F1Long"/"F2Shrt"/
-# "F2Long" -> "SARSAT"/"APRS"), en plus de l'auto-ouverture sur trame reçue.
+# App/app/action.c : ouvrir l'écran SARSAT / APRS / Sonde depuis une touche
+# assignable (F1/F2 court/long via le menu F4HWN standard "F1Shrt"/"F1Long"/
+# "F2Shrt"/"F2Long" -> "SARSAT"/"APRS"/"SONDE"), en plus de l'auto-ouverture
+# sur trame reçue. Pas de raccourci F+N dedie pour Sonde (contrairement a
+# SARSAT/F+8 et APRS/F+5) : cette seule voie suffit et evite de sacrifier
+# une autre combinaison de touche.
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#endif\n}' App/app/action.c
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs.h"\n#endif\n}' App/app/action.c
+perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n}' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SARSAT\n    [ACTION_OPT_SARSAT] = &APP_RunSarsat,\n#endif\n$&/' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_APRS\n    [ACTION_OPT_APRS] = &APP_RunAprs,\n#endif\n$&/' App/app/action.c
+perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SONDE\n    [ACTION_OPT_SONDE] = &APP_RunSonde,\n#endif\n$&/' App/app/action.c
 
-# App/ui/menu.c : entrées "SARSAT" / "APRS" dans la liste des fonctions assignables
+# App/ui/menu.c : entrées "SARSAT" / "APRS" / "SONDE" dans la liste des
+# fonctions assignables
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SARSAT\n    {"SARSAT",          ACTION_OPT_SARSAT},\n#endif\n$&/' App/ui/menu.c
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_APRS\n    {"APRS",            ACTION_OPT_APRS},\n#endif\n$&/' App/ui/menu.c
+perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SONDE\n    {"SONDE",           ACTION_OPT_SONDE},\n#endif\n$&/' App/ui/menu.c
 
 # App/driver/eeprom_compat.c : reserver de la place dans la queue non revendiquee
 # du secteur "Settings" (0x00A170.. , juste apres "Settings Version" qui
@@ -262,12 +369,12 @@ perl -0pi -e 's/#include "app\/generic.h"\n/$&#ifdef ENABLE_SARSAT\n#include "ap
 perl -0pi -e 's/        case KEY_8:\n            if \(!beep\) \{\n                ACTION_BackLightOnDemand\(\); \n            \}\n            else \{\n                gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;\n                gRequestSaveChannel = 1;\n            \}\n/        case KEY_8:\n#ifdef ENABLE_SARSAT\n            APP_RunSarsat();                 \/\/ F+8 : open the SARSAT screen (same as V1)\n            gRequestDisplayScreen = DISPLAY_MAIN;\n#else\n            if (!beep) {\n                ACTION_BackLightOnDemand(); \n            }\n            else {\n                gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;\n                gRequestSaveChannel = 1;\n            }\n#endif\n/' App/app/main.c
 
 # App/CMakeLists.txt : option + sources
-perl -0pi -e 's/enable_feature\(ENABLE_UART_RW_BK_REGS\)\n/$&enable_feature(ENABLE_SARSAT\n    app\/sarsat.c\n    app\/afgain.c\n)\nenable_feature(ENABLE_APRS\n    app\/aprs.c\n    app\/ax25.c\n)\n/' App/CMakeLists.txt
+perl -0pi -e 's/enable_feature\(ENABLE_UART_RW_BK_REGS\)\n/$&enable_feature(ENABLE_SARSAT\n    app\/sarsat.c\n    app\/afgain.c\n)\nenable_feature(ENABLE_APRS\n    app\/aprs.c\n    app\/ax25.c\n)\nenable_feature(ENABLE_SONDE\n    app\/sonde.c\n)\n/' App/CMakeLists.txt
 
 # CMakePresets.json : defaut (off) dans chaque bloc de presets où ENABLE_UART_RW_BK_REGS
 # apparaît (le fichier en a deux : un pour "configurePresets", un pour "buildPresets"
 # ou similaire -- perl en mode /g pour couvrir les deux occurrences).
-perl -0pi -e 's/( *)"ENABLE_UART_RW_BK_REGS": false,\n/$&$1"ENABLE_SARSAT": false,\n$1"ENABLE_APRS": false,\n/g' CMakePresets.json
+perl -0pi -e 's/( *)"ENABLE_UART_RW_BK_REGS": false,\n/$&$1"ENABLE_SARSAT": false,\n$1"ENABLE_APRS": false,\n$1"ENABLE_SONDE": false,\n/g' CMakePresets.json
 
 echo "== controle"
 grep -q 'app/sarsat.h'      App/app/app.c   || { echo "!! app.c : include sarsat"; exit 1; }
@@ -315,8 +422,19 @@ grep -q 'app/aprs.h'  App/app/main.c    || { echo "!! app/main.c : include aprs"
 grep -q 'APP_RunAprs' App/app/main.c    || { echo "!! app/main.c : F+5 -> APRS"; exit 1; }
 grep -q 'app/sarsat.h' App/app/main.c   || { echo "!! app/main.c : include sarsat"; exit 1; }
 grep -q 'APP_RunSarsat' App/app/main.c  || { echo "!! app/main.c : F+8 -> SARSAT"; exit 1; }
+grep -q 'app/sonde.h'   App/app/app.c   || { echo "!! app.c : include sonde"; exit 1; }
+grep -q 'APP_RunSonde'  App/app/app.c   || { echo "!! app.c : hook tick 10ms sonde"; exit 1; }
+grep -q 'app/sonde.h'   App/app/uart.c  || { echo "!! uart.c : include sonde"; exit 1; }
+grep -q 'SONDE_HandleUART' App/app/uart.c || { echo "!! uart.c : dispatch sonde"; exit 1; }
+grep -q 'ACTION_OPT_SONDE' App/settings.h || { echo "!! settings.h : enum sonde"; exit 1; }
+grep -q 'app/sonde.h'   App/app/action.c || { echo "!! action.c : include sonde"; exit 1; }
+grep -q 'ACTION_OPT_SONDE.*APP_RunSonde' App/app/action.c || { echo "!! action.c : table sonde"; exit 1; }
+grep -q 'ACTION_OPT_SONDE' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sonde"; exit 1; }
+grep -q 'ENABLE_SONDE'  App/CMakeLists.txt || { echo "!! CMakeLists.txt : ENABLE_SONDE"; exit 1; }
+grep -q 'ENABLE_SONDE'  CMakePresets.json  || { echo "!! CMakePresets.json : ENABLE_SONDE"; exit 1; }
+grep -q 'SONDE_ScreenOpen' App/app/sarsat.c || { echo "!! sarsat.c : fusion etat ecran sonde"; exit 1; }
 
-echo "== build (preset=$PRESET, ENABLE_SARSAT=ON, ENABLE_APRS=ON, ENABLE_BYP_RAW_DEMODULATORS=ON)"
+echo "== build (preset=$PRESET, ENABLE_SARSAT=ON, ENABLE_APRS=ON, ENABLE_SONDE=ON, ENABLE_BYP_RAW_DEMODULATORS=ON)"
 # ENABLE_BYP_RAW_DEMODULATORS : deja dans le code amont (App/driver/bk4829.c
 # BK4819_EnterRaw(), cable dans RADIO_SetModulation() App/radio.c) mais eteint
 # par defaut sur le preset Fusion. C'est le discriminateur FM a plat (REG_2B
@@ -339,7 +457,7 @@ echo "== build (preset=$PRESET, ENABLE_SARSAT=ON, ENABLE_APRS=ON, ENABLE_BYP_RAW
 # rendre de la marge flash (le build etait a 99,0 %). D'autres extras
 # coupables au besoin : FMRADIO, AIRCOPY, VOX, FOXHUNT, BEAM, AUDIO_SCOPE,
 # MENU_CAT, PMR/GMRS...
-cmake --preset "$PRESET" -DENABLE_SARSAT=ON -DENABLE_APRS=ON -DENABLE_BYP_RAW_DEMODULATORS=ON \
+cmake --preset "$PRESET" -DENABLE_SARSAT=ON -DENABLE_APRS=ON -DENABLE_SONDE=ON -DENABLE_BYP_RAW_DEMODULATORS=ON \
     -DENABLE_SPECTRUM=OFF \
     -DENABLE_FEAT_F4HWN_GAME=OFF \
     -DENABLE_FEAT_F4HWN_QRCODE=OFF \

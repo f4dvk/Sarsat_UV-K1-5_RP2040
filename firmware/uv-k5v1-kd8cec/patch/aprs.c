@@ -898,6 +898,37 @@ void APRS_TimeSlice(void)
 {
     APRS_Ensure();
 
+    /* ⚠️ FIX (2026-09-12, on user report, kept in sync with V3's identical
+     * fix): CMD_APRS_CONFIG (call/ssid/path/symbol/digi level/KISS flag)
+     * used to be pushed to the RP2040 exactly ONCE per boot -- from
+     * APRS_Init(), itself only run lazily the first time anything touches
+     * the APRS subsystem, guarded by `s_inited` so it never fires again on
+     * its own -- plus on an explicit menu-edit save. The RP2040 keeps no
+     * config state of its own across ITS OWN reboots either (see
+     * APRS_PushConfig()'s comment), so if that one push is ever missed
+     * (e.g. sent before the RP2040's own UART receiver is even up yet, a
+     * real possibility since the two boot independently) or corrupted on
+     * the wire, nothing ever resends it -- the radio's menu keeps showing
+     * "KISS: ON" (that only reads gAprsCfg, this station's own local copy)
+     * while the RP2040 is silently still sitting on whatever it defaulted
+     * to at its own boot (KISS off), with no visible error either side.
+     * Symptom reported: KISS shows ON after a power cycle but doesn't
+     * actually pass traffic until the user re-enters the menu and toggles
+     * it off then on -- which works only because an edit always re-pushes,
+     * not because anything about the toggle itself matters. Fixed at the
+     * root instead of chasing that one flag: re-push the whole config
+     * periodically (~3 s, arbitrary -- fast enough that a missed boot-time
+     * push self-heals almost immediately, cheap enough for a single
+     * 16-byte UART write while nothing has changed) instead of relying on
+     * a single one-shot event with no retry. */
+    {
+        static uint32_t s_next_cfg_push_10ms;
+        if ((int32_t)(millis10() - s_next_cfg_push_10ms) >= 0) {
+            APRS_PushConfig();
+            s_next_cfg_push_10ms = millis10() + 300;   /* ~3 s */
+        }
+    }
+
     /* KISS TNC: the RP2040 (on its USB) is the TNC. The radio only keeps the
      * fast-squelch on, the C-Board AF level applied, and relays the frames the
      * host asks to send (APRS_DigipeatTimeSlice, fed by CMD_APRS_DIGI) -- no
@@ -1846,12 +1877,20 @@ void APP_RunAprs(void)
 #endif
         /* mini squelch: the main loop (which normally does this) is blocked.
          * carrier present -> speaker path + RX LED on (the C-Board hears it).
-         * carrier gone    -> mute the speaker, but only ~2 s LATER: APRS
+         * carrier gone    -> mute the speaker, but only a bit LATER: APRS
          * packets come in bursts a fraction of a second apart, and cutting the
          * audio feed to the C-Board between them breaks its bit-PLL / HDLC
          * framing -> "la LED s'allume, du souffle, mais la trame ne passe pas".
          * The deferred mute keeps the feed continuous across those short gaps
-         * and only silences the channel after a real lull. */
+         * and only silences the channel after a real lull.
+         * ⚠️ SHORTENED (2026-09-14, on explicit user request -- audio staying
+         * audible for a couple of seconds after the squelch closed was too
+         * noticeable on the operator's ear): 2 s -> 300 ms. Still bridges a
+         * same-burst gap between two packets a fraction of a second apart,
+         * just far less audible than before; if this ever reintroduces the
+         * "la LED s'allume, du souffle, mais la trame ne passe pas" symptom,
+         * lengthen this back up rather than dropping the deferred mute
+         * entirely (see the note above for why an instant cut is unsafe). */
         while (BK4819_ReadRegister(BK4819_REG_0C) & 1u) {
             BK4819_WriteRegister(BK4819_REG_02, 0);
             uint16_t ib = BK4819_ReadRegister(BK4819_REG_02);
@@ -1863,7 +1902,7 @@ void APP_RunAprs(void)
             }
             if (ib & BK4819_REG_02_SQUELCH_FOUND) {
                 g_SquelchLost = false;
-                if (!msq_mute_at) msq_mute_at = millis10() + 200;   /* +2 s */
+                if (!msq_mute_at) msq_mute_at = millis10() + 30;   /* +300 ms */
                 BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
             }
         }

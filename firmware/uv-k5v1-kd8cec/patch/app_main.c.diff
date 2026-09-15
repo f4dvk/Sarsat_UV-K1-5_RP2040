@@ -1,6 +1,6 @@
 --- a/app/main.c	2024-01-19 14:43:30.000000000 +0100
 +++ app/main.c	2026-09-02 19:46:07.519502679 +0200
-@@ -30,6 +30,12 @@
+@@ -30,6 +30,15 @@
  #ifdef ENABLE_SPECTRUM
  #include "app/spectrum.h"
  #endif
@@ -10,10 +10,25 @@
 +#ifdef ENABLE_APRS
 +#include "app/aprs.h"
 +#endif
++#ifdef ENABLE_SONDE
++#include "app/sonde.h"
++#endif
  
  #include "audio.h"
  #include "board.h"
-@@ -204,7 +210,10 @@
+@@ -91,7 +100,10 @@
+ 		case KEY_0:
+ 			#ifdef ENABLE_FMRADIO
+ 				ACTION_FM();
+-			#else
++			#elif defined(ENABLE_SONDE)
++				APP_RunSonde();                 // F+0 : open the Sonde screen
++				gRequestDisplayScreen = DISPLAY_MAIN;
++			#else
+ 
+ 
+ 				// TODO: make use of this function key
+@@ -204,7 +216,10 @@
  
  		case KEY_5:
  			if(beep) {
@@ -25,7 +40,7 @@
  
  				if (!IS_NOAA_CHANNEL(gTxVfo->CHANNEL_SAVE))
  				{
-@@ -245,8 +254,13 @@
+@@ -245,8 +260,13 @@
  			break;
  
  		case KEY_8:

@@ -1,6 +1,6 @@
 --- a/app/uart.c	2024-01-19 14:43:30.000000000 +0100
 +++ app/uart.c	2026-09-02 19:46:07.519502679 +0200
-@@ -22,6 +22,12 @@
+@@ -22,6 +22,15 @@
  #ifdef ENABLE_FMRADIO
  	#include "app/fm.h"
  #endif
@@ -9,6 +9,9 @@
 +#endif
 +#ifdef ENABLE_APRS
 +	#include "app/aprs.h"
++#endif
++#ifdef ENABLE_SONDE
++	#include "app/sonde.h"
 +#endif
  #include "app/uart.h"
  #include "board.h"
@@ -22,7 +25,7 @@
  {
  	Header_t Header;
  	Footer_t Footer;
-@@ -615,10 +621,33 @@
+@@ -615,10 +624,42 @@
  		case 0x0601:
  			CMD_0601_ReadBK4819Reg(UART_Command.Buffer);
  			break;
@@ -53,6 +56,15 @@
 +			APRS_HandleUART(UART_Command.Header.ID,
 +			                UART_Command.Buffer + sizeof(Header_t),
 +			                UART_Command.Header.Size);
++			break;
++#endif
++
++#ifdef ENABLE_SONDE
++		case 0x06E0:   // SONDE_CLEAR
++		case 0x06E1:   // SONDE_TEXT  {line:u8, invert:u8, ascii...}
++			SONDE_HandleUART(UART_Command.Header.ID,
++			                 UART_Command.Buffer + sizeof(Header_t),
++			                 UART_Command.Header.Size);
 +			break;
 +#endif
  	}

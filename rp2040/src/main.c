@@ -34,6 +34,9 @@
 #include "aprs_digi.h"
 #include "gps_nmea.h"
 #include "kiss.h"
+#include "sonde_demod.h"
+#include "sonde_sync.h"
+#include "sonde_m10.h"
 
 /* KISS TNC mode: the USB-CDC carries a binary KISS stream, not the debug log,
  * so every LOG() must fall silent while it is on (see the APRS menu's KISS
@@ -63,8 +66,13 @@ static absolute_time_t g_last_reply;
 static int            g_link_up = -1;             /* -1 unknown, 0 down, 1 up */
 static uint32_t       g_acks;
 
-/* ---- SARSAT / APRS mode (auto-selected from the radio's RX frequency) --- */
-enum { MODE_SARSAT = 0, MODE_APRS = 1 };
+/* ---- SARSAT / APRS / SONDE mode ---------------------------------------- */
+/* SARSAT and APRS auto-select from the radio's RX frequency (144-148 MHz ->
+ * APRS, else SARSAT). SONDE cannot: RS41/M10 share the SARSAT 400-406 MHz
+ * band, so frequency alone can't tell them apart -- it is only entered when
+ * the radio reports its dedicated Sonde screen open (SARSAT_HELLO reply
+ * byte 6 == 3, see decoder_config.h and each firmware's patch/sonde.c). */
+enum { MODE_SARSAT = 0, MODE_APRS = 1, MODE_SONDE = 2 };
 static int  g_mode         = MODE_SARSAT;
 static int  g_mode_pending  = MODE_SARSAT;
 static bool g_lvl_view      = false;   /* radio's SARSAT level screen is open */
@@ -90,6 +98,75 @@ static char      g_aprs_my_call[7];          /* radio's own call/SSID, pushed th
                                               * (aprs_digi_process()) -- "" if the
                                               * radio has none configured yet    */
 static uint8_t   g_aprs_my_ssid;
+
+/* SONDE: continuous ADC ring, same wrap-DMA idea as g_aprs_ring, at the
+ * higher sample rate RS41/M10 need (CFG_SONDE_SAMPLE_RATE_HZ). */
+static uint16_t g_sonde_ring[SONDE_RING_SAMPLES]
+    __attribute__((aligned(SONDE_RING_SAMPLES * 2)));
+static uint32_t      g_sonde_rd;
+static sonde_demod_t g_sonde_demod;         /* 4800 baud: RS41 + the header-
+                                             * only M10/M20 detector below   */
+static sonde_sync_t  g_sonde_sync;
+static uint32_t      g_sonde_rs41_ok, g_sonde_rs41_bad, g_sonde_m10_hits;
+static absolute_time_t g_sonde_next_m10_push;   /* dedup: M10 detection is a
+                                                 * bare header lock, cheap to
+                                                 * re-trigger on real noise */
+
+/* M10/M20 full GPS decode: a SEPARATE 9600 baud chain on the same raw ADC
+ * stream (confirmed chip rate, see sonde_m10.h -- different from the 4800
+ * baud chain above, which stays wired to the older header-only detector
+ * that already proved itself on air; this one is additive, not a
+ * replacement, until the 9600 baud path gets its own on-air mileage). */
+static sonde_m10_chipdemod_t g_sonde_demod_m10;
+static sonde_m10_hunt_t g_m10_hunt;
+static uint32_t         g_sonde_m10_gps_ok, g_sonde_m10_gps_bad;
+static absolute_time_t  g_sonde_next_m10_gps_push;
+static absolute_time_t  g_sonde_next_diag_dump;   /* throttle for the frame:/
+                                                    * rawcells: hex dumps below
+                                                    * -- see the 2026-09-11
+                                                    * "printf storm" note by
+                                                    * their call site: each
+                                                    * dump is ~1800 individual
+                                                    * blocking printf() calls
+                                                    * over USB CDC, and the
+                                                    * hunter can re-lock (on
+                                                    * real bursts *or* noise)
+                                                    * much faster than that
+                                                    * can drain -- unthrottled,
+                                                    * repeated dumps stall
+                                                    * sonde_service() long
+                                                    * enough that the DMA ring
+                                                    * (only ~170 ms deep) can
+                                                    * silently skip ahead,
+                                                    * which is indistinguishable
+                                                    * on the wire from a real
+                                                    * mid-burst signal dropout. */
+
+/* 'y' arms a one-shot raw-ADC capture, DECIMATED to a fixed 32 kHz (every
+ * 3rd sample at the real 96 kHz ADC rate -- see SONDE_DUMP_DECIM), dumped as
+ * [sonde.raw] hex (same 32-samples/line, 12-bit-per-sample format as the
+ * APRS 'w' dump above) so a real capture can be replayed off-line -- this
+ * project's earlier M10/M20 WAV cross-checks all used a SEPARATE PC sound
+ * card recording, which also happened to be 32 kHz (a harder case than the
+ * real 96 kHz hardware path, see sonde_m10.h); decimating to that SAME rate
+ * here means this gets the ACTUAL on-target samples while staying directly
+ * comparable/reusable with the existing 32 kHz analysis tooling. The
+ * decimation (not full 96 kHz) is a RAM concession, not a design choice --
+ * the RP2040's free SRAM at this point in the project is only ~21 KB, not
+ * enough for a useful-length full-rate buffer. SONDE mode streams
+ * continuously with no discrete "carrier" event to arm against (unlike
+ * APRS's aprs_rx_carrier()), so recording starts right on the keypress --
+ * press it a moment before the next expected burst (sondes transmit
+ * roughly once a second), press again if the burst lands outside the
+ * window. 10000 samples at 32 kHz is 312 ms, covering a full ~200-250 ms
+ * burst with some margin either side, in 20 KB. */
+#define SONDE_DUMP_DECIM   3
+#define SONDE_DUMP_SAMPLES 10000
+#define SONDE_DUMP_FS_HZ   (CFG_SONDE_SAMPLE_RATE_HZ / SONDE_DUMP_DECIM)
+static uint16_t g_sonde_dump[SONDE_DUMP_SAMPLES];
+static uint32_t g_sonde_dump_n;
+static uint32_t g_sonde_dump_decim_ctr;
+static enum { SDUMP_IDLE, SDUMP_RECORDING, SDUMP_READY } g_sonde_dump_st;
 
 #if CFG_APRS_RX_DIAG
 /* provisional: 'w' arms a one-shot raw-ADC capture of the next carrier, then
@@ -155,8 +232,13 @@ static void link_poll(void)
             }
             g_radio_mod = mod;
 
-            /* pick the decoder from the RX frequency: 2 m -> APRS, else SARSAT */
-            if (f10 != 0)
+            /* pick the decoder: the radio's own Sonde screen open (d[6]==3)
+             * wins outright (it shares SARSAT's 400-406 MHz band, so
+             * frequency can't arbitrate the two -- see decoder_config.h);
+             * else 2 m -> APRS, else SARSAT. */
+            if (d[6] == 3)
+                g_mode_pending = MODE_SONDE;
+            else if (f10 != 0)
                 g_mode_pending = (f10 >= CFG_APRS_BAND_LO_10HZ &&
                                   f10 <= CFG_APRS_BAND_HI_10HZ)
                                      ? MODE_APRS : MODE_SARSAT;
@@ -558,6 +640,33 @@ static bool call_base_eq(const char *a, const char *b)
     return true;
 }
 
+/* base callsign AND SSID, unlike call_base_eq() above (kept as-is, base call
+ * only -- still fine for anything that genuinely means "any SSID of this
+ * callsign"). An APRS message is addressed to one specific station: "F4DVK-7"
+ * and "F4DVK-9" are different stations even though they share a base call, so
+ * ACK'ing or displaying a message on the wrong SSID's device is a real
+ * correctness bug, not just cosmetic (2026-09-12, on explicit user request).
+ * `addressee` is the raw APRS address field -- base call, optionally "-N" or
+ * "-NN", space-padded to 9 chars (see aprs_parse.c's message parsing); an
+ * absent SSID compares equal to SSID 0, per the APRS spec's own convention. */
+static bool call_full_eq(const char *addressee, const char *my_call, uint8_t my_ssid)
+{
+    if (!call_base_eq(addressee, my_call))
+        return false;
+    int j = 0;
+    while (j < 6 && addressee[j] && addressee[j] != '-' && addressee[j] != ' ')
+        j++;
+    uint8_t ssid = 0;
+    if (addressee[j] == '-') {
+        j++;
+        while (addressee[j] >= '0' && addressee[j] <= '9') {
+            ssid = (uint8_t)(ssid * 10 + (addressee[j] - '0'));
+            j++;
+        }
+    }
+    return ssid == my_ssid;
+}
+
 /* Send a standard APRS ACK for a message addressed to us (":<sender>:ackNN"),
  * via the radio's TX queue (CMD_APRS_DIGI: it appends the FCS + does CSMA). */
 static void aprs_auto_ack(const char *sender, const char *num)
@@ -604,10 +713,29 @@ static void aprs_on_packet(const uint8_t *ax25, int len, void *user)
     aprs_info_t ai;
     bool parsed = aprs_parse(ax25, len, &ai);
 
-    /* auto-ACK a message addressed to us (any message with a "{NN" number) */
-    if (parsed && ai.kind == APRS_KIND_MESSAGE && ai.msg_no[0] &&
-        call_base_eq(ai.name, g_aprs_my_call))
+    /* A message (this covers a PCT_Report/ADRASEC position request too, see
+     * aprs_parse.h's is_adrasec) is addressed to one specific station, SSID
+     * included -- showing it on every ADRASEC team member's radio because
+     * they all share the same base call would defeat the point of a request
+     * meant for just one of them, and ACK'ing on their behalf would tell the
+     * sender it reached the wrong person. Gate both on a full callsign+SSID
+     * match (call_full_eq(), not the base-call-only call_base_eq() this used
+     * before -- 2026-09-12, on explicit user request). A message not for us
+     * is still digipeated (aprs_try_digipeat() above already ran regardless)
+     * but otherwise dropped right here -- not pushed to the radio display at
+     * all, on this screen or the raw-text fallback below either. */
+    bool msg_for_us = parsed && ai.kind == APRS_KIND_MESSAGE &&
+                       call_full_eq(ai.name, g_aprs_my_call, g_aprs_my_ssid);
+
+    if (msg_for_us && ai.msg_no[0])
         aprs_auto_ack(ai.src, ai.msg_no);
+
+    if (parsed && ai.kind == APRS_KIND_MESSAGE && !msg_for_us) {
+        LOG("[aprs]   #%lu  %s  message to [%s] (not this station) -- "
+            "not displayed/ack'd\n",
+            (unsigned long)g_aprs_pkts, ai.src, ai.name);
+        return;
+    }
 
     if (parsed && (ai.has_pos || ai.is_adrasec || ai.kind == APRS_KIND_STATUS ||
                    ai.kind == APRS_KIND_MESSAGE)) {
@@ -754,6 +882,264 @@ static void sarsat_mode_enter(void)
         CFG_SAMPLE_RATE_HZ);
 }
 
+static void radio_send_sonde_text(uint8_t line, uint8_t invert, const char *s)
+{
+    uint8_t p[SARSAT_LINE_CHARS + 2];
+    size_t sl = strnlen(s, SARSAT_LINE_CHARS - 1);
+    p[0] = line;
+    p[1] = invert;
+    memcpy(p + 2, s, sl);
+    radio_send(CMD_SONDE_TEXT, p, sl + 2);
+}
+
+/* Push a handful of pre-formatted lines to the radio's Sonde screen, same
+ * "CLEAR then TEXT*n" shape as radio_push_result() for SARSAT. `lines[0]` is
+ * shown inverted (the header row). */
+static void radio_push_sonde_lines(const char *const *lines, int n)
+{
+    radio_send(CMD_SONDE_CLEAR, NULL, 0);
+    for (int i = 0; i < n; i++) {
+        radio_send_sonde_text((uint8_t)i, (i == 0), lines[i]);
+        sleep_ms(8);
+        link_poll();
+    }
+}
+
+static void sonde_mode_enter(void)
+{
+    adc_run(false);
+    dma_channel_abort(g_dma_chan);
+    adc_fifo_drain();
+    adc_set_clkdiv((float)48000000.0f / (float)CFG_SONDE_SAMPLE_RATE_HZ - 1.0f);
+
+    sonde_demod_init(&g_sonde_demod, CFG_SONDE_SAMPLE_RATE_HZ, 4800);
+    sonde_sync_init(&g_sonde_sync);
+    sonde_m10_chipdemod_init(&g_sonde_demod_m10, CFG_SONDE_SAMPLE_RATE_HZ, 9600);
+    sonde_m10_hunt_init(&g_m10_hunt);
+    g_sonde_rd = 0;
+    g_sonde_rs41_ok = g_sonde_rs41_bad = g_sonde_m10_hits = 0;
+    g_sonde_m10_gps_ok = g_sonde_m10_gps_bad = 0;
+    g_sonde_next_m10_push = get_absolute_time();
+    g_sonde_next_m10_gps_push = get_absolute_time();
+    g_sonde_next_diag_dump = get_absolute_time();
+
+    dma_channel_config c = dma_channel_get_default_config(g_dma_chan);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
+    channel_config_set_read_increment(&c, false);
+    channel_config_set_write_increment(&c, true);
+    channel_config_set_ring(&c, true, SONDE_RING_BITS);
+    channel_config_set_dreq(&c, DREQ_ADC);
+    dma_channel_configure(g_dma_chan, &c, g_sonde_ring, &adc_hw->fifo,
+                          0xFFFFFFFFu, true);
+    adc_run(true);
+
+    g_mode = MODE_SONDE;
+    LOG("[sonde]  mode SONDE  (%d Hz, RS41 full decode + M10/M20 detect)  "
+        "-- tune the radio to the sonde's frequency\n", CFG_SONDE_SAMPLE_RATE_HZ);
+}
+
+/* Format and push a decoded RS41 frame. Distance/bearing from the operator
+ * position, same helper APRS RX already uses (aprs_geo(), aprs_parse.h). */
+static void sonde_push_rs41(const sonde_rs41_result_t *r)
+{
+    char l0[SARSAT_LINE_CHARS], l1[SARSAT_LINE_CHARS], l2[SARSAT_LINE_CHARS],
+        l3[SARSAT_LINE_CHARS];
+    const char *lines[4] = { l0, l1, l2, l3 };
+    int n = 1;
+
+    snprintf(l0, sizeof l0, "RADIOSONDE RS41");
+
+    if (!r->has_position) {
+        snprintf(l1, sizeof l1, "pos. inconnue");
+        n = 2;
+    } else {
+        snprintf(l1, sizeof l1, "%.4f,%.4f",
+                 r->lat_e5 / 100000.0, r->lon_e5 / 100000.0);
+        snprintf(l2, sizeof l2, "alt %ld m", (long)r->alt_m);
+        n = 3;
+
+        int32_t my_lat, my_lon;
+        my_position(&my_lat, &my_lon);
+        uint32_t dist_m; uint16_t brg;
+        if ((my_lat || my_lon) &&
+            aprs_geo(my_lat, my_lon, r->lat_e5, r->lon_e5, &dist_m, &brg)) {
+            snprintf(l3, sizeof l3, "%.1fkm  %03u deg", dist_m / 1000.0, brg);
+            n = 4;
+        }
+    }
+
+    LOG("[sonde]  RS41  %s  %s\n", r->has_position ? "pos" : "no-pos", l1);
+    radio_push_sonde_lines(lines, n);
+}
+
+static void sonde_push_m10(void)
+{
+    /* rate-limited: this is a bare header lock (no CRC/frame check possible
+     * yet, see sonde_sync.h) -- real air noise can re-trigger it more often
+     * than a genuine ~1 Hz M10/M20 burst repeats. */
+    if (!time_reached(g_sonde_next_m10_push))
+        return;
+    g_sonde_next_m10_push = make_timeout_time_ms(3000);
+
+    static const char *const lines[2] = {
+        "RADIOSONDE M10/M20", "position inconnue",
+    };
+    LOG("[sonde]  M10/M20 header locked (#%lu)\n", (unsigned long)g_sonde_m10_hits);
+    radio_push_sonde_lines(lines, 2);
+}
+
+/* M10/M20 full GPS decode (9600 baud chain) -- see sonde_m10.h's header
+ * note: field-layout alignment not yet cross-validated against real air
+ * data, so treat a first on-air result here as an experiment, not a given. */
+static void sonde_push_m10_gps(const m10_gps_t *g)
+{
+    if (!time_reached(g_sonde_next_m10_gps_push))
+        return;
+    g_sonde_next_m10_gps_push = make_timeout_time_ms(2000);
+
+    char l0[SARSAT_LINE_CHARS], l1[SARSAT_LINE_CHARS], l2[SARSAT_LINE_CHARS];
+    const char *lines[3] = { l0, l1, l2 };
+    int n;
+
+    snprintf(l0, sizeof l0, "RADIOSONDE M10/M20");
+    snprintf(l1, sizeof l1, "%.4f,%.4f",
+             g->lat_e5 / 100000.0, g->lon_e5 / 100000.0);
+    n = 2;
+
+    int32_t my_lat, my_lon;
+    my_position(&my_lat, &my_lon);
+    uint32_t dist_m; uint16_t brg;
+    if ((my_lat || my_lon) &&
+        aprs_geo(my_lat, my_lon, g->lat_e5, g->lon_e5, &dist_m, &brg)) {
+        snprintf(l2, sizeof l2, "%.1fkm  %03u deg", dist_m / 1000.0, brg);
+        n = 3;
+    }
+
+    LOG("[sonde]  M10/M20 GPS  %.5f %.5f alt=%ld\n",
+        g->lat_e5 / 100000.0, g->lon_e5 / 100000.0, (long)g->alt_m);
+    radio_push_sonde_lines(lines, n);
+}
+
+/* Dump the armed SONDE capture as [sonde.raw] lines -- see the 'y' command
+ * note by g_sonde_dump_st's declaration. Same 32-samples/line, 12-bit-hex
+ * format as [aprs.raw] (aprs_dump_flush()) so the same kind of host-side
+ * parser works for either. */
+static void sonde_dump_flush(void)
+{
+    if (g_sonde_dump_st != SDUMP_READY)
+        return;
+    LOG("[sonde.raw] begin n=%lu fs=%d\n", (unsigned long)g_sonde_dump_n,
+        SONDE_DUMP_FS_HZ);
+    for (uint32_t i = 0; i < g_sonde_dump_n; i += 32) {
+        char ln[32 * 3 + 1];
+        int k = 0;
+        for (uint32_t j = i; j < i + 32 && j < g_sonde_dump_n; j++)
+            k += snprintf(ln + k, sizeof ln - k, "%03X", g_sonde_dump[j]);
+        LOG("[sonde.raw] %s\n", ln);
+    }
+    LOG("[sonde.raw] end\n");
+    g_sonde_dump_st = SDUMP_IDLE;
+}
+
+/* Drain the ADC ring through the demod + sync hunter. */
+static void sonde_service(void)
+{
+    uint32_t base = (uint32_t)(uintptr_t)g_sonde_ring;
+    uint32_t widx = ((dma_hw->ch[g_dma_chan].write_addr - base) / 2)
+                    & (SONDE_RING_SAMPLES - 1);
+    while (g_sonde_rd != widx) {
+        uint16_t raw = g_sonde_ring[g_sonde_rd] & 0x0FFF;
+        g_sonde_rd = (g_sonde_rd + 1) & (SONDE_RING_SAMPLES - 1);
+
+        if (g_sonde_dump_st == SDUMP_RECORDING) {
+            if (++g_sonde_dump_decim_ctr >= SONDE_DUMP_DECIM) {
+                g_sonde_dump_decim_ctr = 0;
+                g_sonde_dump[g_sonde_dump_n++] = raw;
+                if (g_sonde_dump_n >= SONDE_DUMP_SAMPLES)
+                    g_sonde_dump_st = SDUMP_READY;
+            }
+        }
+
+        int32_t sample = ((int32_t)raw - 2048) << CFG_AUDIO_GAIN_SHIFT;
+
+        uint8_t bit;
+        if (sonde_demod_sample(&g_sonde_demod, sample, &bit)) {
+            sonde_rs41_result_t r;
+            sonde_evt_t e = sonde_sync_feed(&g_sonde_sync, bit, &r);
+            if (e == SONDE_EVT_RS41) {
+                if (r.n_blocks > 0) { g_sonde_rs41_ok++;  sonde_push_rs41(&r); }
+                else                  g_sonde_rs41_bad++;   /* bit-matched, no
+                                                              * valid block --
+                                                              * false sync on
+                                                              * noise, stay quiet */
+            } else if (e == SONDE_EVT_M10) {
+                g_sonde_m10_hits++;
+                sonde_push_m10();
+            }
+        }
+
+        uint8_t bit9600;
+        int32_t cell_avg9600;
+        if (sonde_m10_chipdemod_sample(&g_sonde_demod_m10, sample, &bit9600, &cell_avg9600)) {
+            m10_gps_t g;
+            if (sonde_m10_hunt_feed(&g_m10_hunt, bit9600, cell_avg9600, &g)) {
+                /* diagnostic: a hex dump of every capture (good or bad) --
+                 * the fastest way to re-derive the real M10/M20 field
+                 * offsets from an on-air capture is to compare several of
+                 * these against each other/known values, same technique
+                 * this project's SDR forensics already used offline (see
+                 * the radiosonde plan notes), but now from the exact
+                 * on-target pipeline instead of a Python reimplementation.
+                 *
+                 * THROTTLED (2026-09-11): this used to fire unconditionally
+                 * on every completed capture window, good or bad -- on real
+                 * noise the header correlator can re-lock and re-fill the
+                 * 1680-chip window far faster than ~1800 individual blocking
+                 * printf() calls (one per byte/cell) can drain over USB CDC.
+                 * That stalls this very loop -- the one draining the ADC
+                 * ring -- for what real-world testing measured as tens of
+                 * ms at a time; the ring is only ~170 ms deep, so a bad
+                 * enough stall makes sonde_service() silently skip ahead
+                 * past real audio it never got to read. On the wire that is
+                 * indistinguishable from a genuine mid-burst RF dropout,
+                 * and is a strong suspect for exactly that symptom seen in
+                 * on-air captures this session (a single, bit-exact-flat
+                 * ~80 ms run of raw ADC samples in the middle of an
+                 * otherwise-good M10/M20 frame). Capped to once per ~3 s --
+                 * still far more than enough to catch every real ~1 Hz
+                 * burst, but can no longer pile up on itself. */
+                if (time_reached(g_sonde_next_diag_dump)) {
+                    g_sonde_next_diag_dump = make_timeout_time_ms(3000);
+                    LOG("[sonde]  M10/M20 frame:");
+                    for (int i = 0; i < (int)sizeof g_m10_hunt.frame_bytes; i++)
+                        LOG(" %02X", g_m10_hunt.frame_bytes[i]);
+                    LOG("\n");
+                    /* raw (pre-Manchester) chip-cell averages behind that hex
+                     * dump -- lets an offline pass re-try the alignment/decode
+                     * with full flexibility against a REAL capture instead of
+                     * this project's earlier from-a-downloaded-WAV Python
+                     * reimplementation (see the radiosonde plan notes).
+                     * Decimal, not bits, since sonde_m10_bits_from_cells()
+                     * needs the actual magnitudes (fifth-pass demodulator,
+                     * see sonde_m10.h) -- a 0/1 dump would lose that. */
+                    LOG("[sonde]  M10/M20 rawcells: ");
+                    for (int i = 0; i < (int)(sizeof g_m10_hunt.raw_cells / sizeof g_m10_hunt.raw_cells[0]); i++)
+                        LOG("%ld,", (long)g_m10_hunt.raw_cells[i]);
+                    LOG("\n");
+                }
+
+                if (g.has_position) { g_sonde_m10_gps_ok++;  sonde_push_m10_gps(&g); }
+                else                  g_sonde_m10_gps_bad++;   /* header bit-
+                                                                 * matched, fields
+                                                                 * implausible --
+                                                                 * false lock or
+                                                                 * alignment still
+                                                                 * off, stay quiet */
+            }
+        }
+    }
+}
+
 /* Drain the ADC ring into the AFSK demod. */
 static void aprs_service(void)
 {
@@ -857,8 +1243,9 @@ int main(void)
 #endif
 
         if (g_mode_pending != g_mode) {
-            if (g_mode_pending == MODE_APRS) aprs_mode_enter();
-            else                             sarsat_mode_enter();
+            if      (g_mode_pending == MODE_APRS)  aprs_mode_enter();
+            else if (g_mode_pending == MODE_SONDE) sonde_mode_enter();
+            else                                   sarsat_mode_enter();
         }
 
         int64_t since_us = absolute_time_diff_us(g_last_reply, get_absolute_time());
@@ -870,7 +1257,7 @@ int main(void)
             LOG("[link]   %s  acks=%lu  last reply %lds ago  mode %s%s\n",
                 g_link_up == 1 ? "UP" : "DOWN",
                 (unsigned long)g_acks, (long)(since_us / 1000000),
-                g_mode == MODE_APRS ? "APRS" : "SARSAT",
+                g_mode == MODE_APRS ? "APRS" : g_mode == MODE_SONDE ? "SONDE" : "SARSAT",
                 g_link_up == 1 ? "" :
                 "  -- check GP1 wiring + that the radio runs the Phase 2 firmware");
             next_link = make_timeout_time_ms(20000);
@@ -932,6 +1319,72 @@ int main(void)
 #else
             { int c = getchar_timeout_us(0); (void)c; }   /* keep CDC drained */
 #endif
+            sleep_us(300);
+            continue;
+        }
+
+        /* -------- SONDE mode: stream the ADC ring through the sync hunter - */
+        if (g_mode == MODE_SONDE) {
+            sonde_service();
+
+            if (time_reached(next_lvl)) {
+                LOG("[sonde]  rs41_ok=%lu rs41_bad=%lu m10_hits=%lu "
+                    "m10gps_ok=%lu m10gps_bad=%lu\n",
+                    (unsigned long)g_sonde_rs41_ok, (unsigned long)g_sonde_rs41_bad,
+                    (unsigned long)g_sonde_m10_hits,
+                    (unsigned long)g_sonde_m10_gps_ok, (unsigned long)g_sonde_m10_gps_bad);
+                next_lvl = make_timeout_time_ms(CFG_LEVEL_LOG_MS);
+            }
+            {
+                int c = getchar_timeout_us(0);
+                if (c == 'y' || c == 'Y') {
+                    if (g_sonde_dump_st != SDUMP_IDLE) {
+                        /* ⚠️ BUG FIX (2026-09-11): this used to re-arm
+                         * unconditionally, even mid-recording or with a
+                         * completed capture still waiting to be flushed --
+                         * pressing 'y' again in either case silently
+                         * discarded whatever was in progress (g_sonde_dump_n
+                         * reset to 0) without ever printing it. Harmless if
+                         * the user only ever waits for "[sonde.raw] end"
+                         * before pressing 'y' again, but cheap to guard
+                         * properly instead of relying on that. */
+                        LOG("[sonde.raw] busy (still recording/flushing) -- "
+                            "wait for [sonde.raw] end first\n");
+                    } else {
+                        /* ⚠️ DIAGNOSTIC (2026-09-11): sentinel-fill the
+                         * buffer with 0xFFF (distinct from both a real
+                         * silence/DC level ~0x800 and, crucially, from the
+                         * 0x000 seen recurring inside real captures this
+                         * session) *before* arming, instead of leaving
+                         * whatever the previous capture (or, on the very
+                         * first capture since a fresh flash, static .bss
+                         * zero-init) left behind. If a future dump ever
+                         * shows an FFF run, that would mean some ring
+                         * position genuinely never got a fresh ADC sample
+                         * copied into it this recording (a firmware
+                         * fill-tracking bug); a 000 run instead means the
+                         * ADC ring itself really held zero at that point
+                         * (i.e. the ADC genuinely converted 0 there) --
+                         * lets a real capture tell the two apart on its
+                         * own, no more guessing needed. */
+                        for (uint32_t i = 0; i < SONDE_DUMP_SAMPLES; i++)
+                            g_sonde_dump[i] = 0xFFF;
+                        g_sonde_dump_st = SDUMP_RECORDING;
+                        g_sonde_dump_n = 0;
+                        g_sonde_dump_decim_ctr = 0;
+                        LOG("[sonde.raw] recording %d ms of raw ADC now "
+                            "([sonde.raw] hex @ %d Hz, decode/WAV off-line)\n",
+                            (int)(1000.0 * SONDE_DUMP_SAMPLES / SONDE_DUMP_FS_HZ),
+                            SONDE_DUMP_FS_HZ);
+                    }
+                } else if (c == 'h' || c == 'H' || c == '?') {
+                    LOG("[sonde]  'y' = capture the next %d ms of raw ADC "
+                        "([sonde.raw] hex @ %d Hz, decode/WAV off-line)\n",
+                        (int)(1000.0 * SONDE_DUMP_SAMPLES / SONDE_DUMP_FS_HZ),
+                        SONDE_DUMP_FS_HZ);
+                }
+            }
+            sonde_dump_flush();
             sleep_us(300);
             continue;
         }

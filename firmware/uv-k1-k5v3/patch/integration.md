@@ -1021,16 +1021,51 @@ même rapport tourne sans souci sur le V1, matériel différent).
 
 **Retour terrain : « l'effet est toujours présent »** — aucune amélioration
 malgré la vitesse SPI x4. Avec ce résultat et le test "toujours allumé"
-précédent (backlight écarté), **les deux hypothèses testées côté firmware
-sont maintenant écartées** : ni le fondu logiciel de rétroéclairage, ni la
-vitesse de transfert du framebuffer vers l'écran. Conclusion honnête : c'est
-très vraisemblablement une caractéristique physique intrinsèque de la dalle
-LCD elle-même (temps de réponse du cristal liquide du panneau ST7565
-STN/FSTN), pas quelque chose qu'un réglage firmware peut corriger. Pas de
-piste supplémentaire identifiée à ce stade -- **investigation close** plutôt
-que de continuer à deviner des réglages sans preuve. Les deux tweaks
-(fondu raccourci, SPI x4) restent en place par défaut (inoffensifs, légers
-gains même sans résoudre ce symptôme précis) sauf demande contraire.
+précédent (backlight écarté), **les deux premières hypothèses testées côté
+firmware sont écartées** : ni le fondu logiciel de rétroéclairage, ni la
+vitesse de transfert du framebuffer vers l'écran. Les deux tweaks (fondu
+raccourci, SPI x4) restent en place par défaut (inoffensifs, légers gains).
+
+> **✅ CAUSE TROUVÉE ET CORRIGÉE SUR L'AIR (2026-09-10) : contraste LCD réglé
+> trop haut par défaut.**
+>
+> Les deux firmwares pilotent le **même contrôleur ST7565** avec la **même
+> séquence d'init** : bias `1/9`, Regulation Ratio `5.0` (`0x20 | 4`),
+> identiques. La seule variable est l'**Electronic Volume** (contraste,
+> commande `0x81`) :
+> - **V1 (KD8CEC / egzumer, `uvk5cec-0.3q/driver/st7565.c`)** : EV **fixe = 31**,
+>   non réglable.
+> - **K1/K5V3 (F4HWN, `App/driver/st7565.c`)** : `ST7565_Cmd()` case 7 envoie
+>   `21 + gSetting_set_ctr` — le réglage `SetCtr` du menu (plage 1..15).
+>   `gSetting_set_ctr = 10` → EV 31 = **exactement le V1** (et c'est la valeur
+>   par défaut *documentée*).
+>
+> **Mais** `App/settings.c` (`SETTINGS_InitEEPROM`, chemin actif sous
+> `ENABLE_FEAT_F4HWN_CTR`) charge le contraste ainsi :
+> ```c
+> int ctr_value = Data[5] & 0x0F;
+> gSetting_set_ctr = (ctr_value > 0 && ctr_value < 16) ? ctr_value : 10;
+> ```
+> Sur une EEPROM vierge / config jamais réglée, `Data[5] = 0xFF` →
+> `0xFF & 0x0F = 15`, qui **passe le test de validité** → `gSetting_set_ctr`
+> vaut **15**, pas 10. Le repli sur 10 ne se déclenche que si le nibble est
+> exactement 0. Beaucoup de radios sont donc à **15 sans que l'utilisateur y
+> ait touché** (l'opérateur ici n'avait pas souvenir d'avoir changé le
+> réglage) — soit **EV 36, cinq crans plus dense que le V1**. Un contraste
+> sur-poussé sur une dalle STN sur-attaque le cristal liquide et rend les
+> transitions baveuses / traînantes : **c'est ça, le « fondu »**, pas
+> forcément une lenteur intrinsèque de la dalle.
+>
+> **Correctif : aucun changement de code — réglage radio.** `MENU → SetCtr →
+> 10` (équivalent exact du V1, EV 31). **Confirmé sur l'air par l'opérateur :
+> « c'est beaucoup mieux ».** 11-12 possible si 10 paraît trop pâle ; rester
+> sous 15.
+>
+> Piste éventuelle si on veut éviter que le prochain utilisateur tombe sur 15 :
+> corriger le test dans `settings.c` pour que `ctr_value == 15` (valeur d'une
+> flash effacée, distincte d'un « 15 » choisi qu'on ne peut de toute façon
+> pas différencier) retombe sur 10 — mais 15 est une valeur légitime du menu,
+> donc ce serait un compromis, pas laissé en dur pour l'instant.
 
 ### Saisie manuelle de fréquence en mode icom (2026-09-05)
 
@@ -1748,3 +1783,37 @@ Builds verts, 0 warning : V3 `FLASH 110688/120832 o (91,60 %)` (+748 o) ;
 V1 `text 59220 o` (+1052, **marge ~2,2 Ko**) ; RP2040 pico `text 85476` /
 pico2 `text 80060`. `.bin` / `.uf2` + `sha256.txt` régénérés partout,
 `docs/protocol.md` à jour. `make check` vert. **Non testé sur l'air.**
+
+## Plafond RX réel du BK4829 corrigé (2026-09-11)
+
+Retour terrain : « souffle mais pas de RX à 1297 MHz sur l'UV-K1, fonctionnel
+sur le V1 ». `App/frequencies.c` est un fichier stock hérité tel quel du fork
+BK4819 amont (commentaire d'origine : *« the BK4819 has 2 bands it covers,
+18MHz ~ 630MHz and 760MHz ~ 1300MHz »*), jamais revalidé pour le **BK4829**
+(puce différente de l'UV-K1/K5V3). L'utilisateur a fourni la fiche technique
+BK4829 : **« Worldwide band: 18 MHz ~ 580 MHz, 760 MHz ~ 1160 MHz »**.
+
+Le firmware laissait donc accorder jusqu'à 1300 MHz (`ENABLE_WIDE_RX`,
+confirmé actif dans ce build via `CMakeCache.txt`) alors que le récepteur
+BK4829 n'a plus de front-end RF fonctionnel au-delà de 1160 MHz réels — d'où
+le souffle large-bande générique sans jamais de signal utile : le VFO affiche
+une fréquence « valide » selon la table logicielle, mais physiquement hors de
+portée de la puce.
+
+**Corrigé** (`build.sh`, 3 constantes de `App/frequencies.c`, V3 uniquement —
+le V1/BK4819 garde ses valeurs d'origine, non concerné) :
+- `BX4819_band2_upper` (plafond haut, alimente `BAND7_470MHz.upper` en
+  `ENABLE_WIDE_RX`) : 1300 → **1160 MHz** — la cause directe du symptôme.
+- `BX4819_band1.upper` (haut de la 1ʳᵉ bande, sert au saut automatique
+  hors du trou PLL entre les deux bandes de synthèse) : 630 → **580 MHz** —
+  même symptôme latent, pas encore remonté, entre 580 et 630 MHz.
+- `BX4819_band2.lower` (bas de la 2ᵉ bande, même mécanisme de saut) :
+  840 → **760 MHz** — dans l'autre sens, l'ancien trou forçait à sauter
+  par-dessus 760-840 MHz alors que c'est de la bande valide d'après la
+  fiche technique.
+
+Build vert, 0 warning : `FLASH 110688/120832 o (91,60 %)` (inchangé, ce ne
+sont que des constantes). `.bin` + `sha256.txt` régénérés. **Non testé sur
+l'air** — à confirmer que 1160 MHz est bien la vraie limite haute utile (le
+symptôme d'origine était à 1297 MHz, pas testé plus précisément entre 1160 et
+1297).

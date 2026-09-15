@@ -922,3 +922,22 @@ Même implémentation que sur le V3 (détail complet dans son `integration.md`) 
 
 `text 59220 o` (+1052, **marge ~2,2 Ko**). `.bin` + `sha256.txt` régénérés.
 `docs/protocol.md` à jour. **Non testé matériel.**
+
+## DTMF retiré pour la marge flash (2026-09-11)
+
+Le flash V1 est à 60 Ko et la marge devenait courte. Ce projet (SARSAT / APRS)
+n'utilise **aucune** fonction DTMF : PTT-ID / ANI, tonalité de courtoisie de fin
+d'émission, numérotation DTMF manuelle, décodeur DTMF *live*. `build.sh` vide
+donc les 5 fonctions non gardées de `app/dtmf.c` (`DTMF_Reply`,
+`DTMF_SendEndOfTransmission`, `DTMF_GetCharacter`, `DTMF_Append`,
+`DTMF_clear_input_box`) par `perl` après le `patch -p0`. `DTMF_ValidateCodes()`
+reste (`settings.c` l'utilise, minuscule) ; les globales restent (bss, ~70 o).
+Le `-flto` élague ensuite les chemins d'appel dans `app/main.c`, `ui/main.c`…
+→ **~1,1 Ko récupérés**. Les entrées de menu DTMF apparaissent encore mais ne
+font plus rien.
+
+**Réactivable facilement** : retirer le bloc « 3b. retrait de DTMF » de
+`build.sh` (les 5 `perl` + les 2 `grep`).
+
+Build V1 vert, 0 warning (`-Wextra`) : **`text 57772 o` / 61440** (large marge).
+`ENABLE_AM_FIX` reste actif. `.bin` / `.packed.bin` / `sha256.txt` régénérés.

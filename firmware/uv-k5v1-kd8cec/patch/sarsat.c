@@ -23,6 +23,9 @@
 #ifdef ENABLE_APRS
 	#include "app/aprs.h"   /* shared C-Board AF-gain setting (gAprsCfg.af_gain) */
 #endif
+#ifdef ENABLE_SONDE
+	#include "app/sonde.h"
+#endif
 
 static char     s_line[SARSAT_LINES][SARSAT_LINE_CHARS + 1];
 static uint16_t s_invert;          /* one bit per line, from the RP2040    */
@@ -69,12 +72,25 @@ static void SARSAT_ReplyStatus(void)
 #ifdef ENABLE_APRS
 	APRS_MyPosition(&my_lat, &my_lon);   /* GPS fix if "Pos GPS", else manual */
 #endif
+
+	/* byte 6: 0 none, 1 SARSAT text view, 2 SARSAT level view, 3 Sonde screen
+	 * open (app/sonde.h) -- the RP2040 picks its capture mode from this (it
+	 * can't tell SARSAT and radiosondes apart by RX frequency alone, both
+	 * live in 400-406 MHz, see rp2040/src/decoder_config.h). */
+	uint8_t screen_state = 0;
+	bool    sonde_fm = false;
+	if (s_screen_open)
+		screen_state = (s_view == 1) ? 2 : 1;
+#ifdef ENABLE_SONDE
+	else if (SONDE_ScreenOpen()) { screen_state = 3; sonde_fm = true; }
+#endif
+
 	uint8_t p[16] = {
 		(uint8_t)(gEeprom.TX_VFO & 1),
-		(uint8_t)(s_screen_open ? MODULATION_FM : v->Modulation),
+		(uint8_t)((s_screen_open || sonde_fm) ? MODULATION_FM : v->Modulation),
 		(uint8_t)(f      ), (uint8_t)(f >>  8),
 		(uint8_t)(f >> 16), (uint8_t)(f >> 24),
-		(uint8_t)(s_screen_open ? (s_view == 1 ? 2 : 1) : 0),  /* 2 = level view */
+		screen_state,
 		(uint8_t)SARSAT_PROTO_VER,
 		(uint8_t)my_lat, (uint8_t)(my_lat >> 8),
 		(uint8_t)(my_lat >> 16), (uint8_t)(my_lat >> 24),

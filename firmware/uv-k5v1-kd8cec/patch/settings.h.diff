@@ -1,0 +1,17 @@
+--- a/settings.h	2024-01-19 14:43:30.000000000 +0100
++++ settings.h	2026-09-15 08:48:00.000000000 +0200
+@@ -90,6 +90,15 @@
+ 	ACTION_OPT_VFO_MR,
+ 	ACTION_OPT_SWITCH_DEMODUL,
+ 	ACTION_OPT_BLMIN_TMP_OFF, //BackLight Minimum Temporay OFF
++#ifdef ENABLE_SARSAT
++	ACTION_OPT_SARSAT,
++#endif
++#ifdef ENABLE_APRS
++	ACTION_OPT_APRS,
++#endif
++#ifdef ENABLE_SONDE
++	ACTION_OPT_SONDE,
++#endif
+ 	ACTION_OPT_LEN
+ };

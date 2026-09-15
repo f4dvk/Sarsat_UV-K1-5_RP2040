@@ -1,0 +1,35 @@
+--- a/app/action.c	2024-01-19 14:43:30.000000000 +0100
++++ app/action.c	2026-09-15 08:48:00.000000000 +0200
+@@ -18,6 +18,15 @@
+ #include <string.h>
+
+ #include "app/action.h"
++#ifdef ENABLE_SARSAT
++#include "app/sarsat.h"
++#endif
++#ifdef ENABLE_APRS
++#include "app/aprs.h"
++#endif
++#ifdef ENABLE_SONDE
++#include "app/sonde.h"
++#endif
+ #include "app/app.h"
+ #include "app/chFrScanner.h"
+ #include "app/common.h"
+@@ -100,6 +109,16 @@
+ #else
+ 	[ACTION_OPT_BLMIN_TMP_OFF] = &FUNCTION_NOP,
+ #endif
++
++#ifdef ENABLE_SARSAT
++	[ACTION_OPT_SARSAT] = &APP_RunSarsat,
++#endif
++#ifdef ENABLE_APRS
++	[ACTION_OPT_APRS] = &APP_RunAprs,
++#endif
++#ifdef ENABLE_SONDE
++	[ACTION_OPT_SONDE] = &APP_RunSonde,
++#endif
+ };
+
+ static_assert(ARRAY_SIZE(action_opt_table) == ACTION_OPT_LEN);

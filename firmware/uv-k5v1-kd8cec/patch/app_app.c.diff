@@ -1,6 +1,6 @@
 --- a/app/app.c	2024-01-19 14:43:30.000000000 +0100
 +++ app/app.c	2026-09-04 08:20:00.000000000 +0200
-@@ -37,6 +37,12 @@
+@@ -37,6 +37,15 @@
  #include "app/main.h"
  #include "app/menu.h"
  #include "app/scanner.h"
@@ -10,10 +10,13 @@
 +#ifdef ENABLE_APRS
 +	#include "app/aprs.h"
 +#endif
++#ifdef ENABLE_SONDE
++	#include "app/sonde.h"
++#endif
  #ifdef ENABLE_UART
  	#include "app/uart.h"
  #endif
-@@ -452,7 +458,11 @@
+@@ -452,7 +461,11 @@
  	AUDIO_AudioPathOn();
  	gEnableSpeaker = true;
  
@@ -26,7 +29,7 @@
  		BACKLIGHT_TurnOn();
  	}
  
-@@ -924,6 +934,9 @@
+@@ -924,6 +937,9 @@
  			|| gScanStateDir != SCAN_OFF
  			|| gCssBackgroundScan
  			|| gScreenToDisplay != DISPLAY_MAIN
@@ -36,7 +39,7 @@
  #ifdef ENABLE_FMRADIO
  			|| gFmRadioMode
  #endif
-@@ -1134,6 +1147,18 @@
+@@ -1134,6 +1150,24 @@
  	}
  #endif
  
@@ -50,6 +53,12 @@
 +	APRS_TimeSlice();
 +	if (gAprsShowRequest)
 +		APP_RunAprs();     /* auto-popup: opens to RX view, self-timed/guarded */
++#endif
++#ifdef ENABLE_SONDE
++	if (gSondeShowRequest) {
++		gSondeShowRequest = false;
++		APP_RunSonde();    /* self-guards; re-arms if the radio is busy */
++	}
 +#endif
 +
  	if (gReducedService)

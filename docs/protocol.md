@@ -38,14 +38,25 @@ Le firmware radio (Phase 3/4) ajoute un gestionnaire pour les ID ci-dessous dans
 | `0x06D3` | `APRS_RXINFO` | décodé structuré (ci-dessous) | RP2040 → radio : un paquet APRS parsé (symbole, lat/lon, cap/vitesse/altitude, distance+azimut vers l'opérateur, source, nom d'objet, chemin digipeater, texte commentaire/statut/message). La radio le rend façon Kenwood avec une icône symbole et une ligne « Direct » / « Via … ». Sans ACK. |
 | `0x06D5` | `APRS_GPS` | `flags:u8, lat_e5:i32, lon_e5:i32, speed_kmh:u16, course_deg:u16, alt_m:i16, sats:u8` LE (16 o) | RP2040 → radio, ~toutes les 3 s : le fix d'un module GPS sur l'en-tête NMEA de la C-Board (UART1 GP5, 9600 8N1, `$GxRMC`/`$GxGGA`). `flags` bit0 = fix valide. Envoyé seulement une fois qu'un module a été vu. La radio l'utilise pour la balise quand le champ **Pos** de son menu APRS est sur **GPS** (sinon elle balise la lat/lon manuelle), et pilote un symbole GPS en barre haute (absent = pas de trames, clignotant = `flags` bit0 à 0, fixe = fix). Le RP2040 utilise aussi son propre fix pour la distance/azimut RX quand il est valide. Sans ACK. |
 | `0x06D6` | `APRS_DIGI` | trame AX.25 brute : `dst[7] src[7] digi[7]×n ctrl pid info`, **sans FCS** | RP2040 → radio, sans ACK : une trame que le RP2040 a décidé de digipeater (`aprs_digi.h` — WIDEn-N New-N-Paradigm, cf. section dédiée plus bas) et déjà mutée (SSID décrémenté / bit H posé). La radio recalcule le FCS et émet en AFSK sur le canal 170, exactement comme sa propre balise (mêmes conditions CSMA / écran SARSAT). |
+| `0x06E0` | `SONDE_CLEAR` | — | efface le tampon d'écran Radiosonde |
+| `0x06E1` | `SONDE_TEXT` | `line:u8, invert:u8, ascii[0..20]` | RP2040 → radio : même forme que `SARSAT_TEXT`, tampon de lignes séparé (écran Radiosonde, `patch/sonde.c`) |
 
 ### Sélection du mode
 
-La C-Board fait tourner le décodeur SARSAT **ou** APRS, jamais les deux, et
-choisit d'après la fréquence RX dans la réponse `SARSAT_HELLO` : `144,0–148,0 MHz`
-→ APRS (Bell-202 AFSK 1200 + AX.25, `rp2040/src/aprs_rx.c`, porté de JN1DFF
-pico_tnc), tout le reste → SARSAT FGB. Le basculement prend effet en un
-aller-retour HELLO (~1 s).
+La C-Board fait tourner le décodeur SARSAT, APRS **ou** Radiosonde, jamais
+deux à la fois, et choisit à partir de deux champs de la réponse
+`SARSAT_HELLO` :
+- l'octet 6 (état d'écran) vaut **3** quand l'écran Radiosonde est ouvert côté
+  radio → mode **SONDE** (prioritaire, voir plus bas — les radiosondes
+  partagent la bande 400-406 MHz avec SARSAT, la fréquence RX seule ne peut
+  pas trancher) ;
+- sinon la fréquence RX tranche entre les deux autres : `144,0–148,0 MHz`
+  → APRS (Bell-202 AFSK 1200 + AX.25, `rp2040/src/aprs_rx.c`, porté de JN1DFF
+  pico_tnc), tout le reste → SARSAT FGB.
+
+Le basculement prend effet en un aller-retour HELLO (~1 s pour SARSAT/APRS ;
+jusqu'à ~5 s pour SONDE, dont l'ouverture d'écran n'est pas poussée à la
+C-Board dès l'ouverture contrairement à SARSAT/APRS — voir `patch/sonde.c`).
 
 `SARSAT_TEXT` est le chemin primaire : toute la mise en forme vit dans le RP2040
 (`sarsat_format_lines()` — un champ par ligne, chaînes longues coupées aux mots,
@@ -55,6 +66,37 @@ défiler** (UV-K5 : HAUT/BAS ; UV-K1 : les touches latérales équivalentes),
 lignes à la suite ; le RP2040 espace les trames de ~8 ms et la radio vide son
 anneau UART dans une boucle `while` pour n'en perdre aucune. `SARSAT_BEACON`
 est fourni pour une radio qui veut disposer les champs à sa façon.
+
+### Radiosondes (mode SONDE)
+
+Chasse au sol des radiosondes météo (RS41 Vaisala, M10/M20 Meteomodem — même
+bande 400-406 MHz que SARSAT). Contrairement à SARSAT/APRS, ce mode n'est
+**jamais** auto-sélectionné par fréquence (voir « Sélection du mode »
+ci-dessus) : l'opérateur doit explicitement ouvrir l'écran Radiosonde côté
+radio pour que la C-Board bascule son ADC sur le débit et la démodulation en
+continu que RS41/M10 réclament (`rp2040/src/decoder_config.h`,
+`CFG_SONDE_SAMPLE_RATE_HZ`).
+
+Décodage (`rp2040/src/sonde_sync.h` pour le détail) :
+- **RS41** : décodage complet — synchro de trame, dés-embrouillage,
+  CRC par bloc, extraction du bloc GPS (position/altitude). Poussé en
+  `SONDE_TEXT` comme un résultat SARSAT (lignes déjà mises en forme par le
+  RP2040).
+- **M10/M20** : **détection seulement**. Le débit (4800 bauds) et l'en-tête
+  de trame (`5A 4A 93`, + un quartet) sont confirmés bit-exact sur une
+  capture réelle, mais la structure des champs au-delà (position GPS,
+  contrôle) n'est publiquement documentée nulle part hors de sources GPL-3.0
+  évitées pour compatibilité de licence (voir l'en-tête de `sonde_rs41.h`
+  pour la même contrainte appliquée au RS41). L'écran affiche donc juste
+  « détectée », sans position, tant que cette structure n'est pas perçée.
+- **DFM** : non câblé. Transmission continue (pas de rafale comme
+  RS41/M10) et mot de synchro toujours inconnu publiquement — voir les notes
+  du projet sur les radiosondes pour l'historique d'analyse.
+
+⚠️ Comme pour SARSAT à ses débuts, ces décodeurs n'ont **pas** été validés
+contre un décodeur de référence ou une capture réelle complète (seuls le
+débit et l'en-tête M10/M20 le sont) — attendre des corrections après les
+premiers essais sur l'air.
 
 ### Charge utile `APRS_RXINFO` (little-endian)
 
