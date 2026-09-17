@@ -215,6 +215,24 @@ void APP_RunSonde(void)
 	 * as APRS_EnsureChannel() in aprs.c). */
 	RADIO_SetModulation(MODULATION_FM);
 #endif
+	/* TRIED and REVERTED (2026-09-15), kept in sync with V3: AFC forced OFF
+	 * for this screen specifically (a local override, without touching
+	 * MODULATION_DISCRI's own general AFC-on behaviour used elsewhere on
+	 * this firmware too -- a plain VFO, and the SAREX/SARSAT memory channels
+	 * APRS_EnsureChannel() seeds in aprs.c). Tested against real M10
+	 * captures (tools/decode_m10_pc.py, off the radio's own audio,
+	 * independent of the RP2040/ADC) locking the header but never
+	 * validating a checksum, decode confidence dropping across the capture
+	 * -- a PLL/clock-tracking drift signature, distinct from the ADC-dropout
+	 * AFC test further below (already proven on V3 to be a hardware event,
+	 * unrelated to AFC). On-air result: fewer, not more, valid decodes with
+	 * AFC off here -- and a plain VFO on this same radio, manually tuned to
+	 * DSC (AFC on, via MODULATION_DISCRI's own formula, untouched), decoded
+	 * noticeably better than this screen with AFC off. Reverted; this
+	 * screen simply inherits MODULATION_DISCRI's own AFC-on behaviour again,
+	 * nothing to override here. The drift itself is still real and
+	 * unexplained -- next guess should be a different variable, not AFC
+	 * again. */
 	/* ⚠️ FIXED (2026-09-12): this firmware defines ENABLE_AM_FIX by default
 	 * (Makefile: `ENABLE_AM_FIX ?= 1`, never overridden by this project's
 	 * build.sh), which makes RADIO_SetupRegisters() -- the function a plain

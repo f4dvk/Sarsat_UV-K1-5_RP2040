@@ -40,6 +40,10 @@
 #include "driver/systick.h"
 #include "driver/bk4819.h"
 #include "driver/eeprom.h"
+#include "driver/vcp.h"     /* diagnostic logging (APRS_Init(), see below) --
+                             * the radio's OWN USB CDC port, NOT the UART
+                             * link to the C-Board (binary protocol, must
+                             * not be mixed with free text) */
 #include "ui/helper.h"
 #include "ui/ui.h"
 #include "audio.h"
@@ -196,6 +200,37 @@ static void aprs_refresh_ch_freq(void);  /* forward decl: caches channel 170's f
 void APRS_Init(void)
 {
     EEPROM_ReadBuffer(APRS_EE_ADDR, &gAprsCfg, sizeof(gAprsCfg));
+    {
+        /* ⚠️ DIAGNOSTIC (2026-09-16, operator-reported): the APRS config
+         * sometimes comes back to factory defaults after flashing V3 with
+         * the C-Board left attached. This block itself changes nothing --
+         * it only logs, over the radio's own USB CDC (VCP), exactly what
+         * was read here BEFORE the magic-byte check below decides whether
+         * to reset to defaults, so the next occurrence leaves hard evidence
+         * instead of a guess:
+         *   - magic/call[0] both look erased (0xFF) -> the EEPROM sector
+         *     was actually erased (consistent with a full-chip reflash
+         *     that also wipes Settings, or a botched erase cycle).
+         *   - magic wrong but the raw bytes are NOT uniformly 0xFF (a mix
+         *     of plausible-looking and garbage bytes) -> a write was
+         *     interrupted partway through, the leading suspect being the
+         *     brown-out risk this project already documents for the
+         *     C-Board's unbuffered 3.3V rail (docs/hardware.md) -- this
+         *     time triggered during the radio's own programming sequence
+         *     rather than GPS acquisition.
+         *   - magic correct -> this boot is not an instance of the bug;
+         *     look elsewhere (e.g. the flashing tool/procedure itself). */
+        char dbg[160];
+        int n = sprintf(dbg, "[aprs] cfg magic=%02X (want %02X) call[0]=%02X raw:",
+                         gAprsCfg.magic, APRS_EE_MAGIC, (unsigned)(uint8_t)gAprsCfg.call[0]);
+        const uint8_t *raw = (const uint8_t *)&gAprsCfg;
+        for (unsigned i = 0; i < 16 && n < (int)sizeof(dbg) - 6; i++)
+            n += sprintf(dbg + n, " %02X", raw[i]);
+        dbg[n++] = '\r';
+        dbg[n++] = '\n';
+        dbg[n]   = 0;
+        VCP_SendStr(dbg);
+    }
     if (gAprsCfg.magic != APRS_EE_MAGIC || gAprsCfg.call[0] == 0xFF)
         APRS_Defaults();
     {   /* msg_to is a newer field: an EEPROM written by an older build has
@@ -469,6 +504,7 @@ static void APRS_TxFrame(const uint8_t *frame, int flen)
     RADIO_SetModulation(gRxVfo->Modulation);
     APRS_ApplySquelch();
     APRS_ApplyRxAudio();
+    APRS_ApplyAfc();
     AFGAIN_Apply();
 }
 
@@ -934,6 +970,7 @@ void APRS_TimeSlice(void)
 
     APRS_ApplySquelch();               /* APRS-band fast-squelch (cheap: 1 reg read) */
     APRS_ApplyRxAudio();               /* APRS-band: keep the RX audio profile FLAT */
+    APRS_ApplyAfc();                   /* APRS-band: restrict AFC excursion range   */
     AFGAIN_TimeSlice();                /* keep a fixed C-Board AF gain in effect
                                         * everywhere, screen open or not     */
     APRS_DigipeatTimeSlice();          /* retry a queued frame until the channel
@@ -1106,6 +1143,31 @@ void APRS_ApplySquelch(void)
     uint16_t want = (uint16_t)((r & ~0x3E00u) | (0u << 11) | (3u << 9));
     if (want != r)
         BK4819_WriteRegister(BK4819_REG_4E, want);
+}
+
+/* ⚠️ NEW (2026-09-17, explicit user request -- "le mode rapide peut etre
+ * bien pour l'APRS?", clarified as: narrow the AFC excursion RANGE, not
+ * disable it outright). NOT the same test as the removed APRS_DisableAfc()
+ * mentioned in the comment below -- that one turned AFC fully OFF, tried on
+ * air, found to make no difference (the residual errors were shown to be
+ * RF-domain noise, not LO drift) and removed at the user's request. This is
+ * a narrower, weaker intervention: REG_73<13:11> "AFC Range Selection" (per
+ * the official Beken datasheet) restricted to 111 = minimum -- AFC stays
+ * ACTIVE and can still center a genuine carrier offset, it just can't drift
+ * far chasing a transient burst/noise excursion. Same register, same value
+ * already applied to SARSAT and VFO RAW earlier this session (there AFC was
+ * since fully disabled instead -- this is a fresh, separate test for APRS,
+ * not an extension of that). Re-asserted every tick like APRS_ApplySquelch()
+ * -- a VFO re-config can reset REG_73 to its chip default (000 = max) just
+ * like it does REG_4E. Off-band / no-op cheap check, same pattern. */
+void APRS_ApplyAfc(void)
+{
+    if (!aprs_on_band())
+        return;
+    uint16_t r = BK4819_ReadRegister(0x73);
+    uint16_t want = (uint16_t)((r & ~(0x7u << 11)) | (0x7u << 11));
+    if (want != r)
+        BK4819_WriteRegister(0x73, want);
 }
 
 /* Intentionally INERT (2026-09-09).
@@ -1852,9 +1914,23 @@ void APP_RunAprs(void)
                                                     * firmware's RADIO_Setup-
                                                     * Registers() already does
                                                     * it, harmless to repeat) */
+        /* ⚠️ NEW (2026-09-16, operator-reported sync lag on manual APRS
+         * open): same AGC settle guard as SONDE_TickDelay(300) in
+         * patch/sonde.c, same rationale. RADIO_SetModulation() above goes
+         * through RADIO_SetupAGC()'s lastSettings cache (App/radio.c) --
+         * this screen usually retunes from a completely different
+         * frequency/modulation (SARSAT 406 MHz, a random channel...), and
+         * that cache can now skip BK4819_InitAGC() if the new/old settings
+         * happen to match, leaving the AGC gain table still assuming the
+         * PREVIOUS frequency for a moment. Untested whether this is really
+         * the cause of the reported lag -- try 300 ms first (Sonde's
+         * already-validated value), revert outright if it makes no
+         * difference on air rather than guessing a different duration. */
+        APRS_TickDelay(300);
         gEnableSpeaker = true;
         APRS_ApplySquelch();
         APRS_ApplyRxAudio();
+        APRS_ApplyAfc();
         AFGAIN_Apply();
         g_SquelchLost = false;
         BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
@@ -1892,6 +1968,7 @@ void APP_RunAprs(void)
                                   * squelch on so packets that arrive while this
                                   * screen is open are not chopped (1 reg read) */
         APRS_ApplyRxAudio();     /* keep the RX audio profile FLAT for the C-Board */
+        APRS_ApplyAfc();         /* keep the AFC excursion range restricted          */
         /* mini squelch: the main loop (which normally does this) is blocked.
          * carrier present -> speaker path + RX LED on (the C-Board hears it).
          * carrier gone    -> mute the speaker, but only a bit LATER: APRS

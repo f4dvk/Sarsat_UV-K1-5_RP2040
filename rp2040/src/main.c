@@ -914,7 +914,20 @@ static void sonde_mode_enter(void)
 
     sonde_demod_init(&g_sonde_demod, CFG_SONDE_SAMPLE_RATE_HZ, 4800);
     sonde_sync_init(&g_sonde_sync);
-    sonde_m10_chipdemod_init(&g_sonde_demod_m10, CFG_SONDE_SAMPLE_RATE_HZ, 9600);
+    /* ⚠️ FIXED (2026-09-16, on user pointer to HTCommander's own M10
+     * demodulator, github.com/Ylianst/HTCommander/.../m10_demodulator.dart):
+     * M10 transmits at 9615 baud, not 9600 -- HTCommander's own M10Demodulator
+     * class defaults to chipRate=9615 for M10, and only overrides to 9600
+     * specifically for M20 (radiosonde_monitor.dart instantiates the M20
+     * demodulator with an explicit `chipRate: 9600`). This project's own
+     * sonde has already been confirmed to be an M10 (not M20), so this whole
+     * chain should have been running at 9615 all along. A 0.16% rate error
+     * is invisible over a 32-chip header correlation (which is how 9600 got
+     * "confirmed" earlier this project) but accumulates to a few chips of
+     * drift by the end of a full ~1600-chip M10 frame -- a very plausible
+     * contributor to the "decode confidence drops toward the end of the
+     * frame" pattern chased at length elsewhere in this codebase. */
+    sonde_m10_chipdemod_init(&g_sonde_demod_m10, CFG_SONDE_SAMPLE_RATE_HZ, 9615);
     sonde_m10_hunt_init(&g_m10_hunt);
     g_sonde_rd = 0;
     g_sonde_rs41_ok = g_sonde_rs41_bad = g_sonde_m10_hits = 0;

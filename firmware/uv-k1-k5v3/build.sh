@@ -108,10 +108,27 @@ grep -q 'if (weak_no_different) val = 0x2458;' App/driver/bk4829.c || { echo "!!
 # definit jamais cette macro, contrairement a V1) -- desormais que le driver
 # ci-dessus honore vraiment ce parametre, les passer a "true" est ce qui fait
 # reellement disparaitre le retrecissement pour un VFO normal, comme sur V1.
-perl -0pi -e 's/(                #else\n)                    BK4819_SetFilterBandwidth\(Bandwidth, false\);\n(                #endif\n)/$1                    BK4819_SetFilterBandwidth(Bandwidth, true);   \/* Sarsat_UV-K1-5_RP2040: pas de retrecissement faible-signal pour un VFO FM\/USB normal, voir bk4829.c *\/\n$2/' App/radio.c
+#
+# Le premier des deux (RADIO_SetupRegisters(), cote RX -- gRxVfo) avait ete
+# rendu conditionnel un temps (retrecissement remis pour RAW seul), puis
+# DEFINITIVEMENT REVERTE a "true" sans condition (2026-09-17) : verifie dans
+# le code source V1 (radio.c, memes deux sites, meme structure) que
+# ENABLE_AM_FIX y est TOUJOURS actif (Makefile: ENABLE_AM_FIX ?= 1, jamais
+# desactive par ce projet), donc la V1 n'a ELLE-MEME aucune branche
+# specifique a RAW/DSC -- "true" s'applique sans exception, pour toute
+# modulation, en permanence. La "moins de bruit" de la V1 ne vient donc PAS
+# de ce retrecissement (qu'elle n'utilise jamais), et le rétablir sur V3
+# pour RAW risquait en plus de degrader le decodage SARSAT en detection
+# automatique (VFO RAW hors ecran dedie) : un signal a modulation de phase
+# a besoin de conserver ses bandes laterales, precisement quand le signal
+# est faible/marginal -- le pire moment pour un retrecissement pense pour
+# la voix FM. Les deux sites restent donc "true" sans aucune exception,
+# fidele a la V1.
+perl -0pi -e 's/(                #else\n)                    BK4819_SetFilterBandwidth\(Bandwidth, false\);\n(                #endif\n)/$1                    BK4819_SetFilterBandwidth(Bandwidth, true);   \/* Sarsat_UV-K1-5_RP2040: pas de retrecissement faible-signal pour un VFO normal (aucune exception, comme la V1) *\/\n$2/' App/radio.c
 perl -0pi -e 's/(            #else\n)                BK4819_SetFilterBandwidth\(Bandwidth, false\);\n(            #endif\n)/$1                BK4819_SetFilterBandwidth(Bandwidth, true);   \/* idem *\/\n$2/' App/radio.c
 
 grep -q 'BK4819_SetFilterBandwidth(Bandwidth, false)' App/radio.c && { echo "!! radio.c : un appel weak_no_different=false subsiste (attendu : 0)"; exit 1; }
+grep -q 'BK4819_SetFilterBandwidth(Bandwidth, gRxVfo->Modulation != MODULATION_RAW)' App/radio.c && { echo "!! radio.c : exception RAW encore presente (attendu : revertee)"; exit 1; }
 [ "$(grep -c 'BK4819_SetFilterBandwidth(Bandwidth, true)' App/radio.c)" -ge 4 ] || { echo "!! radio.c : moins de 4 appels weak_no_different=true (2 AM deja presents + 2 patches)"; exit 1; }
 
 # App/radio.c : RADIO_SetupAGC() met en cache son dernier (listeningAM,
@@ -138,6 +155,164 @@ grep -q 'BK4819_SetFilterBandwidth(Bandwidth, false)' App/radio.c && { echo "!! 
 perl -0pi -e 's/static uint8_t lastSettings = 0xFF;/static uint8_t lastSettings = 0;   \/* Sarsat_UV-K1-5_RP2040: aligne sur le comportement (non explicite) de la V1 -- voir commentaire ci-dessus *\//' App/radio.c
 
 grep -q 'static uint8_t lastSettings = 0;' App/radio.c || { echo "!! radio.c : seed lastSettings AGC"; exit 1; }
+
+# App/driver/bk4829.c : BK4819_SetAF() (appelee par RADIO_SetModulation()
+# pour TOUTE modulation -- FM/AM/USB/RAW/BYP/Tone/Beep) ecrit REG_47 =
+# 0x6042 | (AF<<8). Le datasheet Beken officiel "BK4829 Registers Table"
+# donne 0x6140 comme valeur de RESET D'USINE de ce registre pour AF=Normal
+# (1) -- exactement la formule de la V1 ((6u<<12)|(AF<<8)|(1u<<6) = 0x6040 |
+# (AF<<8)), pas celle-ci. Le bit d'ecart (bit 1) n'est documente dans aucun
+# champ de ce registre. Deja corrige localement pour SARSAT et Sonde
+# (patch/sarsat.c, patch/sonde.c) sans regression audio constatee -- ce
+# correctif-ci l'etend au driver partage, donc a TOUT VFO/modulation, pour
+# ne plus dependre d'une surcharge par ecran. Le seul bit DOCUMENTE de ce
+# registre qui differe entre 0x6140 et 0x6042 est REG_47<13> "AF Output
+# Inverse Mode" (datasheet) -- sur demande explicite de l'utilisateur
+# (2026-09-16), ce bit devient reglable en direct depuis le menu ("AfInv",
+# Fonctions -> AfInv, a cote de SetRxA) via gSetting_set_af_inv plutot que
+# fige a 1. Les deux autres bits qui composent 0x6140 (bit 14 et bit 6) ne
+# sont documentes nulle part dans ce datasheet -- gardes fixes, tels que la
+# valeur de reset d'usine les donne, comme avant ce correctif.
+perl -0pi -e 's/0x6042 \| \(AF << 8\)/((1u << 14) | (gSetting_set_af_inv ? (1u << 13) : 0u) | (1u << 6)) | (AF << 8)   \/* Sarsat_UV-K1-5_RP2040: bit 13 (Inverse Mode, datasheet) reglable via le menu AfInv, pas fige a 1 *\//' App/driver/bk4829.c
+
+grep -q 'gSetting_set_af_inv ? (1u << 13) : 0u' App/driver/bk4829.c || { echo "!! bk4829.c : REG_47 inversion AF configurable"; exit 1; }
+
+# App/misc.h + App/misc.c : nouveau reglage persistant gSetting_set_af_inv
+# (1 = AF Output Inverse Mode actif, valeur de reset d'usine du chip -- donc
+# le defaut RAM ici doit valoir true pour ne rien changer tant que l'EEPROM
+# n'a pas encore ete relue -- voir settings.c pour la vraie valeur au
+# demarrage). Ajoute juste apres gSetting_set_inv (fonction totalement
+# differente -- inversion d'ECRAN, pas d'AF -- mais meme voisinage logique
+# dans ces deux fichiers).
+perl -0pi -e 's/extern bool               gSetting_set_inv;/extern bool               gSetting_set_inv;\n    extern bool               gSetting_set_af_inv;   \/* Sarsat_UV-K1-5_RP2040: REG_47 bit 13, menu AfInv *\//' App/misc.h
+perl -0pi -e 's/bool          gSetting_set_inv = false;/bool          gSetting_set_inv = false;\n    bool          gSetting_set_af_inv = true;   \/* Sarsat_UV-K1-5_RP2040: comportement actuel (Inverse) tant que l EEPROM n a pas ete relue *\//' App/misc.c
+
+grep -q 'extern bool               gSetting_set_af_inv;' App/misc.h || { echo "!! misc.h : extern gSetting_set_af_inv"; exit 1; }
+grep -q 'bool          gSetting_set_af_inv = true;' App/misc.c || { echo "!! misc.c : gSetting_set_af_inv"; exit 1; }
+
+# App/ui/menu.h : nouvelle entree d'enum MENU_SET_AFI (menu "AfInv").
+perl -0pi -e 's/    MENU_SET_GUI,\n    MENU_SET_TMR,/    MENU_SET_GUI,\n    MENU_SET_AFI,   \/* Sarsat_UV-K1-5_RP2040: REG_47 bit 13, "AF Output Inverse Mode" *\/\n    MENU_SET_TMR,/' App/ui/menu.h
+
+grep -q 'MENU_SET_AFI,' App/ui/menu.h || { echo "!! menu.h : enum MENU_SET_AFI"; exit 1; }
+
+# App/ui/menu.c : entree de liste "AfInv" (a cote de SetRxA) + affichage de
+# sa valeur courante (OFF/ON, meme tableau generique que tous les autres
+# reglages booleens de ce menu).
+perl -0pi -e 's/(#ifdef ENABLE_FEAT_F4HWN_AUDIO    \n    \{"SetRxA",      MENU_SET_AUD       \},\n#endif\n)    \{"SetTmr",      MENU_SET_TMR       \},/$1    {"AfInv",       MENU_SET_AFI       },\n    {"SetTmr",      MENU_SET_TMR       },/' App/ui/menu.c
+perl -0pi -e 's/(        case MENU_SET_MET:\n        case MENU_SET_GUI:\n            strcpy\(String, gSubMenu_SET_MET\[gSubMenuSelection\]\); \/\/ Same as SET_MET\n            break;\n)/$1\n        case MENU_SET_AFI:\n            strcpy(String, gSubMenu_OFF_ON[gSubMenuSelection]);\n            break;\n/' App/ui/menu.c
+
+grep -q '{"AfInv",       MENU_SET_AFI       },' App/ui/menu.c || { echo "!! menu.c : liste AfInv"; exit 1; }
+grep -q 'case MENU_SET_AFI:' App/ui/menu.c || { echo "!! menu.c : affichage AfInv"; exit 1; }
+
+# App/app/menu.c : application du choix (avec RADIO_SetModulation() pour
+# reappliquer REG_47 immediatement, meme technique que MENU_SET_AUD juste
+# au-dessus) + lecture de la valeur courante a l'ouverture du sous-menu.
+perl -0pi -e 's/(        case MENU_SET_GUI:\n            gSetting_set_gui = gSubMenuSelection;\n            break;\n)/$1        case MENU_SET_AFI:\n            gSetting_set_af_inv = gSubMenuSelection;\n            RADIO_SetModulation(gTxVfo->Modulation);\n            break;\n/' App/app/menu.c
+perl -0pi -e 's/(        case MENU_SET_GUI:\n            gSubMenuSelection = gSetting_set_gui;\n            break;\n)/$1        case MENU_SET_AFI:\n            gSubMenuSelection = gSetting_set_af_inv;\n            break;\n/' App/app/menu.c
+
+grep -q 'gSetting_set_af_inv = gSubMenuSelection;' App/app/menu.c || { echo "!! app/menu.c : application AfInv"; exit 1; }
+grep -q 'gSubMenuSelection = gSetting_set_af_inv;' App/app/menu.c || { echo "!! app/menu.c : lecture AfInv"; exit 1; }
+
+# App/app/menu.c : MENU_GetLimits() -- sans un cas explicite ici, la fonction
+# tombe dans son "default: return -1;" pour MENU_SET_AFI, et les touches
+# haut/bas ne savent alors pas que 0..1 est une plage valide : le curseur
+# du sous-menu ne bouge jamais (reste bloque sur la valeur chargee a
+# l'ouverture, ON). Meme plage que MENU_SET_INV juste au-dessus (2 valeurs,
+# gSubMenu_OFF_ON).
+perl -0pi -e 's/(        case MENU_SET_MET:\n        case MENU_SET_GUI:\n            \/\/\*pMin = 0;\n            \*pMax = ARRAY_SIZE\(gSubMenu_SET_MET\) - 1;\n            break;\n)/        case MENU_SET_AFI:\n            \/\/*pMin = 0;\n            *pMax = ARRAY_SIZE(gSubMenu_OFF_ON) - 1;\n            break;\n$1/' App/app/menu.c
+
+grep -q 'case MENU_SET_AFI:' App/app/menu.c || { echo "!! app/menu.c : MENU_GetLimits AfInv absent"; exit 1; }
+[ "$(grep -c 'case MENU_SET_AFI:' App/app/menu.c)" -ge 3 ] || { echo "!! app/menu.c : MENU_GetLimits AfInv (attendu : 3 occurrences au total)"; exit 1; }
+
+# App/settings.c : persistance dans le nibble "tmp" deja partage par
+# set_inv/set_met/set_gui (Data[5]<7:4>, secteur Settings EEPROM du F4HWN
+# stock) -- le bit 1 de ce nibble n'a jamais ete utilise par aucun reglage
+# existant (seuls 0, 2 et 3 le sont), donc libre. Polarite INVERSEE au
+# stockage (bit=1 => AF NON inversee) expres : une EEPROM deja ecrite par un
+# firmware d'avant ce correctif a forcement ce bit a 0 (jamais mis a 1 par
+# aucun ancien code) -- stocker "0 = inverse actif" au lieu de "1 = inverse
+# actif" fait que ces radios dejas configurees relisent gSetting_set_af_inv
+# = true au premier demarrage apres mise a jour, EXACTEMENT le comportement
+# fige qu'elles avaient avant (aucun changement audio surprise). Seul un
+# reglage explicite du menu ecrit desormais ce bit a 1.
+perl -0pi -e 's/(        gSetting_set_met = \(tmp >> 2\) & 0x01;\n        gSetting_set_gui = \(tmp >> 3\) & 0x01;\n)/$1        gSetting_set_af_inv = !((tmp >> 1) & 0x01);   \/* Sarsat_UV-K1-5_RP2040: bit libre, polarite inversee (voir commentaire build.sh) *\/\n/' App/settings.c
+perl -0pi -e 's/tmp =   \(gSetting_set_inv << 0\) \|\n            \(gSetting_set_met << 2\) \|\n            \(gSetting_set_gui << 3\);/tmp =   (gSetting_set_inv << 0) |\n            ((gSetting_set_af_inv ? 0 : 1) << 1) |\n            (gSetting_set_met << 2) |\n            (gSetting_set_gui << 3);/' App/settings.c
+
+# App/settings.c : diagnostic (2026-09-16, signale par l'utilisateur) --
+# soupcon que la config APRS revient parfois aux valeurs par defaut apres un
+# flash de la V3 avec le C-Board reste branche (meme risque de brown-out sur
+# le rail 3,3V non regule/tampon deja documente dans docs/hardware.md, cette
+# fois pendant la programmation plutot qu'a l'acquisition GPS). Ce mecanisme
+# de "version differente" ici NE touche PAS le bloc de config APRS (verifie
+# -- il ne reinitialise que KEY_LOCK/MENU_LOCK/SET_KEY, SET_INV, les lignes
+# de logo et la table dBm), donc ce n'est probablement pas lui le coupable --
+# mais journalise quand meme la comparaison (via le port USB CDC propre a la
+# radio, PAS la liaison UART C-Board -- protocole binaire, ne pas melanger
+# du texte libre dessus) pour confirmer avec preuve plutot que deviner.
+perl -0pi -e 's/#include "misc.h"\n#include "settings.h"\n#include "ui\/menu.h"/#include "misc.h"\n#include "settings.h"\n#include "ui\/menu.h"\n#include "driver\/vcp.h"           \/* Sarsat_UV-K1-5_RP2040: diagnostic version\/EEPROM *\/\n#include "external\/printf\/printf.h"  \/* idem, sprintf *\//' App/settings.c
+
+perl -0pi -e 's/(        PY25Q16_ReadBuffer\(0x00A160, storedVersion, sizeof\(storedVersion\)\);\n)/$1\n        {   \/* Sarsat_UV-K1-5_RP2040: diagnostic -- voir commentaire ci-dessus *\/\n            char dbg[80];\n            int n = sprintf(dbg, "[settings] ver stored=\\"%.15s\\" compiled=\\"%s\\"\\r\\n",\n                             storedVersion, VERSION_STRING_2);\n            (void)n;\n            VCP_SendStr(dbg);\n        }\n/' App/settings.c
+
+grep -q 'driver/vcp.h' App/settings.c || { echo "!! settings.c : include vcp.h (diagnostic)"; exit 1; }
+grep -q '\[settings\] ver stored=' App/settings.c || { echo "!! settings.c : diagnostic version manquant"; exit 1; }
+grep -q '\[aprs\] cfg magic=' App/app/aprs.c || { echo "!! aprs.c : diagnostic config APRS manquant"; exit 1; }
+
+grep -q 'gSetting_set_af_inv = !((tmp >> 1) & 0x01);' App/settings.c || { echo "!! settings.c : lecture EEPROM AfInv"; exit 1; }
+grep -q '((gSetting_set_af_inv ? 0 : 1) << 1) |' App/settings.c || { echo "!! settings.c : ecriture EEPROM AfInv"; exit 1; }
+
+# App/radio.c : RADIO_SetModulation() force le gain DAC (REG_48) au MAXIMUM
+# (0xF) sans condition, pour toute modulation -- deux endroits distincts
+# (branche BYP/RAW a retour anticipe, et branche FM/AM/USB). La V1 honore
+# gEeprom.DAC_GAIN (le reglage de gain AF du C-Board) partout depuis le
+# debut de ce projet -- ecart jamais corrige cote V3 en dehors des ecrans
+# deja patches localement (SARSAT, Sonde). Etendu ici aux deux occurrences
+# du driver partage d'un coup (meme changement, litteralement identique).
+perl -0pi -e 's/BK4819_SetRegValue\(afDacGainRegSpec, 0xF\);/BK4819_SetRegValue(afDacGainRegSpec, gEeprom.DAC_GAIN \& 0xF);   \/* Sarsat_UV-K1-5_RP2040: honore le gain C-Board, pas force au max *\//g' App/radio.c
+
+[ "$(grep -c 'BK4819_SetRegValue(afDacGainRegSpec, gEeprom.DAC_GAIN & 0xF);' App/radio.c)" -ge 2 ] || { echo "!! radio.c : gain DAC (attendu : 2 occurrences)"; exit 1; }
+
+# App/radio.c : dans la branche BYP/RAW a retour anticipe de
+# RADIO_SetModulation(), REG_3D reste a 0x0000 pour RAW (seul BYP le met a
+# 0x2AAB). La V1 utilise 0x2AAB pour DSC comme pour FM -- pas de distinction
+# equivalente a BYP/RAW la-bas. Aligne RAW sur BYP (et donc sur la V1).
+perl -0pi -e 's/uint16_t reg_3d_val = 0x0000;/uint16_t reg_3d_val = 0x2AAB;   \/* Sarsat_UV-K1-5_RP2040: meme valeur pour BYP et RAW, comme la V1 *\//' App/radio.c
+
+grep -q 'uint16_t reg_3d_val = 0x2AAB;' App/radio.c || { echo "!! radio.c : REG_3D par defaut BYP/RAW"; exit 1; }
+
+# App/driver/bk4829.c : BK4819_EnterRaw() desactive l'AFC sans condition
+# ("RAW profile keeps AFC disabled to preserve discriminator-like
+# behavior"). La V1 ne desactive jamais l'AFC pour son equivalent DSC.
+# Deja confirme cette session (ecran Sonde) que desactiver l'AFC donne un
+# MOINS BON decodage M10 que la laisser active -- aligne ici aussi.
+perl -0pi -e 's/\/\/ RAW profile keeps AFC disabled to preserve discriminator-like behavior\.\n    BK4819_SetRegValue\(afcDisableRegSpec, true\);/\/\/ Sarsat_UV-K1-5_RP2040: AFC restait desactivee ici (comportement stock) --\n    \/\/ alignee sur la V1 (jamais desactivee pour son DSC), et deja confirme\n    \/\/ preferable sur l ecran Sonde de ce projet (moins bon decodage M10 AFC\n    \/\/ off que AFC on).\n    BK4819_SetRegValue(afcDisableRegSpec, false);/' App/driver/bk4829.c
+
+# 2 occurrences attendues : celle deja stock de BK4819_EnterBypass() (jamais
+# desactivee) + celle qu'on vient d'ajouter dans BK4819_EnterRaw().
+[ "$(grep -c 'BK4819_SetRegValue(afcDisableRegSpec, false);' App/driver/bk4829.c)" -ge 2 ] || { echo "!! bk4829.c : AFC EnterRaw (attendu : 2 occurrences)"; exit 1; }
+
+# App/driver/bk4829.c : BK4819_EnterRaw(), suite (2026-09-17, sur demande
+# explicite de l'utilisateur -- "peux-tu egalement reduire l'AFC ?"). Meme
+# restriction de plage AFC deja appliquee a SARSAT (REG_73<13:11>, "AFC
+# Range Selection", mis a 111 = plage minimale) : l'AFC reste active (voir
+# juste au-dessus) mais ne peut plus s'ecarter loin en poursuivant un
+# contenu de rafale/bruit transitoire -- seulement centrer une vraie derive
+# de porteuse. Applique ici au mode RAW manuel d'un VFO (pas seulement
+# l'ecran SARSAT), sur le meme raisonnement.
+perl -0pi -e 's/(    \/\/ off que AFC on\)\.\n)(    BK4819_SetRegValue\(afcDisableRegSpec, false\);\n\})/$1    {\n        uint16_t r73 = BK4819_ReadRegister(0x73);\n        r73 = (uint16_t)((r73 \& ~(0x7u << 11)) | (0x7u << 11));   \/* Sarsat_UV-K1-5_RP2040: range = 111 = min *\/\n        BK4819_WriteRegister(0x73, r73);\n    }\n$2/' App/driver/bk4829.c
+
+grep -q 'r73 = (uint16_t)((r73 & ~(0x7u << 11)) | (0x7u << 11));' App/driver/bk4829.c || { echo "!! bk4829.c : restriction plage AFC EnterRaw absente"; exit 1; }
+
+# App/driver/bk4829.c : BK4819_EnterRaw(), suite encore (2026-09-17, avait
+# ete demande "je voudrais seulement desactiver l'AFC sur VFO RAW et
+# SARSAT" -- desactivait completement l'AFC ici, rendant inerte la
+# restriction de plage REG_73 juste au-dessus). RETOUR ARRIERE (meme
+# session, demande explicite ulterieure : "remettre l'AFC etroit sur le
+# mode VFO RAW") : l'AFC reste maintenant ACTIVE pour RAW (le "false" pose
+# par le tout premier patch de cette fonction, plus haut, n'est plus
+# ecrase) -- seule la plage restreinte (REG_73 = 111) s'applique, comme
+# pour SARSAT. SARSAT (patch/sarsat.c) n'est PAS concerne par ce retour
+# arriere : son AFC reste completement desactivee, seul VFO RAW change ici.
+grep -q 'BK4819_SetRegValue(afcDisableRegSpec, false);' App/driver/bk4829.c || { echo "!! bk4829.c : AFC EnterRaw/EnterBypass (attendu : desactivee nulle part)"; exit 1; }
 
 # App/app/app.c #0 : include de sarsat.h + afgain.h + aprs.h + sonde.h
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#include "app/afgain.h"\n#endif\n}' App/app/app.c

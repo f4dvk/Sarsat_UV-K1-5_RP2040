@@ -112,6 +112,7 @@ void APRS_SaveConfig(void);           /* persist gAprsCfg to EEPROM          */
 bool APRS_QuietBacklight(void);       /* true => suppress the RX-squelch backlight */
 void APRS_ApplySquelch(void);         /* APRS-band fast-squelch tweak (from tick) */
 void APRS_ApplyRxAudio(void);         /* APRS-band RX-register hook (currently inert -- see aprs.c) */
+void APRS_ApplyAfc(void);             /* APRS-band: restrict AFC excursion range (REG_73) */
 bool APRS_KeepAwake(void);            /* true => block battery-save (RX on 144-148) */
 void APRS_MyPosition(int32_t *lat_e5, int32_t *lon_e5);  /* GPS fix or manual */
 bool APRS_GpsFixValid(void);          /* a fresh GPS fix is available          */

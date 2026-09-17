@@ -193,27 +193,47 @@ static void SONDE_TickDelay(uint32_t ms)
  * matching V1's DSC exactly:
  *   - AFC / REG_3D: BK4819_EnterRaw() forces AFC OFF (`afcDisableRegSpec =
  *     true`) and, back in RADIO_SetModulation()'s early-return branch for
- *     RAW, REG_3D = 0x0000 -- unlike V1's DISCRI (AFC stays on, REG_3D =
- *     0x2AAB, same as its own FM path). Re-asserted below for both profiles.
+ *     RAW, REG_3D = 0x0000 -- unlike V1's DISCRI (AFC on, REG_3D = 0x2AAB,
+ *     same as its own FM path). REG_3D is re-asserted below to 0x2AAB for
+ *     both profiles either way; AFC itself is re-asserted ON here too, for
+ *     both -- an AFC-off test was tried and reverted on 2026-09-15, see
+ *     that note right above the write for the on-air result.
  *   - AF DAC gain: hardcoded to max by RADIO_SetModulation() for every
  *     modulation on this firmware; V1's own radio.c.diff instead reads
  *     gEeprom.DAC_GAIN (to respect the C-Board's AF-gain override) for
  *     every modulation there, so this screen now does the same.
  *   - REG_43 (RF filter bandwidth): BK4819_SetFilterBandwidth() on THIS
- *     chip (App/driver/bk4829.c -- the real BK4829, not the bk4819.c file of
- *     the same function name, which isn't even compiled here) completely
- *     ignores its `weak_no_different` argument (`(void)weak_no_different;`)
- *     and always writes a fixed WIDE preset (0x3028) whose weak-signal RF
- *     sub-field (<11:9> = 2.0 kHz, doubled to 4.0 kHz by <5>=1) is narrower
- *     than its main RF sub-field (<14:12> = 3.5 kHz, doubled to 7.0 kHz) --
- *     so passing `true` here has never actually done anything on V3, and a
- *     stock V3 VFO in FM Wide always narrows its RF filter on a weak-signal
- *     judgement (V1, with ENABLE_AM_FIX, never does). Since the wrapper
- *     function can't be told to do otherwise, REG_43 is now written
- *     directly with the weak-signal sub-field set equal to the main one
- *     (0x3628: <11:9> changed from 000 to 011, i.e. 2.0 -> 3.5 kHz, still
- *     doubled to 7.0 kHz by the same <5>=1 bit) -- every other field (AF Tx
- *     LPF2, BW mode, bit3, FM gain) unchanged from the stock WIDE preset. */
+ *     chip (App/driver/bk4829.c) used to completely ignore its
+ *     `weak_no_different` argument -- since fixed for good at the driver
+ *     level (see firmware/uv-k1-k5v3/build.sh's weak_no_different patch),
+ *     so every VFO now shares the "no weak-signal narrowing" behaviour this
+ *     screen pioneered. Sonde goes further than a plain VFO: on explicit
+ *     user request ("il faut mettre le plus large possible"), the main RF
+ *     sub-field <14:12> and the weak-signal one <11:9> (kept equal to it,
+ *     same "no narrowing" reasoning as before) were first pushed to 111 =
+ *     5.5 kHz, the widest this 3-bit field can encode -- doubled to 11.0 kHz
+ *     by the same 25 kHz-mode <5>=1 bit already in the stock WIDE preset.
+ *     On-air result (2026-09-15, alongside the AFC-off test reverted just
+ *     above): still no valid decode, and a plain V1 VFO on DSC (~7.0 kHz
+ *     class filter) did noticeably better -- suggesting 11.0 kHz let in
+ *     more out-of-band noise than the wider edges were worth. Backed off to
+ *     a midpoint (field 101 = 4.5 -> 9.0 kHz, REG_43 = 0x5A28): still no
+ *     better. In parallel, real M10/M20 captures started showing an
+ *     already-known symptom at a much bigger scale than before (a squelch
+ *     LED blip and a multi-hundred-chip flat-zero ADC dropout mid-burst,
+ *     see rp2040/src/sonde_m10.h's own history) -- and a genuine Vero
+ *     VR-N76 (also BK4829-based, per the user) decodes the same sonde fine
+ *     with HTCommander, ruling out a hard chip limitation. Working
+ *     hypothesis: TOO WIDE a filter lets a large FM deviation swing through
+ *     unshaped, over-driving the discriminator/AF gain stage into the kind
+ *     of noise burst a glitch-based squelch reads as "signal lost" -- wider
+ *     was never the fix, it was making this worse. Reverted to the
+ *     ORIGINAL value from before any of this widening: REG_43 = 0x3628
+ *     (field 011 = 3.5 -> 7.0 kHz, weak-signal field still equalized to it,
+ *     no narrowing). Not applied to SARSAT or a plain VFO, which must keep
+ *     the standard 25 kHz shape for voice/CTCSS. If 7.0 kHz still shows the
+ *     same dropout, the next variable to test is narrower still (NARROW
+ *     preset, ~4-5 kHz class), not wider again. */
 static void SONDE_ApplyRxProfile(bool dsc)
 {
 	if (dsc) {
@@ -239,10 +259,101 @@ static void SONDE_ApplyRxProfile(bool dsc)
 		BK4819_WriteRegister(0x2a, 0x7400);
 		BK4819_WriteRegister(0x2f, 0x9890);
 	}
+	/* ⚠️ RESOLVED (2026-09-16, official Beken "BK4829 Registers Table"
+	 * datasheet, DRT01-230606-C01, supplied by the user -- the same
+	 * document bk4829.c's own REG_43 comment already cites by name):
+	 * REG_47<11:8> is documented as "AF Output Selection" (0=Mute,
+	 * 1=Normal AF Out, 2=Tone Out for Rx, 3=Beep Out for Tx, 6=CTCSS/CDCSS
+	 * Out for Rx Test, 8=FSK Out for Rx Test) -- confirms BK4819_AF_FM (1)
+	 * is the right value for that field. More importantly, the datasheet's
+	 * own register-default table gives REG_47's power-on/reset value as
+	 * 0x6140 -- bit for bit V1's formula ((6u<<12)|(AF<<8)|(1u<<6)), NOT
+	 * this driver's own BK4819_SetAF() (0x6042 | (AF<<8) = 0x6142 for FM).
+	 * The one-bit difference (bit 1) an earlier note here called "never
+	 * explained" is real: bit 1 isn't part of any documented field in this
+	 * table, and the chip's own factory default has it at 0 -- V3's stock
+	 * driver sets it to 1 for every modulation, on every screen, not just
+	 * this one, an undocumented deviation from Beken's own default that
+	 * predates this project. RT950's REG_47 = 0xFB67 (tried and reverted
+	 * twice above/below -- github.com/Hertzz58/Radtel-RT950-Pro-Firmware
+	 * and github.com/JKI757/radtel-950-pro) sets several MORE undocumented
+	 * bits on top and broke audio outright (SSB-sounding) -- likely
+	 * RT950-PCB-specific, not applicable here. This screen re-asserts the
+	 * datasheet-documented default, 0x6140, matching V1's own formula --
+	 * already tested on air once before this note existed (during the
+	 * BK4929-output-tap session) with no audio-quality complaint, only the
+	 * (still unexplained, unrelated) ADC dropout persisting.
+	 *
+	 * UPDATE (2026-09-16): the shared driver's BK4819_SetAF() (called by
+	 * RADIO_SetModulation() just above) now applies this exact same
+	 * datasheet-documented value itself, with bit 13 (the only documented
+	 * bit of the two, "AF Output Inverse Mode") made user-configurable via
+	 * the new "AfInv" menu instead of hard-coded -- see build.sh. This
+	 * explicit re-write is kept only to guarantee this screen never
+	 * silently regresses to the old 0x6042-style base if the shared driver
+	 * patch is ever reverted upstream; it now calls into the same toggle
+	 * rather than duplicating the formula. */
+	BK4819_SetAF(BK4819_AF_FM);
+	/* TRIED and REVERTED (2026-09-15): AFC forced OFF here, to test against
+	 * real M10 captures (tools/decode_m10_pc.py, off the radio's own audio,
+	 * independent of the RP2040/ADC) locking the header but never validating
+	 * a checksum, with the per-quarter decode confidence dropping across the
+	 * capture -- a PLL/clock-tracking drift signature. Hypothesis: AFC
+	 * chasing a transient DC bias in bursty Manchester data as if it were a
+	 * real carrier offset, drifting the LO mid-packet. On-air result:
+	 * fewer, not more, valid decodes with AFC off -- and a plain V1 VFO
+	 * manually tuned to DSC (AFC on, via MODULATION_DISCRI's own formula)
+	 * decoded noticeably better than this screen with AFC off. Reverted;
+	 * AFC stays on for this screen, matching that V1 reference point and
+	 * the stock DSC/RAW behaviour before this test. The drift itself is
+	 * still real and unexplained -- next guess should be a different
+	 * variable, not AFC again. */
 	BK4819_SetRegValue(afcDisableRegSpec, false);
 	BK4819_WriteRegister(BK4819_REG_3D, 0x2AAB);
+	BK4819_WriteRegister(BK4819_REG_43, 0x3628);   /* back to 7.0 kHz, wider never helped -- see note above */
+
+	/* ⚠️ NEW (2026-09-16, sur retour explicite -- "tu peux tester") : REG_54/
+	 * REG_55 ("300Hz AF Response coefficient for Rx" au datasheet Beken) ne
+	 * sont touches nulle part dans cet ecran -- ils heritent donc de ce que
+	 * le menu SetRxA (Fonctions) a choisi. Le preset par defaut de ce menu,
+	 * "FLAT" (index 0, celui recommande partout dans ce projet en cas de
+	 * doute), ecrit REG_54=0x9009 / REG_55=0x3200 -- MAIS la vraie valeur de
+	 * reset d'usine documentee par le datasheet est REG_54=0x9009 /
+	 * REG_55=0x31A9. "FLAT" n'est donc pas, malgre son nom, exactement le
+	 * comportement neutre de la puce -- REG_55 differe (0x3200 contre
+	 * 0x31A9). La V1 ne touche jamais ces deux registres et reste donc en
+	 * permanence sur la vraie valeur d'usine, sans jamais en avoir le choix.
+	 * Force ici la vraie valeur documentee, independamment du choix SetRxA
+	 * de l'operateur -- portee locale a cet ecran. Aucune information
+	 * detaillee du datasheet sur ce que ces bits encodent precisement (pas
+	 * de table de champs comme REG_43) -- test a une seule variable, retour
+	 * arriere immediat si ca degrade quoi que ce soit. */
+	BK4819_WriteRegister(0x54, 0x9009);
+	BK4819_WriteRegister(0x55, 0x31A9);
+
+	/* TRIED and REVERTED (2026-09-15, 2nd attempt): REG_47 = 0xFB67 again,
+	 * this time paired with REG_48 built the same way the real RT950 OEM
+	 * firmware pairs it (Ghidra decompile, github.com/JKI757/radtel-950-pro
+	 * -- read purely to understand register semantics, no code copied):
+	 * REG_48 = 0xB00F | (cal_value & 0x3F) << 4, with gEeprom.DAC_GAIN
+	 * substituted for their per-radio flash calibration byte (no equivalent
+	 * available). REG_37/REG_43/REG_30 already matched between the two
+	 * firmwares beforehand. On-air result: audio still came out sounding
+	 * like SSB, identical to the first (REG_47-alone) attempt -- so REG_48
+	 * was never the missing piece. This confirms the likelier explanation
+	 * already flagged before this test: REG_47's correct value probably
+	 * depends on how the RF front-end is actually wired on the PCB (mixer/
+	 * IF topology), which can differ between the RT950 and this radio even
+	 * on the identical BK4829 chip -- no register combination guessed from
+	 * outside would fix that. This avenue (porting RT950's exact register
+	 * values for REG_47) is now treated as exhausted, not to be retried
+	 * without a real schematic or datasheet section for this register --
+	 * see the newer note above (2026-09-16) for what REG_47 actually
+	 * settled on once the official Beken datasheet became available.
+	 * REG_48 restored to this screen's own established formula (honour
+	 * gEeprom.DAC_GAIN, the C-Board AF-gain override, same as before any of
+	 * this RT950 detour). */
 	BK4819_SetRegValue(afDacGainRegSpec, gEeprom.DAC_GAIN & 0xF);
-	BK4819_WriteRegister(BK4819_REG_43, 0x3628);   /* WIDE, no weak-signal narrowing -- see note above */
 }
 
 void APP_RunSonde(void)

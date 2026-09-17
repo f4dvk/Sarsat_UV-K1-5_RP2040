@@ -382,28 +382,130 @@ void APP_RunSarsat(void)
 	 *     bi-phase-L transitions pass flat -- this is exactly what
 	 *     BK4819_EnterRaw() (driver/bk4829.c) does; written by hand here so the
 	 *     modulation stays MODULATION_FM (discriminator), not RAW/baseband.
-	 *   - WIDE IF so the beacon's sidebands are not clipped. */
+	 *   - WIDE IF so the beacon's sidebands are not clipped.
+	 *
+	 * ⚠️ NEW (2026-09-16, alignement V1/V3 -- 4/4, REG_43) :
+	 * RAPPEL (etat avant ce correctif) : cet ecran demande explicitement
+	 * `weak_no_different=false` ci-dessous. A l'origine (avant cette
+	 * session) c'etait sans consequence : le driver bk4829.c ignorait
+	 * totalement ce parametre (`(void)weak_no_different;`), donc ce `false`
+	 * n'a jamais rien fait de concret jusqu'ici. Mais le driver a ete
+	 * corrige cette session (voir firmware/uv-k1-k5v3/build.sh, patch
+	 * weak_no_different) pour l'implementer pour de vrai -- consequence
+	 * inattendue : ce `false`, laisse tel quel par inertie, est devenu actif
+	 * et fait desormais reellement RETRECIR le filtre RF sur un jugement
+	 * signal-faible, alors que la V1 (ENABLE_AM_FIX) ne retrecit jamais.
+	 * EVOLUTION : passe a `true`, alignant SARSAT sur la V1 et sur le reste
+	 * de ce projet (VFO classique, ecran Sonde), qui ne retrecissent plus
+	 * nulle part depuis ce meme correctif de driver. */
 	RADIO_SetModulation(MODULATION_FM);
-	BK4819_SetFilterBandwidth(BK4819_FILTER_BW_WIDE, false);
+	BK4819_SetFilterBandwidth(BK4819_FILTER_BW_WIDE, true);
 	{
 		uint16_t r2b = BK4819_ReadRegister(BK4819_REG_2B);
 		r2b |= (1u << 10) | (1u << 9) | (1u << 8);
 		BK4819_WriteRegister(BK4819_REG_2B, r2b);
 	}
+	/* ⚠️ NEW (2026-09-16, sur retour explicite -- "tu peux tester") : REG_54/
+	 * REG_55 ("300Hz AF Response coefficient for Rx" au datasheet Beken)
+	 * heritent ici de ce que le menu SetRxA a choisi -- le preset "FLAT"
+	 * (index 0, recommande partout dans ce projet en cas de doute) ecrit
+	 * REG_54=0x9009 / REG_55=0x3200, alors que la vraie valeur de reset
+	 * d'usine documentee est REG_54=0x9009 / REG_55=0x31A9 -- "FLAT" n'est
+	 * donc pas, malgre son nom, exactement neutre. La V1 ne touche jamais
+	 * ces deux registres et reste en permanence sur la vraie valeur d'usine.
+	 * Meme correctif que sur l'ecran Sonde : force la vraie valeur
+	 * documentee ici, independamment du choix SetRxA de l'operateur. Test a
+	 * une seule variable, retour arriere immediat si ca degrade quoi que ce
+	 * soit. */
+	BK4819_WriteRegister(0x54, 0x9009);
+	BK4819_WriteRegister(0x55, 0x31A9);
+	/* ⚠️ NEW (2026-09-16, alignement V1/V3 demande par l'utilisateur, registre
+	 * par registre -- 1/4, REG_47) :
+	 * RAPPEL (etat avant ce correctif) : cet ecran n'a jamais touche REG_47
+	 * lui-meme -- il herite donc de ce que RADIO_SetModulation(MODULATION_FM)
+	 * juste au-dessus vient d'y ecrire via BK4819_SetAF(), c-a-d la formule
+	 * stock du driver V3 : 0x6042 | (BK4819_AF_FM<<8) = 0x6142. La V1, elle,
+	 * calcule ce registre avec sa propre formule ((6u<<12)|(AF<<8)|(1u<<6)) =
+	 * 0x6140 pour FM, sur CHAQUE ecran -- donc SARSAT y tournait deja avec un
+	 * bit d'ecart (bit 1, non documente) par rapport a la V1.
+	 * EVOLUTION : le datasheet Beken officiel "BK4829 Registers Table"
+	 * (fourni par l'utilisateur) donne justement 0x6140 comme valeur de
+	 * RESET D'USINE de ce registre -- bit pour bit la formule V1, pas celle
+	 * du driver V3. Deja applique a l'ecran Sonde (meme raisonnement, voir
+	 * patch/sonde.c) sans aucune plainte audio la ou ca a ete teste sur
+	 * l'air. Meme correctif ici, local a cet ecran (le driver partage
+	 * BK4819_SetAF() n'est pas touche -- portee volontairement limitee a
+	 * SARSAT, pas de risque pour APRS/VFO/Sonde).
+	 *
+	 * MISE A JOUR (2026-09-16) : le driver partage BK4819_SetAF() applique
+	 * desormais lui-meme cette valeur (voir build.sh), avec le bit 13
+	 * documente ("AF Output Inverse Mode") reglable depuis le nouveau menu
+	 * "AfInv" au lieu d'etre fige. Cet ecran appelle maintenant directement
+	 * BK4819_SetAF() plutot que de dupliquer la formule, pour heriter de ce
+	 * reglage comme tous les autres ecrans/VFO. */
+	BK4819_SetAF(BK4819_AF_FM);
+	/* ⚠️ NEW (2026-09-16, alignement V1/V3 -- 2/4, gain DAC / REG_48) :
+	 * RAPPEL (etat avant ce correctif) : cet ecran n'a jamais touche
+	 * afDacGainRegSpec lui-meme -- il herite donc de ce que
+	 * RADIO_SetModulation(MODULATION_FM) vient d'y ecrire, c-a-d la formule
+	 * stock du driver V3 : BK4819_SetRegValue(afDacGainRegSpec, 0xF) --
+	 * gain DAC force au MAXIMUM, sans condition, pour toute modulation. La
+	 * V1, elle, a ete patchee des le depart pour honorer
+	 * gEeprom.DAC_GAIN (le reglage de gain AF du C-Board) a la place de ce
+	 * 0xF fixe -- et cette ligne du patch V1 s'applique a TOUTE modulation,
+	 * SARSAT compris. Consequence concrete : sur V3, le reglage de gain
+	 * C-Board n'a jamais eu d'effet sur cet ecran -- SARSAT tournait au gain
+	 * DAC max quoi que l'operateur ait configure, contrairement a la V1 qui
+	 * le respecte partout.
+	 * EVOLUTION : reaffirme gEeprom.DAC_GAIN ici, apres l'appel a
+	 * RADIO_SetModulation() qui vient de le forcer au max -- meme motif deja
+	 * en place sur l'ecran Sonde (patch/sonde.c). Portee locale a cet ecran,
+	 * driver partage non touche. */
+	BK4819_SetRegValue(afDacGainRegSpec, gEeprom.DAC_GAIN & 0xF);
 	/* (A REG 0x54/0x55 pin to 0x9009/0x31A9 was tried here, to match the V1's
 	 * untouched audio filter -- reverted with the APRS RX-alignment batch that
 	 * killed decoding. The SetRxA profile -- FLAT by default -- stands, same as
 	 * the state this screen was validated on air with. Set SetRxA=FLAT if in
 	 * doubt.) */
-	/* EXPERIMENTAL (3rd guess), not yet confirmed on air: disable AFC
-	 * (Automatic Frequency Control). Reported symptom this targets: a frame
-	 * audible right after opening this screen, no longer audible on
-	 * following frames -- "un AGC qui s'ecarte ou AFC ?". AFC continuously
-	 * nudges the LO based on the discriminator's DC output to keep a signal
-	 * centered; RADIO_SetModulation(MODULATION_FM) just above explicitly
-	 * turned it ON (afcDisableRegSpec = (modulation != MODULATION_FM), false
-	 * for FM = not disabled). With REG_2B's de-emphasis/HPF/LPF bypassed for
-	 * a flat discriminator, AFC sees a very different DC/noise character
+	/* ⚠️ NEW (2026-09-16, alignement V1/V3 -- 3/4, AFC) :
+	 * RAPPEL (etat avant ce correctif) : l'AFC est desactivee ici depuis un
+	 * essai ancien (3e piste, jamais confirmee sur l'air, voir le
+	 * commentaire juste en dessous, garde tel quel pour l'historique). La
+	 * V1 ne desactive jamais l'AFC pour SARSAT -- elle reste activee par
+	 * defaut, comme n'importe quelle modulation FM standard.
+	 * EVOLUTION : reactivee ci-dessous pour matcher la V1, MAIS avec un
+	 * ajout qui va au-dela d'un simple alignement -- sur question explicite
+	 * de l'utilisateur ("n'y a-t-il pas une valeur a mettre pour que l'AFC
+	 * ne s'ecarte pas ?"), le datasheet Beken officiel documente un champ
+	 * separe de celui qui desactive completement l'AFC : REG_73<13:11>,
+	 * "AFC Range Selection", 000=max (valeur de reset d'usine, plage de
+	 * correction la plus large) ... 111=min (plage la plus etroite). La V1
+	 * ne touche jamais ce champ non plus (reste au max par defaut) -- donc
+	 * ce n'est PAS un alignement V1, c'est une piste supplementaire pour
+	 * repondre directement a l'inquietude d'origine de ce 3e essai
+	 * ("un AGC qui s'ecarte ou AFC ?") sans repartir sur une desactivation
+	 * complete (qui a deja fait moins bien pour le decodage M10 testee cette
+	 * session sur l'ecran Sonde). Mis a 111 (plage minimale) : l'AFC reste
+	 * active pour centrer une vraie derive de porteuse, mais ne peut plus
+	 * s'ecarter loin en poursuivant un contenu de rafale/bruit transitoire.
+	 * Si ca perd trop de capacite de centrage reel, un palier intermediaire
+	 * (pas 111) sera la prochaine chose a essayer, pas un retour a la
+	 * desactivation complete. */
+	{
+		uint16_t r73 = BK4819_ReadRegister(0x73);
+		r73 = (uint16_t)((r73 & ~(0x7u << 11)) | (0x7u << 11));   /* range = 111 = min */
+		BK4819_WriteRegister(0x73, r73);
+	}
+	/* EXPERIMENTAL (3rd guess), TRIED and REVERTED (2026-09-16, superseded by
+	 * the note above): disable AFC entirely (Automatic Frequency Control).
+	 * Reported symptom this targeted: a frame audible right after opening
+	 * this screen, no longer audible on following frames -- "un AGC qui
+	 * s'ecarte ou AFC ?". AFC continuously nudges the LO based on the
+	 * discriminator's DC output to keep a signal centered; RADIO_SetModulation
+	 * (MODULATION_FM) just above explicitly turned it ON (afcDisableRegSpec =
+	 * (modulation != MODULATION_FM), false for FM = not disabled). With
+	 * REG_2B's de-emphasis/HPF/LPF bypassed for a flat discriminator, AFC
+	 * sees a very different DC/noise character
 	 * than it was tuned for on normal filtered FM audio -- if it drifts the
 	 * LO away chasing burst/noise content instead of genuine carrier offset,
 	 * that would explain exactly "works right at entry, degrades afterwards"
@@ -413,7 +515,23 @@ void APP_RunSarsat(void)
 	 * (driver/bk4819-regs.h) -- narrower and lower-risk than either previous
 	 * guess: it only stops ongoing frequency correction, it doesn't change
 	 * gain or squelch at all. If this makes things worse, revert it the same
-	 * way as the other two -- don't stack a 4th guess on top. */
+	 * way as the other two -- don't stack a 4th guess on top.
+	 * RESULT: never confirmed on air either way before this session's
+	 * V1/V3 alignment pass. Reverted then (2026-09-16) -- AFC back to
+	 * enabled (false = not disabled), matching V1, with its excursion
+	 * range narrowed instead (see the note above) as the actual answer to
+	 * the concern this guess was trying to address.
+	 *
+	 * ⚠️ RE-APPLIED (2026-09-17, explicit user request: "je voudrais
+	 * seulement desactiver l'AFC sur VFO RAW et SARSAT"). Note that this
+	 * is NOT a V1 alignment this time either -- confirmed in V1's own
+	 * source (radio.c) that VFO FM there keeps AFC ON
+	 * (afcDisableRegSpec = modulation != MODULATION_FM, false when
+	 * modulation IS FM) -- V3's own VFO FM is left untouched accordingly,
+	 * same logic. This is specific to SARSAT (and separately RAW, see
+	 * bk4829.c). The REG_73 range-narrowing block just above is now moot
+	 * (a disabled AFC doesn't use its range setting) but left in place,
+	 * harmless, as a ready-made revert path if AFC needs to come back. */
 	BK4819_SetRegValue(afcDisableRegSpec, true);
 	/* TRIED and REVERTED (2nd guess after the squelch one above): freeze the
 	 * receiver AGC to a fixed gain step (RADIO_SetupAGC(false, true) ->
