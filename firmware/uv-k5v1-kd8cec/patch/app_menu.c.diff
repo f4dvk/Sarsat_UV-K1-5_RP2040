@@ -1,6 +1,48 @@
 --- app/menu.c
 +++ app/menu.c
-@@ -120,12 +120,6 @@
+@@ -39,6 +39,7 @@
+ 	#include "sram-overlay.h"
+ #endif
+ #include "ui/inputbox.h"
++#include "ui/main.h"          /* Sarsat_UV-K1-5_RP2040: dBmCorrTable, menu DbmCal */
+ #include "ui/menu.h"
+ #include "ui/ui.h"
+ #include "ceccommon.h"
+@@ -114,18 +115,40 @@
+ 	gUpdateStatus = true;
+ }
+ 
++/* Sarsat_UV-K1-5_RP2040: menu "DbmCal" -- correction dBm par bande
++ * (dBmCorrTable, ui/main.c), portee du firmware V3 (armel/uv-k1-k5v3-
++ * firmware-custom) qui expose deja ce reglage sous le meme nom, a cote
++ * de "AfInv". dBmCorrTable est ici un tableau[7] modifiable (etait const
++ * dans le KD8CEC 0.3q d'origine) ; persiste dans une zone EEPROM reservee
++ * par KD8CEC pour ses propres extensions (CEC_EEPROM_START1..+0xAF,
++ * ceccommon.h) mais jamais utilisee au-dela de son propre bloc de 8
++ * octets (+0..+7, "KD8CEC WORK" dans settings.c) -- +0x08 choisi pour
++ * rester bien distinct de ce bloc existant, qui est reecrit en entier
++ * (y compris ses octets 4..7, remis a 0xFF) a chaque sauvegarde des
++ * reglages generaux. */
++#define DBMCAL_EEPROM_ADDR   (CEC_EEPROM_START1 + 0x08)
++
++void writeDbmCorr(const int32_t value, const bool update_eeprom)
++{
++	const uint8_t band = gRxVfo->Band;
++	dBmCorrTable[band] = (int8_t)value;
++
++	if (update_eeprom)
++	{
++		uint8_t buf[8];
++		for (uint8_t i = 0; i < 7; i++)
++			buf[i] = (uint8_t)dBmCorrTable[i];
++		buf[7] = 0xFF;
++		EEPROM_WriteBuffer(DBMCAL_EEPROM_ADDR, buf);
++	}
++}
++
+ int MENU_GetLimits(uint8_t menu_id, int32_t *pMin, int32_t *pMax)
+ {
+ 	*pMin = 0;	//Move by KD8CEC, for reduce memory, about 50byte 
  	            // 57948      44    3284   61276    ef5c firmware => 57896      44    3284   61224    ef28 firmware
  	switch (menu_id)
  	{
@@ -13,7 +55,19 @@
  		case MENU_SQL:
  			*pMax = 9;
  			break;
-@@ -582,10 +576,6 @@
+@@ -361,6 +384,11 @@
+ 			*pMax = 2200;
+ 			break;
+ 
++		case MENU_DBMCAL:  // Sarsat_UV-K1-5_RP2040
++			*pMin = -64;
++			*pMax = 64;
++			break;
++
+ 		case MENU_BATTYP:
+ 			//*pMin = 0;
+ 			*pMax = 1;
+@@ -582,10 +610,6 @@
  			gEeprom.CHANNEL_DISPLAY_MODE = gSubMenuSelection;
  			break;
  
@@ -24,7 +78,18 @@
  		case MENU_AUTOLK:
  			gEeprom.AUTO_KEYPAD_LOCK = gSubMenuSelection;
  			gKeyLockCountdown        = 30;
-@@ -992,10 +982,6 @@
+@@ -796,6 +820,10 @@
+ 			return;
+ 		}
+ 
++		case MENU_DBMCAL:  // Sarsat_UV-K1-5_RP2040
++			writeDbmCorr(gSubMenuSelection, true);
++			return;
++
+ 		case MENU_BATTYP:
+ 			gEeprom.BATTERY_TYPE = gSubMenuSelection;
+ 			break;
+@@ -992,10 +1020,6 @@
  			gSubMenuSelection = gEeprom.CHANNEL_DISPLAY_MODE;
  			break;
  
@@ -34,4 +99,15 @@
 -
  		case MENU_AUTOLK:
  			gSubMenuSelection = gEeprom.AUTO_KEYPAD_LOCK;
+ 			break;
+@@ -1155,6 +1179,10 @@
+ 			gSubMenuSelection = gBatteryCalibration[3];
+ 			break;
+ 
++		case MENU_DBMCAL:  // Sarsat_UV-K1-5_RP2040
++			gSubMenuSelection = dBmCorrTable[gRxVfo->Band];
++			break;
++
+ 		case MENU_BATTYP:
+ 			gSubMenuSelection = gEeprom.BATTERY_TYPE;
  			break;

@@ -61,7 +61,7 @@ cp "$HERE/patch/ui_scanner.c" ui/scanner.c
 #    patches). F+8/F+5/F+0 are left untouched -- this is purely additive, a
 #    second way in for whoever prefers a long-press on SIDE1/SIDE2/M to
 #    opening the menu to pick which screen.
-for d in app_uart.c app_app.c app_main.c settings.c settings.h radio.h radio.c ui_main.c ui_status.c misc.h Makefile \
+for d in app_uart.c app_app.c app_main.c settings.c settings.h radio.h radio.c ui_main.c ui_main.h ui_status.c misc.h Makefile \
          ceccommon.c ui_menu.c ui_menu.h app_menu.c app_action.c; do
     f="${d/_//}"
     patch -p0 --forward "$f" < "$HERE/patch/${d}.diff"

@@ -1,5 +1,5 @@
---- a/ui/main.c	2024-01-19 14:43:30.000000000 +0100
-+++ ui/main.c	2026-09-04 09:00:00.000000000 +0200
+--- ui/main.c
++++ ui/main.c
 @@ -27,6 +27,10 @@
  #include "driver/bk4819.h"
  #include "driver/st7565.h"
@@ -11,6 +11,15 @@
  #include "functions.h"
  #include "helper/battery.h"
  #include "misc.h"
+@@ -40,7 +44,7 @@
+ 
+ center_line_t center_line = CENTER_LINE_NONE;
+ 
+-const int8_t dBmCorrTable[7] = {
++int8_t dBmCorrTable[7] = {   /* Sarsat_UV-K1-5_RP2040: reglable, menu DbmCal (valeurs par defaut, ecrasees par l'EEPROM si calibrees) */
+ 			-15, // band 1
+ 			-25, // band 2
+ 			-20, // band 3
 @@ -165,10 +169,75 @@
  {
  #if defined(ENABLE_RSSI_BAR)
@@ -495,7 +504,7 @@
  	char               String[22];
  
  	center_line = CENTER_LINE_NONE;
-@@ -554,6 +1015,11 @@
+@@ -554,6 +1022,11 @@
  						break;
  
  					case MDF_CHANNEL:	// show the channel number
@@ -507,7 +516,7 @@
  						sprintf(String, "CH-%03u", gEeprom.ScreenChannel[vfo_num] + 1);
  						UI_PrintString(String, 32, 0, line, 8);
  						break;
-@@ -796,6 +1262,7 @@
+@@ -796,6 +1269,7 @@
  		DrawCommBuffToSpectrum();
  
  	ST7565_BlitFullScreen();

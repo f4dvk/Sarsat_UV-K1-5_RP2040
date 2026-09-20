@@ -941,3 +941,51 @@ font plus rien.
 
 Build V1 vert, 0 warning (`-Wextra`) : **`text 57772 o` / 61440** (large marge).
 `ENABLE_AM_FIX` reste actif. `.bin` / `.packed.bin` / `sha256.txt` régénérés.
+
+## Menu "DbmCal" (correction dBm par bande), porté depuis le V3 (2026-09-20)
+
+Demandé par l'utilisateur : le V3 (`armel/uv-k1-k5v3-firmware-custom`) a déjà
+un réglage "DbmCal" dans le menu Fonctions (ajouté par ce projet, à côté de
+"AfInv") qui ajuste `dBmCorrTable[gRxVfo->Band]` -- la correction fixe
+appliquée à la lecture RSSI pour l'affichage dBm/S-mètre, une par bande, qui
+restait jusqu'ici une constante compilée en dur sur les deux firmwares.
+
+Le V1 a le même tableau `dBmCorrTable[7]` (`ui/main.c`/`ui/main.h`, feature
+KD8CEC déjà existante via `ENABLE_RSSI_BAR`), mais toujours `const` -- aucun
+moyen de le corriger depuis la radio, contrairement au V3. Porté à l'identique
+(mêmes bornes -64..64, même principe -- se caler sur la bande à étalonner en
+accordant le VFO dessus, puis ouvrir "DbmCal") :
+
+- `ui/main.h` / `ui/main.c` : `dBmCorrTable[7]` n'est plus `const`.
+- `ui/menu.h` : nouvelle entrée d'enum `MENU_DBMCAL`, juste après
+  `MENU_BATCAL` (le V1 n'a pas d'équivalent "AfInv"/"SetTmr" -- placé à côté
+  des DEUX autres réglages de calibration existants, `F_CALI`/`BatCal`,
+  l'endroit le plus cohérent sur ce firmware).
+- `ui/menu.c` : entrée de liste `"DbmCal"` + affichage (entier signé simple,
+  même format que `Sql`).
+- `app/menu.c` : nouvelle fonction `writeDbmCorr()` (met à jour la RAM tout
+  de suite, n'écrit en EEPROM que sur confirmation -- `MENU_AcceptSetting()`
+  n'est appelée qu'à la sortie du sous-menu, pas à chaque défilement, vérifié
+  en traçant tous les appelants de `gFlagAcceptSetting`/`MENU_AcceptSetting`)
+  + branchement lecture/limites/application.
+- `settings.c` : persistance dans `CEC_EEPROM_START1 + 0x08` (`0x1D58`) --
+  PAS le bloc "KD8CEC WORK" existant (`CEC_EEPROM_START1 + 0`, `ceccommon.h`)
+  dont les octets 4..7 sont déjà remis à `0xFF` à chaque sauvegarde générale
+  des réglages (`SETTINGS_SaveSettings`), ce qui aurait effacé la calibration
+  à la moindre autre modification. `CEC_EEPROM_START1..+0xAF` est une zone de
+  176 o réservée par KD8CEC pour ses propres extensions, dont seuls les 8
+  premiers octets sont utilisés ailleurs dans le firmware (vérifié par une
+  recherche exhaustive de `0x1D5`../`0x1D[6-9A-F]`) -- +0x08 est donc vierge
+  et sans risque de collision. EEPROM jamais calibrée (7 octets à `0xFF`) ->
+  garde les valeurs par défaut compilées, pas de correction aberrante.
+
+Les diffs modifiés (`ui_main.c.diff`, `ui_menu.c.diff`, `ui_menu.h.diff`,
+`app_menu.c.diff`, `settings.c.diff`) ont été régénérés en rejouant tous les
+patchs existants sur une copie de travail, en appliquant ces modifications à
+la main par-dessus, puis en re-diffant contre la source KD8CEC originale --
+pas de patch écrit à l'aveugle. Nouveau fichier `ui_main.h.diff` (`ui/main.h`
+n'était pas encore patché), ajouté à la boucle de `build.sh`.
+
+Build V1 vert, 0 warning (`-Wextra`) : `text 59108 o` / 61440 (marge
+~2,3 Kio). `.bin` / `.packed.bin` / `sha256.txt` régénérés. **Non testé
+matériel.**

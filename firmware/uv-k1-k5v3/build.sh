@@ -76,6 +76,20 @@ grep -q 'BX4819_band2_upper 116000000' App/frequencies.c || { echo "!! frequenci
 grep -q 'BX4819_band1_lower, 58000000' App/frequencies.c  || { echo "!! frequencies.c : bas de bande 580 MHz"; exit 1; }
 grep -q '{76000000, BX4819_band2_upper}' App/frequencies.c || { echo "!! frequencies.c : haut de bande 760 MHz"; exit 1; }
 
+# App/misc.c : dBmCorrTable[7], correction fixe par bande appliquee sur le
+# dBm affiche (BK4819_GetRSSI_dBm() + dBmCorrTable[gRxVfo->Band]) -- une
+# constante par bande choisie empiriquement par l'auteur du firmware amont
+# sur son propre exemplaire, pas une calibration individuelle par poste (le
+# code ne l'expose dans aucun menu radio). Ecart mesure au banc par
+# l'utilisateur sur cet exemplaire V3, uniquement en UHF (BAND6_400MHz,
+# index 5, la bande 400-406 MHz utilisee par ce projet pour SARSAT/Sonde) :
+# injection -100 dBm, affichage -90 dBm (10 dB de trop). VHF (BAND3_137MHz,
+# index 2) non concerne, pas touche. V1/KD8CEC non concerne non plus (base
+# firmware totalement differente, pas teste par l'utilisateur pour l'instant).
+perl -0pi -e 's/int8_t dBmCorrTable\[7\] = \{-15, -16, -10, -4, -7, -6, -1\};/int8_t dBmCorrTable[7] = {-15, -16, -10, -4, -7, -16, -1};  \/* Sarsat_UV-K1-5_RP2040: UHF (BAND6_400MHz) mesuree +10 dB trop forte au banc sur cet exemplaire -- -6 -> -16 *\//' App/misc.c
+
+grep -q '\-7, -16, -1' App/misc.c || { echo "!! misc.c : correction dBm UHF (BAND6_400MHz)"; exit 1; }
+
 # App/driver/bk4829.c : BK4819_SetFilterBandwidth() ignore totalement son
 # parametre weak_no_different ("(void)weak_no_different;") -- sur ce driver,
 # le preset WIDE (25 kHz) retrecit donc TOUJOURS le filtre RF sur un jugement
@@ -212,6 +226,61 @@ perl -0pi -e 's/(        case MENU_SET_GUI:\n            gSubMenuSelection = gSe
 
 grep -q 'gSetting_set_af_inv = gSubMenuSelection;' App/app/menu.c || { echo "!! app/menu.c : application AfInv"; exit 1; }
 grep -q 'gSubMenuSelection = gSetting_set_af_inv;' App/app/menu.c || { echo "!! app/menu.c : lecture AfInv"; exit 1; }
+
+# Nouveau menu "DbmCal" : ajuste dBmCorrTable[gRxVfo->Band] (voir plus haut,
+# correction fixe par bande sur le dBm affiche -- restait jusqu'ici une
+# constante compilee en dur, sans aucun moyen de la corriger depuis la
+# radio). S'applique a la bande de la frequence actuellement accordee
+# (gRxVfo->Band) : on se cale sur la frequence a etalonner, puis on ouvre ce
+# menu -- plus simple qu'un ecran de selection de bande dediee. Persistance
+# directe dans la meme zone flash (0x00A0B9 + index de bande, 1 octet) deja
+# relue au demarrage par le code existant (voir App/settings.c, bloc "0EA0"),
+# aucun besoin de toucher au chargement -- seule l'ecriture manquait.
+#
+# Place dans le menu CACHE (categorie "Service", gF_LOCK -- PTT+PF1+PF2 au
+# demarrage), a cote de "BatCal" -- demande explicitement par l'utilisateur,
+# pour rester coherent avec le meme reglage sur le V1 (voir son build.sh,
+# qui utilise le meme mecanisme gF_LOCK/FIRST_HIDDEN_MENU_ITEM herite de la
+# meme lignee DualTachyon). Deux endroits a toucher pour ce firmware
+# precis (V3/Fusion, contrairement au V1 qui n'a que le premier) : la liste
+# plate MenuList[] (comme sur le V1) ET le tableau CatService[] -- ce
+# firmware a un systeme de menu par CATEGORIES (ENABLE_FEAT_F4HWN_MENU_CAT,
+# actif sur le preset Fusion) ou chaque categorie a sa propre liste
+# d'entrees ; un item absent de CatXxx[] n'apparait dans AUCUNE categorie en
+# navigation normale, meme s'il existe dans MenuList[].
+#
+# App/ui/menu.h : nouvelle entree d'enum MENU_DBMCAL.
+perl -0pi -e 's/    MENU_SET_TMR,/    MENU_DBMCAL,    \/* Sarsat_UV-K1-5_RP2040: correction dBm par bande (dBmCorrTable) *\/\n    MENU_SET_TMR,/' App/ui/menu.h
+
+grep -q 'MENU_DBMCAL,' App/ui/menu.h || { echo "!! menu.h : enum MENU_DBMCAL"; exit 1; }
+
+# App/ui/menu.c : entree de liste "DbmCal" (dans la section cachee, juste
+# apres "BatCal") + affichage (simple entier signe, meme format que Sql --
+# pas de tableau de libelles, juste un nombre) + ajout a CatService[].
+perl -0pi -e 's/(    \{"BatCal",      MENU_BATCAL        \}, \/\/ battery voltage calibration\n)/$1    {"DbmCal",      MENU_DBMCAL        },    \/* Sarsat_UV-K1-5_RP2040: menu cache, comme sur le V1 *\/\n/' App/ui/menu.c
+perl -0pi -e 's/(        case MENU_SQL:\n            sprintf\(String, "%d", gSubMenuSelection\);\n            break;\n)/$1\n        case MENU_DBMCAL:\n            sprintf(String, "%d", gSubMenuSelection);\n            break;\n/' App/ui/menu.c
+perl -0pi -e 's/static const uint8_t CatService\[\] = \{ MENU_F_LOCK, MENU_350EN, MENU_BATCAL, MENU_BATTYP, MENU_SET_NAV, MENU_RESET \};/static const uint8_t CatService[] = { MENU_F_LOCK, MENU_350EN, MENU_BATCAL, MENU_DBMCAL, MENU_BATTYP, MENU_SET_NAV, MENU_RESET };  \/* Sarsat_UV-K1-5_RP2040: DbmCal *\/\n/' App/ui/menu.c
+
+grep -q '{"DbmCal",      MENU_DBMCAL        },' App/ui/menu.c || { echo "!! menu.c : liste DbmCal"; exit 1; }
+grep -q 'case MENU_DBMCAL:' App/ui/menu.c || { echo "!! menu.c : affichage DbmCal"; exit 1; }
+grep -q 'MENU_BATCAL, MENU_DBMCAL, MENU_BATTYP' App/ui/menu.c || { echo "!! menu.c : CatService DbmCal"; exit 1; }
+
+# App/app/menu.c : fonction d'application (met a jour la RAM tout de suite ;
+# n'ecrit en flash que sur confirmation, pour ne pas user le secteur a
+# chaque pas de defilement) + branchement include, confirmation, lecture a
+# l'ouverture, et bornes (-64..64, meme plage que la verification deja
+# faite au chargement dans settings.c).
+perl -0pi -e 's/#include "misc.h"\n/$&#include "driver\/py25q16.h"   \/* Sarsat_UV-K1-5_RP2040: persistance de dBmCorrTable (menu DbmCal) *\/\n/' App/app/menu.c
+perl -0pi -e 's/(uint8_t gUnlockAllTxConfCnt;\n)/$1\nvoid writeDbmCorr(const int32_t value, const bool update_flash)   \/* Sarsat_UV-K1-5_RP2040: menu DbmCal *\/\n{\n    const uint8_t band = gRxVfo->Band;\n    dBmCorrTable[band] = (int8_t)value;\n\n    if (update_flash)\n    {\n        const int8_t v = (int8_t)value;\n        PY25Q16_WriteBuffer(0x00A0B9 + band, \&v, 1, false);\n    }\n}\n/' App/app/menu.c
+perl -0pi -e 's/        case MENU_SQL:\n            gEeprom.SQUELCH_LEVEL = gSubMenuSelection;\n/        case MENU_DBMCAL:\n            writeDbmCorr(gSubMenuSelection, true);\n            break;\n\n        case MENU_SQL:\n            gEeprom.SQUELCH_LEVEL = gSubMenuSelection;\n/' App/app/menu.c
+perl -0pi -e 's/(        case MENU_SQL:\n            gSubMenuSelection = gEeprom.SQUELCH_LEVEL;\n            break;\n)/$1\n        case MENU_DBMCAL:\n            gSubMenuSelection = dBmCorrTable[gRxVfo->Band];\n            break;\n/' App/app/menu.c
+perl -0pi -e 's/(        case MENU_SQL:\n            \/\/\*pMin = 0;\n            \*pMax = 9;\n            break;\n)/$1\n        case MENU_DBMCAL:\n            *pMin = -64;\n            *pMax = 64;\n            break;\n/' App/app/menu.c
+
+grep -q 'driver/py25q16.h' App/app/menu.c || { echo "!! app/menu.c : include py25q16.h"; exit 1; }
+grep -q 'void writeDbmCorr' App/app/menu.c || { echo "!! app/menu.c : fonction writeDbmCorr"; exit 1; }
+grep -q 'writeDbmCorr(gSubMenuSelection, true);' App/app/menu.c || { echo "!! app/menu.c : application DbmCal"; exit 1; }
+grep -q 'gSubMenuSelection = dBmCorrTable\[gRxVfo->Band\];' App/app/menu.c || { echo "!! app/menu.c : lecture DbmCal"; exit 1; }
+[ "$(grep -c 'case MENU_DBMCAL:' App/app/menu.c)" -ge 3 ] || { echo "!! app/menu.c : DbmCal (attendu : 3 occurrences, application/lecture/limites)"; exit 1; }
 
 # App/app/menu.c : MENU_GetLimits() -- sans un cas explicite ici, la fonction
 # tombe dans son "default: return -1;" pour MENU_SET_AFI, et les touches

@@ -1,0 +1,11 @@
+--- ui/main.h
++++ ui/main.h
+@@ -36,7 +36,7 @@
+ typedef enum center_line_t center_line_t;
+ 
+ extern center_line_t center_line;
+-extern const int8_t dBmCorrTable[7];
++extern int8_t dBmCorrTable[7];         /* Sarsat_UV-K1-5_RP2040: reglable, menu DbmCal */
+ 
+ void UI_DisplayAudioBar(void);
+ void UI_MAIN_TimeSlice500ms(void);

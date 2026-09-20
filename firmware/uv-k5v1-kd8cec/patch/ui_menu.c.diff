@@ -8,7 +8,15 @@
  
  	{"Scramb", VOICE_ID_SCRAMBLER_ON,                  MENU_SCR           }, // was "SCR"
  	{"BusyCL", VOICE_ID_BUSY_LOCKOUT,                  MENU_BCL           }, // was "BCL"
-@@ -237,12 +236,6 @@
+@@ -147,6 +146,7 @@
+ 	{"FrCali", VOICE_ID_INVALID,                       MENU_F_CALI        }, // reference xtal calibration
+ #endif
+ 	{"BatCal", VOICE_ID_INVALID,                       MENU_BATCAL        }, // battery voltage calibration
++	{"DbmCal", VOICE_ID_INVALID,                       MENU_DBMCAL        }, // Sarsat_UV-K1-5_RP2040: correction dBm par bande
+ 	{"BatTyp", VOICE_ID_INVALID,                       MENU_BATTYP        }, // battery type 1600/2200mAh
+ 	{"Reset",  VOICE_ID_INITIALISATION,                MENU_RESET         }, // might be better to move this to the hidden menu items ?
+ 
+@@ -237,12 +237,6 @@
  	"NAME\n+\nFREQ"
  };
  
@@ -21,7 +29,7 @@
  
  
  #ifdef ENABLE_ALARM
-@@ -381,6 +374,15 @@
+@@ -381,6 +375,15 @@
  #ifdef ENABLE_BLMIN_TMP_OFF
  	{"BLMIN\nTMP OFF",  ACTION_OPT_BLMIN_TMP_OFF}, 		//BackLight Minimum Temporay OFF
  #endif
@@ -37,7 +45,7 @@
  };
  
  const uint8_t gSubMenu_SIDEFUNCTIONS_size = ARRAY_SIZE(gSubMenu_SIDEFUNCTIONS);
-@@ -735,10 +737,6 @@
+@@ -735,10 +738,6 @@
  			strcpy(String, gSubMenu_MDF[gSubMenuSelection]);
  			break;
  
@@ -48,3 +56,14 @@
  		case MENU_RP_STE:
  			if (gSubMenuSelection == 0)
  				strcpy(String, "OFF");
+@@ -852,6 +851,10 @@
+ 			break;
+ 		}
+ 
++		case MENU_DBMCAL:  // Sarsat_UV-K1-5_RP2040
++			sprintf(String, "%d", gSubMenuSelection);
++			break;
++
+ 		case MENU_BATTYP:
+ 			strcpy(String, gSubMenu_BATTYP[gSubMenuSelection]);
+ 			break;

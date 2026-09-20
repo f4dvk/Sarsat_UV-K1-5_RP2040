@@ -1817,3 +1817,33 @@ sont que des constantes). `.bin` + `sha256.txt` régénérés. **Non testé sur
 l'air** — à confirmer que 1160 MHz est bien la vraie limite haute utile (le
 symptôme d'origine était à 1297 MHz, pas testé plus précisément entre 1160 et
 1297).
+
+## Menu "DbmCal" déplacé dans le menu caché, comme le V1 (2026-09-20)
+
+Le menu "DbmCal" (correction dBm par bande, `dBmCorrTable[gRxVfo->Band]`,
+persistée en flash à `0x00A0B9 + index de bande`) avait été ajouté au menu
+CLASSIQUE, juste à côté de "AfInv"/"SetTmr". Le même réglage porté sur le V1
+(KD8CEC, voir son `integration.md`) est lui tombé dans le menu CACHÉ (accès
+via PTT+PF1+PF2 au démarrage) -- c'est le comportement natif du V1 pour tout
+ce qui touche à une calibration (BatCal/FrCali y sont déjà cachés).
+
+Demande explicite de l'utilisateur : garder le V1 tel quel (le menu caché lui
+convient) et aligner le V3 dessus plutôt que l'inverse. Contrairement au V1,
+ce firmware (Fusion, `ENABLE_FEAT_F4HWN_MENU_CAT`) a un système de menu par
+CATÉGORIES : chaque catégorie a sa propre liste d'entrées
+(`CatChannels[]`, `CatDisplay[]`, `CatService[]`...) et un item absent de
+toutes ces listes n'apparaît dans AUCUNE catégorie en navigation normale,
+même s'il existe dans la liste plate `MenuList[]`. Deux endroits à corriger :
+
+- `App/ui/menu.c` : l'entrée `{"DbmCal", MENU_DBMCAL}` déplacée de sa
+  position classique (à côté de "SetTmr") vers la section cachée
+  (juste après `{"BatCal", MENU_BATCAL}`, sous le commentaire *"hidden menu
+  items from here on"*).
+- `App/ui/menu.c` : `MENU_DBMCAL` ajouté à `CatService[]` (catégorie
+  "Service", qui elle-même n'apparaît que si `gF_LOCK` est actif) --
+  sans ça, l'entrée aurait beau exister dans `MenuList[]`, elle resterait
+  invisible en navigation par catégories.
+
+Build vert, 0 warning : `FLASH 112848/120832 o (93,39 %)` (+~2,1 Ko, la
+correction dBm UHF mesurée par l'utilisateur ci-dessus est incluse dans ce
+même build). `.bin` régénéré. **Non testé sur l'air.**
