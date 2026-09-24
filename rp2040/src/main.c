@@ -286,9 +286,12 @@ static void link_poll(void)
                 LOG("%02X", d[i]);
             LOG("\n");
         } else if (id == CMD_IMGFSK_RXDIAG && dl >= 8) {
-            uint32_t irq  = d[0] | (d[1] << 8) | (d[2] << 16) | ((uint32_t)d[3] << 24);
-            uint32_t fifo = d[4] | (d[5] << 8) | (d[6] << 16) | ((uint32_t)d[7] << 24);
-            LOG("[imgfsk] diag irq=%lu fifo=%lu\n", (unsigned long)irq, (unsigned long)fifo);
+            uint32_t irq   = d[0] | (d[1] << 8) | (d[2] << 16) | ((uint32_t)d[3] << 24);
+            uint32_t fifo  = d[4] | (d[5] << 8) | (d[6] << 16) | ((uint32_t)d[7] << 24);
+            uint32_t dirty = (dl >= 12) ?
+                (d[8] | (d[9] << 8) | (d[10] << 16) | ((uint32_t)d[11] << 24)) : 0;
+            LOG("[imgfsk] diag irq=%lu fifo=%lu dirty=%lu\n",
+                (unsigned long)irq, (unsigned long)fifo, (unsigned long)dirty);
         } else if ((id & 0x8000) && (id & 0x00FF) >= 0xC0) {
 #if CFG_TX_HEXDUMP
             LOG("[link]   ACK 0x%04X status=%u\n", id & 0x7FFF, dl ? d[0] : 0);

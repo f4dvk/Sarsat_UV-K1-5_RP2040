@@ -238,9 +238,9 @@
  * elle exigeait un second poste + C-Board pour la reception, alors que le
  * BK4819/29 du poste recepteur suffit desormais a lui seul. */
 #define CMD_IMGFSK_RXPKT     0x06E2u     /* 256 o bruts, un paquet SSDV      */
-#define CMD_IMGFSK_RXDIAG    0x06E3u     /* {irq:u32, fifo:u32} LE -- retour
-                                         * terrain (2026-09-25) : la LED
-                                         * verte de diagnostic (imgfsk_rx.c)
+#define CMD_IMGFSK_RXDIAG    0x06E3u     /* {irq:u32, fifo:u32, dirty:u32} LE
+                                         * -- retour terrain (2026-09-25) : la
+                                         * LED verte de diagnostic (imgfsk_rx.c)
                                          * ne donnait jamais aucun signe
                                          * visible, doute sur sa fiabilite
                                          * (visibilite/duree du flash) plutot
@@ -249,7 +249,18 @@
                                          * canal deja prouve fonctionnel
                                          * (celui de CMD_IMGFSK_RXPKT), toutes
                                          * les ~1 s pendant que l'écoute est
-                                         * armee, pour trancher sans ce doute */
+                                         * armee, pour trancher sans ce doute.
+                                         * dirty ajoute (2026-09-25) : retour
+                                         * terrain "le rx se bloque apres la
+                                         * premiere image" -- verifie si
+                                         * IMGFSK_OnRadioSetupRegisters() (qui
+                                         * force un rearmement complet a
+                                         * chaque appel de
+                                         * RADIO_SetupRegisters(), meme hors
+                                         * de notre propre TX) se declenche en
+                                         * tache de fond bien plus souvent que
+                                         * prevu, empechant toute ecoute
+                                         * soutenue. */
 
 /* ---- GPS (NMEA in on UART1, C-Board GPS header GP4/GP5) --------------- */
 #define CFG_GPS_ENABLE        1

@@ -29,6 +29,8 @@ extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
 
 static bool    s_armed;
 static bool    s_hw_dirty;   /* see IMGFSK_OnRadioSetupRegisters()'s comment */
+static uint32_t s_dirty_count;   /* diag: how often that hook actually fires,
+                                  * see imgfsk_rx_send_diag()'s comment */
 static bool    s_fsk2400;
 static uint8_t s_pkt[256];
 static int     s_widx;   /* words accumulated so far (0..128), see
@@ -160,7 +162,7 @@ static void imgfsk_rx_disarm(void)
  * l'appelant). */
 void IMGFSK_OnRadioSetupRegisters(void)
 {
-    if (s_armed) s_hw_dirty = true;
+    if (s_armed) { s_hw_dirty = true; s_dirty_count++; }
 }
 
 /* ⚠️ (2026-09-25, retour terrain : "pas de réaction" en armant, puis "pas de
@@ -200,13 +202,30 @@ static void imgfsk_rx_forward(const uint8_t *pkt)
  * l'écoute est armée, pour trancher sans dépendre de la LED. */
 static uint32_t s_irq_count, s_fifo_count;
 
+/* ⚠️ (2026-09-25, retour terrain : "le rx se bloque après la premiere
+ * image, ... ne réagit plus lors d'un envoi", irq/fifo figés à une valeur
+ * constante sur de nombreux ticks consecutifs) -- contrairement au blocage
+ * paquet-a-paquet (BK4819_PrepareFSKReceive() seul, sans hw_dirty, a deja
+ * enchaine 4 paquets sans probleme dans le test precedent), celui-ci
+ * n'apparait qu'ENTRE deux sessions d'envoi completes, apres un temps
+ * d'ecoute inactive -- compatible avec IMGFSK_OnRadioSetupRegisters()
+ * (ajoutee au commit precedent) se declenchant bien plus souvent que prevu
+ * en tache de fond (APRS_TimeSlice(), squelch, etc, visibles dans les logs
+ * de l'utilisateur) : si s_hw_dirty repasse a vrai a CHAQUE tick, chaque
+ * appel a IMGFSK_TimeSlice() rearme aussitot sans jamais atteindre la
+ * boucle d'ecoute -- irq/fifo ne bougeraient alors plus jamais, exactement
+ * le symptome observe. Compteur ajoute pour verifier cette hypothese avant
+ * de corriger a l'aveugle : s_dirty_count doit rester quasi plat si
+ * RADIO_SetupRegisters() n'est appele qu'occasionnellement en fond, ou
+ * grimper au rythme du tick (~100/s) si c'est la vraie cause. */
 static void imgfsk_rx_send_diag(void)
 {
-    uint8_t b[12];
+    uint8_t b[16];
     b[0] = 0xE3; b[1] = 0x06;   /* CMD_IMGFSK_RXDIAG, 0x06E3 LE */
-    b[2] = 0x08; b[3] = 0x00;   /* size = 8 LE */
+    b[2] = 0x0C; b[3] = 0x00;   /* size = 12 LE */
     memcpy(b + 4, &s_irq_count, 4);
     memcpy(b + 8, &s_fifo_count, 4);
+    memcpy(b + 12, &s_dirty_count, 4);
     SendReply(UART_PORT_UART, b, sizeof(b));
 }
 
