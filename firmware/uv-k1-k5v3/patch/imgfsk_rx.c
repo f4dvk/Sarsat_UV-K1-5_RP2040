@@ -222,6 +222,7 @@ static void imgfsk_rx_send_diag(void)
  * données, même symptôme que la tentative AFSK abandonnée. Repris ici à
  * l'identique, juste avec 128 mots (256 o, taille SSDV) au lieu de 36. */
 #define IMGFSK_IRQ_FIFO_ALMOST_FULL (1u << 12)   /* REG_02 bit 12, App/app/app.c */
+#define IMGFSK_IRQ_RX_SYNC          (1u << 1)    /* REG_02 bit 1, BK4819_REG_02_FSK_RX_SYNC */
 
 /* ⚠️ (2026-09-25, retour terrain : irq=0/fifo=0 en continu, même avec des
  * registres désormais identiques au bit près à AirCopy) -- trouvé en
@@ -292,6 +293,24 @@ void IMGFSK_TimeSlice(void)
         BK4819_WriteRegister(BK4819_REG_02, 0);          /* latch, same order
                                                           * as CheckRadioInterrupts() */
         uint16_t irq = BK4819_ReadRegister(BK4819_REG_02);
+
+        /* ⚠️ (2026-09-24, retour terrain : premier paquet reçu -- irq/fifo
+         * enfin non nuls -- mais son contenu est la concatenation exacte des
+         * 32 premiers octets de DEUX paquets de test DIFFERENTS, verifie
+         * octet par octet contre imgfsk_test_data.h) -- chacun des 6 paquets
+         * de imgfsk_tx.c est envoye comme sa PROPRE rafale preambulee/
+         * synchronisee independamment. Si l'ecoute demarre en cours de
+         * sequence (l'operateur arme la RX apres que la TX ait deja
+         * commence), le correlateur materiel peut tres bien se reverrouiller
+         * (FSK_RX_SYNC) sur le PREAMBULE D'UN PAQUET SUIVANT alors que des
+         * octets du paquet precedent, incomplets, etaient deja accumules
+         * dans s_pkt -- sans ce traitement, ils etaient simplement concatenes
+         * a la suite, produisant un "paquet" corrompu melant deux trames.
+         * Chaque reverrouillage (bit 1, deja active par
+         * imgfsk_ensure_irq_mask()) doit donc jeter toute capture partielle
+         * en cours et repartir de zero. */
+        if (irq & IMGFSK_IRQ_RX_SYNC)
+            s_widx = 0;
 
         if (!(irq & IMGFSK_IRQ_FIFO_ALMOST_FULL))
             continue;
