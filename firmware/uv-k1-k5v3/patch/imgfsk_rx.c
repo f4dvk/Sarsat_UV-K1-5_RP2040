@@ -319,13 +319,25 @@ void IMGFSK_TimeSlice(void)
      * complet desarmement+reamement, quelle que soit la cause reelle du
      * blocage. Seuil choisi nettement au-dessus de l'espacement normal
      * entre deux paquets (~1.7-2 s a 1200 bauds) pour ne jamais interrompre
-     * une reception qui progresse normalement, meme lentement. */
+     * une reception qui progresse normalement, meme lentement.
+     *
+     * ⚠️ (2026-09-24, retour terrain : "le reset se fait a chaque trame" --
+     * le chien de garde recupere bien a chaque fois, mais se declenche tres
+     * souvent, ~1 fois toutes les 1-2 trames) -- verifie dans la note
+     * d'application BK4819(V3) (deja telechargee cette session) : aucun bit
+     * "depassement FIFO" documente pres de REG_0C pour confirmer ou infirmer
+     * l'hypothese d'un vrai buffer plein ; la FIFO Rx fait bien 8 mots avec
+     * un seuil "presque pleine" a 4 (REG_5E, valeur par defaut du fabricant,
+     * inchangee) -- rien d'anormal cote configuration. Sans bit dedie pour
+     * trancher la cause exacte, seuil resserre de 4 s a 2.5 s (encore
+     * nettement au-dessus de l'espacement normal ~1.7-2 s) pour recuperer
+     * plus vite quelle que soit la cause, en attendant une piste plus sure. */
     static uint32_t s_watchdog_last_irq;
     static uint16_t s_watchdog_ticks;
     if (s_irq_count != s_watchdog_last_irq) {
         s_watchdog_last_irq = s_irq_count;
         s_watchdog_ticks = 0;
-    } else if (++s_watchdog_ticks >= 400) {   /* ~4 s a ~10 ms/tick */
+    } else if (++s_watchdog_ticks >= 250) {   /* ~2.5 s a ~10 ms/tick */
         s_watchdog_ticks = 0;
         imgfsk_rx_disarm();
         SYSTEM_DelayMs(300);
