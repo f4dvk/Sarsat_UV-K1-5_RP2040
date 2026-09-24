@@ -369,14 +369,25 @@ void IMGFSK_TimeSlice(void)
              * en reception continue pendant plusieurs sessions de test comme
              * ici -- semble accumuler un etat degrade (AGC/DC/squelch non
              * rafraichis, contrairement a un armement initial) jusqu'au
-             * blocage complet. Notre propre armement complet
-             * (imgfsk_rx_arm(), avec RADIO_ConfigureSquelchAndOutputPower()
-             * + RADIO_SetupRegisters() + delai de stabilisation) n'a lui
-             * JAMAIS echoue a redemarrer une ecoute, a chaque test manuel --
-             * utilise ici a la place du seul BK4819_PrepareFSKReceive(),
-             * au prix d'un blocage synchrone de ~50 ms (SYSTEM_DelayMs())
-             * tous les ~1.7 s pendant une reception active, juge acceptable
-             * pour cet essai. */
+             * blocage complet. Le seul imgfsk_rx_arm() (sans passer par
+             * imgfsk_rx_disarm() d'abord) a ensuite ete essaye ici a la
+             * place -- retour terrain : mieux (5, 9 puis 11 paquets selon
+             * les essais, au lieu de 4-5 systematiquement), mais toujours un
+             * blocage fini par arriver, avec REG_3F/REG_58 pourtant
+             * parfaitement stables (3002/00C1) meme pendant le blocage --
+             * pas de corruption de registre. Question posee : le
+             * desarmement/reamement MANUEL (menu) repare-t-il le blocage ?
+             * Reponse terrain : OUI, il faut repasser par le menu. Or
+             * imgfsk_rx_arm() seul, appele en boucle, fait EXACTEMENT ce que
+             * le menu ferait a l'armement -- la seule etape qui manquait est
+             * imgfsk_rx_disarm() D'ABORD : elle restaure la bande passante/
+             * modulation ORIGINALES du canal (pas NARROW/FM) le temps d'un
+             * RADIO_SetupRegisters(), avant qu'un nouvel armement ne repasse
+             * en NARROW/FM -- un aller-retour que la boucle precedente
+             * (toujours restee en NARROW/FM, jamais revenue en arriere)
+             * ne faisait jamais. Reproduit ici le cycle complet
+             * desarmement+reamement, pas le seul armement. */
+            imgfsk_rx_disarm();
             imgfsk_rx_arm(s_fsk2400);
         }
     }
