@@ -71,8 +71,21 @@
  * appelee toutes les 10 ms depuis APP_TimeSlice10ms(), n'envoie reellement
  * un nouveau paquet AirCopy que toutes les gAircopySendCountdown=30 appels,
  * soit un espacement REEL de ~300 ms entre deux paquets -- pas les 20 ms
- * qu'on utilisait ici. 15x plus de temps de repos entre deux rafales. */
-#define IMGFSK_INTERPACKET_GAP_MS 300
+ * qu'on utilisait ici. 15x plus de temps de repos entre deux rafales.
+ *
+ * ⚠️ (2026-09-24, retour terrain : 300 ms insuffisant -- "meme probleme", le
+ * correlateur reste bloque plusieurs secondes apres un paquet, ne se
+ * debloquant qu'au prochain envoi COMPLET redeclenche manuellement, jamais
+ * en cours de route) -- ESSAI DIAGNOSTIQUE uniquement (pas une solution
+ * exploitable : rendrait un envoi d'image reel totalement impraticable) pour
+ * confirmer l'hypothese que le temps de repos necessaire est proportionnel a
+ * la duree de verrouillage precedente (nos paquets, ~1.7 s de verrouillage a
+ * 1200 bauds, sont ~3.5x plus longs que ceux d'AirCopy, ~480 ms) : porte
+ * temporairement a 3000 ms pour voir si un delai bien plus long change
+ * quelque chose. Si confirme, la vraie solution sera un chien de garde a
+ * delai de recuperation plus long, pas un ralentissement permanent de
+ * chaque paquet. */
+#define IMGFSK_INTERPACKET_GAP_MS 3000
 
 static void imgfsk_send_one_packet(const uint8_t *pkt)
 {
