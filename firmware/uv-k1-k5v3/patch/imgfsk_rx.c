@@ -13,6 +13,29 @@
 
 extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
 
+/* ⚠️ (2026-09-24, sur demande : "n'y-a-t'il pas une fonction en arriere plan
+ * qui pourrait creer ce phenomene, chose qui n'est pas lance en aircopy
+ * (timer, reset)") -- OUI : App/app/app.c (F4HWN, ENABLE_FEAT_F4HWN_SLEEP,
+ * ACTIF dans le preset "Fusion" utilise par ce projet) a un minuteur de mise
+ * en veille automatique ("Set Off", gSetting_set_off, PAR DEFAUT = 1 minute
+ * d'inactivite -- misc.c). A expiration, il force gPowerSave_10ms = 1 SANS
+ * CONDITION, ce qui declenche ensuite BK4819_Sleep() + desactive la broche
+ * RX_ENABLE -- endort litteralement la puce et coupe la reception,
+ * INDEPENDAMMENT de notre propre gEeprom.BATTERY_SAVE=0 (mecanisme
+ * completement different). AirCopy s'en protege explicitement (3 tests
+ * `gScreenToDisplay != DISPLAY_AIRCOPY` dans app.c) -- notre module tourne
+ * depuis l'ecran normal et n'avait aucune protection equivalente. Explique
+ * exactement le retour terrain : "si j'envoie juste apres avoir active le
+ * menu, ca decode (et plante au bout de quelques trames) ; si j'attends,
+ * une trame decodee voire aucune" -- le minuteur n'a pas encore expire juste
+ * apres l'armement, mais expire pendant une attente, et le moment exact
+ * d'expiration par rapport a l'arrivee des paquets est essentiellement
+ * aleatoire d'un test a l'autre ("plantage aleatoire"). */
+#ifdef ENABLE_FEAT_F4HWN_SLEEP
+extern uint16_t gSleepModeCountdown_500ms;
+extern uint8_t  gSetting_set_off;
+#endif
+
 /* ⚠️ (2026-09-25) First RX design (branch SSTV_SSDV) tried to demodulate
  * from the RP2040 side instead, off the same RAW/DSC audio feed SARSAT/
  * Sonde use -- reverted (see decoder_config.h's CMD_IMGFSK_RXPKT comment):
@@ -339,6 +362,18 @@ void IMGFSK_TimeSlice(void)
      * IMGFSK_OnRadioSetupRegisters()'s comment. */
     if (gCurrentFunction == FUNCTION_TRANSMIT) return;
     if (s_hw_dirty) { imgfsk_rx_arm(s_fsk2400); s_hw_dirty = false; return; }
+
+#ifdef ENABLE_FEAT_F4HWN_SLEEP
+    /* ⚠️ (2026-09-24) Voir le commentaire en tete de fichier -- empeche le
+     * minuteur de mise en veille automatique F4HWN (par defaut 1 min
+     * d'inactivite) d'atteindre 0 et de mettre la puce en veille
+     * (BK4819_Sleep() + RX_ENABLE coupe) tant que l'ecoute FSK est armee.
+     * Reecrit a la valeur de depart a CHAQUE tick, empechant purement et
+     * simplement le decompte natif d'app.c d'avoir un effet -- pas de risque
+     * de "sauter" 0 entre deux verifications comme le ferait un simple test
+     * de seuil. */
+    gSleepModeCountdown_500ms = gSetting_set_off * 120;
+#endif
 
     imgfsk_ensure_irq_mask();   /* see its own comment -- cheap, must run
                                 * every tick, not just once at arm time */
