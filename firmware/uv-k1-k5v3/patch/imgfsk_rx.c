@@ -102,8 +102,17 @@ static void imgfsk_rx_arm(bool fsk2400)
      * 000=1.2K (AirCopy's own 0x00C1 unchanged) / 100=2.4K, enable bit0=1. */
     BK4819_WriteRegister(BK4819_REG_58, fsk2400 ? 0x00C9u : 0x00C1u);
     BK4819_WriteRegister(BK4819_REG_5C, 0x5665u);   /* AirCopy's own value    */
-    BK4819_WriteRegister(BK4819_REG_5D, 0xFF00u);   /* 256 B (255<<8), see
-                                                     * imgfsk_tx.c's comment  */
+    /* ⚠️ (2026-09-25, DIAGNOSTIC TEMPORAIRE, retour terrain : irq=0/fifo=0
+     * en continu, compteur fiable -- à 1200 bauds, tout le reste est
+     * désormais identique bit à bit à AirCopy sauf cette valeur (256 o ici,
+     * 72 o chez AirCopy) -- la seule variable jamais isolée. Repli
+     * temporaire sur 0x4700, la valeur AirCopy EXACTE et inchangée (72 o),
+     * pour voir si le simple fait de changer cette longueur est ce qui
+     * empêche toute interruption. Si irq/fifo avancent avec cette valeur,
+     * la vraie longueur SSDV (256 o) devra être creusée séparément ; si ça
+     * reste à 0 même ainsi, le problème n'est pas dans ce registre. À
+     * REMETTRE à 0xFF00 (256 o) une fois ce test fait. */
+    BK4819_WriteRegister(BK4819_REG_5D, 0x4700u);
     BK4819_WriteRegister(0x5E, 0x3204u);            /* AirCopy's own value    */
 
     BK4819_PrepareFSKReceive();   /* proven: ResetFSK + RX_TurnOn + IRQ mask +
