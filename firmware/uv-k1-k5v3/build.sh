@@ -43,6 +43,9 @@ cp "$HERE/patch/ax25.c"    App/app/ax25.c
 cp "$HERE/patch/ax25.h"    App/app/ax25.h
 cp "$HERE/patch/sonde.c"   App/app/sonde.c
 cp "$HERE/patch/sonde.h"   App/app/sonde.h
+cp "$HERE/patch/imgfsk_tx.c"        App/app/imgfsk_tx.c
+cp "$HERE/patch/imgfsk_tx.h"        App/app/imgfsk_tx.h
+cp "$HERE/patch/imgfsk_test_data.h" App/app/imgfsk_test_data.h
 cp "$HERE/patch/ui_main.c" App/ui/main.c
 
 echo "== points d'ancrage"
@@ -428,6 +431,7 @@ perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SONDE\n        case SONDE_C
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SARSAT\n    ACTION_OPT_SARSAT,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_APRS\n    ACTION_OPT_APRS,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SONDE\n    ACTION_OPT_SONDE,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
+perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_IMGFSK\n    ACTION_OPT_IMGFSK1200,\n    ACTION_OPT_IMGFSK2400,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 
 # App/app/action.c : ouvrir l'écran SARSAT / APRS / Sonde depuis une touche
 # assignable (F1/F2 court/long via le menu F4HWN standard "F1Shrt"/"F1Long"/
@@ -438,15 +442,18 @@ perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SONDE\n    ACTION_OPT_SOND
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#endif\n}' App/app/action.c
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs.h"\n#endif\n}' App/app/action.c
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n}' App/app/action.c
+perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_IMGFSK\n#include "app/imgfsk_tx.h"\n#endif\n}' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SARSAT\n    [ACTION_OPT_SARSAT] = &APP_RunSarsat,\n#endif\n$&/' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_APRS\n    [ACTION_OPT_APRS] = &APP_RunAprs,\n#endif\n$&/' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SONDE\n    [ACTION_OPT_SONDE] = &APP_RunSonde,\n#endif\n$&/' App/app/action.c
+perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_IMGFSK\n    [ACTION_OPT_IMGFSK1200] = &IMGFSK_Send1200,\n    [ACTION_OPT_IMGFSK2400] = &IMGFSK_Send2400,\n#endif\n$&/' App/app/action.c
 
 # App/ui/menu.c : entrées "SARSAT" / "APRS" / "SONDE" dans la liste des
 # fonctions assignables
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SARSAT\n    {"SARSAT",          ACTION_OPT_SARSAT},\n#endif\n$&/' App/ui/menu.c
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_APRS\n    {"APRS",            ACTION_OPT_APRS},\n#endif\n$&/' App/ui/menu.c
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SONDE\n    {"SONDE",           ACTION_OPT_SONDE},\n#endif\n$&/' App/ui/menu.c
+perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_IMGFSK\n    {"ImgFSK1200",      ACTION_OPT_IMGFSK1200},\n    {"ImgFSK2400",      ACTION_OPT_IMGFSK2400},\n#endif\n$&/' App/ui/menu.c
 
 # App/driver/eeprom_compat.c : reserver de la place dans la queue non revendiquee
 # du secteur "Settings" (0x00A170.. , juste apres "Settings Version" qui
@@ -613,12 +620,12 @@ perl -0pi -e 's/#include "app\/generic.h"\n/$&#ifdef ENABLE_SARSAT\n#include "ap
 perl -0pi -e 's/        case KEY_8:\n            if \(!beep\) \{\n                ACTION_BackLightOnDemand\(\); \n            \}\n            else \{\n                gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;\n                gRequestSaveChannel = 1;\n            \}\n/        case KEY_8:\n#ifdef ENABLE_SARSAT\n            APP_RunSarsat();                 \/\/ F+8 : open the SARSAT screen (same as V1)\n            gRequestDisplayScreen = DISPLAY_MAIN;\n#else\n            if (!beep) {\n                ACTION_BackLightOnDemand(); \n            }\n            else {\n                gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;\n                gRequestSaveChannel = 1;\n            }\n#endif\n/' App/app/main.c
 
 # App/CMakeLists.txt : option + sources
-perl -0pi -e 's/enable_feature\(ENABLE_UART_RW_BK_REGS\)\n/$&enable_feature(ENABLE_SARSAT\n    app\/sarsat.c\n    app\/afgain.c\n)\nenable_feature(ENABLE_APRS\n    app\/aprs.c\n    app\/ax25.c\n)\nenable_feature(ENABLE_SONDE\n    app\/sonde.c\n)\n/' App/CMakeLists.txt
+perl -0pi -e 's/enable_feature\(ENABLE_UART_RW_BK_REGS\)\n/$&enable_feature(ENABLE_SARSAT\n    app\/sarsat.c\n    app\/afgain.c\n)\nenable_feature(ENABLE_APRS\n    app\/aprs.c\n    app\/ax25.c\n)\nenable_feature(ENABLE_SONDE\n    app\/sonde.c\n)\nenable_feature(ENABLE_IMGFSK\n    app\/imgfsk_tx.c\n)\n/' App/CMakeLists.txt
 
 # CMakePresets.json : defaut (off) dans chaque bloc de presets où ENABLE_UART_RW_BK_REGS
 # apparaît (le fichier en a deux : un pour "configurePresets", un pour "buildPresets"
 # ou similaire -- perl en mode /g pour couvrir les deux occurrences).
-perl -0pi -e 's/( *)"ENABLE_UART_RW_BK_REGS": false,\n/$&$1"ENABLE_SARSAT": false,\n$1"ENABLE_APRS": false,\n$1"ENABLE_SONDE": false,\n/g' CMakePresets.json
+perl -0pi -e 's/( *)"ENABLE_UART_RW_BK_REGS": false,\n/$&$1"ENABLE_SARSAT": false,\n$1"ENABLE_APRS": false,\n$1"ENABLE_SONDE": false,\n$1"ENABLE_IMGFSK": false,\n/g' CMakePresets.json
 
 echo "== controle"
 grep -q 'app/sarsat.h'      App/app/app.c   || { echo "!! app.c : include sarsat"; exit 1; }
@@ -670,6 +677,12 @@ grep -q 'app/sonde.h'   App/app/app.c   || { echo "!! app.c : include sonde"; ex
 grep -q 'APP_RunSonde'  App/app/app.c   || { echo "!! app.c : hook tick 10ms sonde"; exit 1; }
 grep -q 'app/sonde.h'   App/app/uart.c  || { echo "!! uart.c : include sonde"; exit 1; }
 grep -q 'SONDE_HandleUART' App/app/uart.c || { echo "!! uart.c : dispatch sonde"; exit 1; }
+grep -q 'ACTION_OPT_IMGFSK1200' App/settings.h || { echo "!! settings.h : enum imgfsk"; exit 1; }
+grep -q 'app/imgfsk_tx.h' App/app/action.c || { echo "!! action.c : include imgfsk"; exit 1; }
+grep -q 'ACTION_OPT_IMGFSK1200.*IMGFSK_Send1200' App/app/action.c || { echo "!! action.c : table imgfsk 1200"; exit 1; }
+grep -q 'ACTION_OPT_IMGFSK2400.*IMGFSK_Send2400' App/app/action.c || { echo "!! action.c : table imgfsk 2400"; exit 1; }
+grep -q 'ImgFSK1200.*ACTION_OPT_IMGFSK1200' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk 1200"; exit 1; }
+grep -q 'ImgFSK2400.*ACTION_OPT_IMGFSK2400' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk 2400"; exit 1; }
 grep -q 'ACTION_OPT_SONDE' App/settings.h || { echo "!! settings.h : enum sonde"; exit 1; }
 grep -q 'app/sonde.h'   App/app/action.c || { echo "!! action.c : include sonde"; exit 1; }
 grep -q 'ACTION_OPT_SONDE.*APP_RunSonde' App/app/action.c || { echo "!! action.c : table sonde"; exit 1; }
@@ -701,7 +714,7 @@ echo "== build (preset=$PRESET, ENABLE_SARSAT=ON, ENABLE_APRS=ON, ENABLE_SONDE=O
 # rendre de la marge flash (le build etait a 99,0 %). D'autres extras
 # coupables au besoin : FMRADIO, AIRCOPY, VOX, FOXHUNT, BEAM, AUDIO_SCOPE,
 # MENU_CAT, PMR/GMRS...
-cmake --preset "$PRESET" -DENABLE_SARSAT=ON -DENABLE_APRS=ON -DENABLE_SONDE=ON -DENABLE_BYP_RAW_DEMODULATORS=ON \
+cmake --preset "$PRESET" -DENABLE_SARSAT=ON -DENABLE_APRS=ON -DENABLE_SONDE=ON -DENABLE_IMGFSK=ON -DENABLE_BYP_RAW_DEMODULATORS=ON \
     -DENABLE_SPECTRUM=OFF \
     -DENABLE_FEAT_F4HWN_GAME=OFF \
     -DENABLE_FEAT_F4HWN_QRCODE=OFF \
