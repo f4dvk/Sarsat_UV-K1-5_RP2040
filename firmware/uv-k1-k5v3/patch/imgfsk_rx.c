@@ -6,6 +6,7 @@
 #include "app/uart.h"
 
 #include "driver/bk4819.h"
+#include "driver/system.h"
 #include "functions.h"
 #include "radio.h"
 #include "settings.h"
@@ -80,6 +81,19 @@ static void imgfsk_rx_arm(bool fsk2400)
     RADIO_ConfigureSquelchAndOutputPower(gRxVfo);   /* boot.c, same order    */
     gCurrentVfo = gRxVfo;                           /* boot.c, same order    */
     RADIO_SetupRegisters(true);                     /* boot.c                */
+
+    /* ⚠️ (2026-09-25, retour terrain : REG_58 maintenant identique au bit
+     * près à la valeur AirCopy prouvée -- 0x00C1, aucune modification --
+     * NARROW/FM confirmés appliqués (écran : "FM N"), toujours aucune
+     * réaction.) Piste suivante : un délai de stabilisation. AirCopy ne
+     * l'écrit jamais explicitement, mais dans son usage réel il y a
+     * toujours un délai naturel (écran affiché, l'opérateur lit, appuie
+     * sur EXIT) entre RADIO_SetupRegisters() -- qui relance la PLL, un
+     * processus analogique -- et l'armement FSK. Ici tout s'enchaîne dans
+     * la même fonction, sans pause. Le TX (imgfsk_tx.c, confirmé
+     * fonctionnel) a lui un SYSTEM_DelayMs(50) après avoir activé son
+     * propre lien -- jamais répliqué côté RX jusqu'ici. */
+    SYSTEM_DelayMs(50);
 
     BK4819_WriteRegister(BK4819_REG_70, 0x00C3u);   /* AirCopy's own value    */
     BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* AirCopy's own value    */
