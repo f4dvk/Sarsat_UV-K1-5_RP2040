@@ -8,6 +8,7 @@
 #include "driver/bk4819.h"
 #include "functions.h"
 #include "radio.h"
+#include "settings.h"
 
 extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
 
@@ -30,9 +31,29 @@ static bool    s_fsk2400;
 static uint8_t s_pkt[256];
 static int     s_widx;   /* words accumulated so far (0..128), see
                           * IMGFSK_TimeSlice()'s comment */
+static uint8_t s_saved_battery_save;
+static uint8_t s_saved_dual_watch;
 
+/* ⚠️ (2026-09-25, retour terrain : AirCopy stock confirmé fonctionnel entre
+ * les deux mêmes postes -- donc le moteur matériel marche vraiment, le bug
+ * est spécifique à ce fichier) -- comparé à la vraie séquence d'entrée
+ * d'AirCopy (App/helper/boot.c, BOOT_MODE_AIRCOPY) : elle désactive
+ * explicitement l'économie de batterie et le dual-watch avant d'armer quoi
+ * que ce soit. Absent ici jusqu'à présent -- si l'économie de batterie est
+ * active (réglage courant par défaut sur ces radios), le récepteur coupe
+ * périodiquement l'écoute pour économiser l'énergie : le corrélateur FSK ne
+ * verrait le signal qu'une fraction du temps, potentiellement jamais. Même
+ * classe de problème déjà rencontrée et corrigée côté APRS
+ * (APRS_KeepAwake(), aprs.h) pour la même raison. Sauvegardés/restaurés
+ * plutôt que simplement écrasés, pour ne pas modifier silencieusement les
+ * réglages de l'opérateur après un simple test. */
 static void imgfsk_rx_arm(bool fsk2400)
 {
+    s_saved_battery_save = gEeprom.BATTERY_SAVE;
+    s_saved_dual_watch   = gEeprom.DUAL_WATCH;
+    gEeprom.BATTERY_SAVE = 0;
+    gEeprom.DUAL_WATCH   = DUAL_WATCH_OFF;
+
     RADIO_SetupRegisters(true);   /* normal RX for the currently tuned channel */
 
     /* ⚠️ (2026-09-25, retour terrain : LED verte jamais bougée -- le moteur
@@ -72,6 +93,8 @@ static void imgfsk_rx_arm(bool fsk2400)
 static void imgfsk_rx_disarm(void)
 {
     s_armed = false;
+    gEeprom.BATTERY_SAVE = s_saved_battery_save;
+    gEeprom.DUAL_WATCH   = s_saved_dual_watch;
     BK4819_ResetFSK();
     RADIO_SetupRegisters(true);
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
