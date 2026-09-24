@@ -349,6 +349,36 @@ static void imgfsk_ensure_irq_mask(void)
         BK4819_WriteRegister(BK4819_REG_3F, r3f | wanted_bits);
 }
 
+/* ⚠️ (2026-09-24, retour terrain : "le fait de passer en TX sur le RX fait
+ * repartir le decodage pour quelques trames mais bloque rapidement apres
+ * (environ 3 trames), d'ou une memoire/buffer/timer qui poserait probleme")
+ * -- coherent avec TOUT ce qui a ete observe jusqu'ici : n'importe quel
+ * reset (leger, complet, desarmement+reamement, TX manuel) achete quelques
+ * paquets de repit avant que le meme phenomene revienne -- jamais durable.
+ * Aucun registre "compteur" documente dans la note d'application pres du
+ * FSK/RX pour confirmer une derive materielle cote correlateur. Piste
+ * jamais isolee jusqu'ici : BK4819_PrepareFSKReceive() (App/driver/bk4829.c)
+ * enchaine BK4819_ResetFSK() -- qui coupe REG_30, le bloc RF-DSP -- puis
+ * RX_TurnOn() (qui le rallume) IMMEDIATEMENT, sans le moindre delai de
+ * stabilisation entre les deux -- contrairement a notre propre armement
+ * INITIAL (imgfsk_rx_arm()), qui a lui un SYSTEM_DelayMs(50) apres
+ * RADIO_SetupRegisters(). Reproduit ici la sequence de PrepareFSKReceive()
+ * a la main (BK4819_RX_TurnOn() est une fonction publique du driver), avec
+ * un delai insere a cette transition precise, jamais teste jusqu'ici alors
+ * qu'elle se produit a CHAQUE paquet. */
+static void imgfsk_rearm_with_settle(void)
+{
+    BK4819_ResetFSK();
+    SYSTEM_DelayMs(20);
+    BK4819_WriteRegister(BK4819_REG_02, 0);
+    BK4819_WriteRegister(BK4819_REG_3F, 0);
+    BK4819_RX_TurnOn();
+    BK4819_WriteRegister(BK4819_REG_3F, BK4819_REG_3F_FSK_RX_FINISHED |
+                                        BK4819_REG_3F_FSK_FIFO_ALMOST_FULL);
+    BK4819_WriteRegister(BK4819_REG_59, 0x4068);
+    BK4819_WriteRegister(BK4819_REG_59, 0x3068);
+}
+
 void IMGFSK_TimeSlice(void)
 {
     if (!s_armed) return;
@@ -500,11 +530,9 @@ void IMGFSK_TimeSlice(void)
              * sous-rafales, blocage identique -- garde ici malgre tout,
              * matche AirCopy a l'identique, harmless si jamais insuffisant.) */
             uint16_t reg0b = BK4819_ReadRegister(BK4819_REG_0B);
-            BK4819_PrepareFSKReceive();
-            if (reg0b & 0x0010u) {
-                BK4819_ResetFSK();
-                BK4819_PrepareFSKReceive();
-            }
+            imgfsk_rearm_with_settle();
+            if (reg0b & 0x0010u)
+                imgfsk_rearm_with_settle();
 
             imgfsk_rx_forward(s_pkt);
         }
