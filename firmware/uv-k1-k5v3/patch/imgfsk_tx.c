@@ -84,8 +84,12 @@
  * temporairement a 3000 ms pour voir si un delai bien plus long change
  * quelque chose. Si confirme, la vraie solution sera un chien de garde a
  * delai de recuperation plus long, pas un ralentissement permanent de
- * chaque paquet. */
-#define IMGFSK_INTERPACKET_GAP_MS 3000
+ * chaque paquet.
+ *
+ * ⚠️ (2026-09-24, retour terrain : "on dirait pire" a 3000 ms) -- hypothese
+ * du temps de repos proportionnel ECARTEE. Retour a un rythme rapide pour
+ * l'essai suivant (isoler la communication RP2040 -- voir imgfsk_rx.c). */
+#define IMGFSK_INTERPACKET_GAP_MS 300
 
 static void imgfsk_send_one_packet(const uint8_t *pkt)
 {
