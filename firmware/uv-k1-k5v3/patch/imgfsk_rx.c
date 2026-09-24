@@ -155,6 +155,24 @@ static void imgfsk_rx_forward(const uint8_t *pkt)
     SendReply(UART_PORT_UART, b, sizeof(b));
 }
 
+/* ⚠️ (2026-09-25, retour terrain : "pas de RSSI, pas d'audio" -- normal
+ * dans ce mode, ça ne tranche rien -- et la LED verte, elle, ne montrait
+ * jamais rien) -- doute sur la LED elle-même (visibilité/durée du flash)
+ * plutôt que sur le matériel. Compteurs envoyés au RP2040 par le canal déjà
+ * prouvé fonctionnel (CMD_IMGFSK_RXPKT), toutes les ~1 s pendant que
+ * l'écoute est armée, pour trancher sans dépendre de la LED. */
+static uint32_t s_irq_count, s_fifo_count;
+
+static void imgfsk_rx_send_diag(void)
+{
+    uint8_t b[12];
+    b[0] = 0xE3; b[1] = 0x06;   /* CMD_IMGFSK_RXDIAG, 0x06E3 LE */
+    b[2] = 0x08; b[3] = 0x00;   /* size = 8 LE */
+    memcpy(b + 4, &s_irq_count, 4);
+    memcpy(b + 8, &s_fifo_count, 4);
+    SendReply(UART_PORT_UART, b, sizeof(b));
+}
+
 /* ⚠️ (2026-09-25, retour terrain : LED armée, mais rien décodé) -- comparé
  * au code réel d'AirCopy (App/app/app.c, CheckRadioInterrupts()) : la FIFO
  * matérielle ne fait que 8 mots (REG_5E), pas assez pour 128 mots (256 o)
@@ -182,7 +200,15 @@ void IMGFSK_TimeSlice(void)
     if (gCurrentFunction == FUNCTION_TRANSMIT) { was_tx = true; return; }
     if (was_tx) { was_tx = false; imgfsk_rx_arm(s_fsk2400); s_widx = 0; return; }
 
+    /* ~1 s at the ~10 ms tick rate this is called at */
+    static uint16_t s_diag_ticks;
+    if (++s_diag_ticks >= 100) {
+        s_diag_ticks = 0;
+        imgfsk_rx_send_diag();
+    }
+
     while (BK4819_ReadRegister(BK4819_REG_0C) & 1u) {
+        s_irq_count++;
         /* ⚠️ (2026-09-25, retour terrain : rien du tout, même pas de fausses
          * données) -- diagnostic bon marché : bascule la LED verte (distincte
          * du rouge "armé") à CHAQUE interruption matérielle vue, même sans
@@ -200,6 +226,7 @@ void IMGFSK_TimeSlice(void)
 
         if (!(irq & IMGFSK_IRQ_FIFO_ALMOST_FULL))
             continue;
+        s_fifo_count++;
 
         for (int i = 0; i < 4 && s_widx < 128; i++) {
             uint16_t w = BK4819_ReadRegister(BK4819_REG_5F);

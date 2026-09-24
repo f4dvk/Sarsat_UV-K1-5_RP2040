@@ -285,6 +285,10 @@ static void link_poll(void)
             for (int i = 0; i < 256; i++)
                 LOG("%02X", d[i]);
             LOG("\n");
+        } else if (id == CMD_IMGFSK_RXDIAG && dl >= 8) {
+            uint32_t irq  = d[0] | (d[1] << 8) | (d[2] << 16) | ((uint32_t)d[3] << 24);
+            uint32_t fifo = d[4] | (d[5] << 8) | (d[6] << 16) | ((uint32_t)d[7] << 24);
+            LOG("[imgfsk] diag irq=%lu fifo=%lu\n", (unsigned long)irq, (unsigned long)fifo);
         } else if ((id & 0x8000) && (id & 0x00FF) >= 0xC0) {
 #if CFG_TX_HEXDUMP
             LOG("[link]   ACK 0x%04X status=%u\n", id & 0x7FFF, dl ? d[0] : 0);

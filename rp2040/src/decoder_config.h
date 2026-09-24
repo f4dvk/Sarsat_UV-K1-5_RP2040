@@ -238,6 +238,18 @@
  * elle exigeait un second poste + C-Board pour la reception, alors que le
  * BK4819/29 du poste recepteur suffit desormais a lui seul. */
 #define CMD_IMGFSK_RXPKT     0x06E2u     /* 256 o bruts, un paquet SSDV      */
+#define CMD_IMGFSK_RXDIAG    0x06E3u     /* {irq:u32, fifo:u32} LE -- retour
+                                         * terrain (2026-09-25) : la LED
+                                         * verte de diagnostic (imgfsk_rx.c)
+                                         * ne donnait jamais aucun signe
+                                         * visible, doute sur sa fiabilite
+                                         * (visibilite/duree du flash) plutot
+                                         * que sur le matériel FSK lui-meme
+                                         * -- compteur envoye par le meme
+                                         * canal deja prouve fonctionnel
+                                         * (celui de CMD_IMGFSK_RXPKT), toutes
+                                         * les ~1 s pendant que l'écoute est
+                                         * armee, pour trancher sans ce doute */
 
 /* ---- GPS (NMEA in on UART1, C-Board GPS header GP4/GP5) --------------- */
 #define CFG_GPS_ENABLE        1
