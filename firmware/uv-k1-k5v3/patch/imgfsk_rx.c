@@ -28,6 +28,7 @@ extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
  * REG_59 scramble bit) is exactly where new bugs show up. */
 
 static bool    s_armed;
+static bool    s_hw_dirty;   /* see IMGFSK_OnRadioSetupRegisters()'s comment */
 static bool    s_fsk2400;
 static uint8_t s_pkt[256];
 static int     s_widx;   /* words accumulated so far (0..128), see
@@ -130,6 +131,32 @@ static void imgfsk_rx_disarm(void)
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
 }
 
+/* ⚠️ (2026-09-25, retour terrain : irq=0/fifo=0 en continu, y compris juste
+ * après armement, alors même que la piste REG_3F/imgfsk_ensure_irq_mask()
+ * n'a rien changé) -- en lisant en entier App/radio.c de ce firmware
+ * (RADIO_SetupRegisters(), pas seulement bk4829.c) : cette fonction met
+ * REG_3F à 0 en tout début (attente que la radio soit inactive), PUIS le
+ * réécrit en fin de fonction avec son propre masque voix/squelch/CTCSS/VOX
+ * -- écrasant systématiquement les bits FSK, quelle que soit la raison de
+ * l'appel. Jusqu'ici seule notre propre transition TX->RX
+ * (imgfsk_tx.c appelant RADIO_SetupRegisters() dans son démontage) était
+ * détectée et réarmée (voir l'ancien "was_tx" ci-dessous, retiré). Mais
+ * RADIO_SetupRegisters() est une fonction générale du firmware, appelée
+ * pour bien d'autres raisons en tâche de fond (squelch, changement de canal,
+ * etc.) -- aucune n'était détectée, donc jamais réarmée : le module pouvait
+ * rester cassé indéfiniment après le tout premier appel externe suivant
+ * l'armement. Repris du même besoin déjà résolu par GOGUFW-UV-K1-Messenger
+ * (MSG_RF_OnRadioSetupRegisters(), appelé depuis LEUR radio.c juste après
+ * l'écriture finale de REG_3F, voir build.sh) : marquer l'état matériel
+ * "à refaire" à CHAQUE appel, sans condition sur la cause, et laisser
+ * IMGFSK_TimeSlice() réarmer au tick suivant plutôt que de réarmer ici même
+ * (on est potentiellement encore au milieu de RADIO_SetupRegisters() de
+ * l'appelant). */
+void IMGFSK_OnRadioSetupRegisters(void)
+{
+    if (s_armed) s_hw_dirty = true;
+}
+
 /* ⚠️ (2026-09-25, retour terrain : "pas de réaction" en armant, puis "pas de
  * bip car le C-Board coupe l'audio, il faut du visuel") -- un bip ne pouvait
  * pas marcher tant que le C-Board est branché (il capte/coupe l'audio pour
@@ -221,17 +248,17 @@ static void imgfsk_ensure_irq_mask(void)
 
 void IMGFSK_TimeSlice(void)
 {
-    static bool was_tx;
+    if (!s_armed) return;
 
-    if (!s_armed) { was_tx = false; return; }
-
-    /* APRS_TxFrame()-style routines (and our own imgfsk_tx.c) reprogram
-     * every BK4819/29 register when they finish -- do not fight a TX in
-     * progress, and re-arm exactly once on the way back to RX (same lesson
-     * as the earlier hardware-AFSK attempt: never reset every tick, it
-     * never gives the correlator a chance to lock). */
-    if (gCurrentFunction == FUNCTION_TRANSMIT) { was_tx = true; return; }
-    if (was_tx) { was_tx = false; imgfsk_rx_arm(s_fsk2400); s_widx = 0; return; }
+    /* Do not fight a TX in progress (ours or anything else's) -- wait for
+     * gCurrentFunction to move off FUNCTION_TRANSMIT before touching any
+     * register. Never re-arm every tick either: same lesson as the earlier
+     * hardware-AFSK attempt, resetting the engine continuously never gives
+     * the correlator a chance to lock. Only re-arm when s_hw_dirty says the
+     * hardware state was actually invalidated -- see
+     * IMGFSK_OnRadioSetupRegisters()'s comment. */
+    if (gCurrentFunction == FUNCTION_TRANSMIT) return;
+    if (s_hw_dirty) { imgfsk_rx_arm(s_fsk2400); s_hw_dirty = false; return; }
 
     imgfsk_ensure_irq_mask();   /* see its own comment -- cheap, must run
                                 * every tick, not just once at arm time */

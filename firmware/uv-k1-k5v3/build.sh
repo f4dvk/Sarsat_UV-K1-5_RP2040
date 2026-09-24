@@ -394,6 +394,18 @@ perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_IMGFSK\n#include "app/imgfsk_rx.h"\n#endif\n}' App/app/app.c
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n}' App/app/app.c
 
+# App/radio.c : hook IMGFSK_OnRadioSetupRegisters() -- retour terrain,
+# irq/fifo restaient a 0 en continu meme apres un armement dont les
+# registres etaient pourtant confirmes identiques a AirCopy. RADIO_SetupRegisters()
+# remet REG_3F a 0 puis le reecrit avec son propre masque voix/squelch/CTCSS/VOX
+# EN FIN de fonction, quelle que soit la raison de son appel (pas seulement notre
+# propre TX) -- jusqu'ici seule la transition TX->RX etait detectee et rearmee.
+# Meme besoin deja resous par GOGUFW-UV-K1-Messenger (MSG_RF_OnRadioSetupRegisters(),
+# appele au meme endroit dans LEUR radio.c) : marquer l'etat matériel "a refaire"
+# a chaque appel, sans condition sur la cause -- voir patch/imgfsk_rx.c.
+perl -0pi -e 's{#include "app/dtmf.h"\n}{$&#ifdef ENABLE_IMGFSK\n#include "app/imgfsk_rx.h"\n#endif\n}' App/radio.c
+perl -0pi -e 's{    BK4819_WriteRegister\(BK4819_REG_3F, InterruptMask\);\n}{$&\n#ifdef ENABLE_IMGFSK\n    IMGFSK_OnRadioSetupRegisters();\n#endif\n}' App/radio.c
+
 # App/app/app.c #1 : APP_TimeSlice10ms(), juste après le service UART_PORT_UART
 # -> AFGAIN_TimeSlice() en tache de fond (indep. de l'ecran, ~10 ms tick) pour
 #    qu'un gain fixe reste actif meme hors ecran SARSAT ; puis ouvre l'ecran
@@ -694,6 +706,8 @@ grep -q 'ImgFskRx1200.*ACTION_OPT_IMGFSK_RX1200' App/ui/menu.c || { echo "!! men
 grep -q 'ImgFskRx2400.*ACTION_OPT_IMGFSK_RX2400' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk rx 2400"; exit 1; }
 grep -q 'app/imgfsk_rx.h' App/app/app.c || { echo "!! app.c : include imgfsk_rx"; exit 1; }
 grep -q 'IMGFSK_TimeSlice' App/app/app.c || { echo "!! app.c : hook IMGFSK_TimeSlice"; exit 1; }
+grep -q 'app/imgfsk_rx.h' App/radio.c || { echo "!! radio.c : include imgfsk_rx"; exit 1; }
+grep -q 'IMGFSK_OnRadioSetupRegisters' App/radio.c || { echo "!! radio.c : hook IMGFSK_OnRadioSetupRegisters"; exit 1; }
 grep -q 'ACTION_OPT_SONDE' App/settings.h || { echo "!! settings.h : enum sonde"; exit 1; }
 grep -q 'app/sonde.h'   App/app/action.c || { echo "!! action.c : include sonde"; exit 1; }
 grep -q 'ACTION_OPT_SONDE.*APP_RunSonde' App/app/action.c || { echo "!! action.c : table sonde"; exit 1; }

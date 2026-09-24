@@ -23,8 +23,16 @@ void IMGFSK_ToggleRx2400(void);
 
 /* Call every ~10 ms from APP_TimeSlice10ms(), unconditionally (cheap no-op
  * when not armed). Polls for a completed hardware capture and forwards it
- * to the RP2040; re-arms itself once after a TX (APRS_TxFrame()-style
- * routines reprogram every BK4819/29 register when they finish). */
+ * to the RP2040; re-arms itself once the hardware state has been marked
+ * dirty by IMGFSK_OnRadioSetupRegisters() below (covers a TX just finishing,
+ * but also any unrelated background reprogramming). */
 void IMGFSK_TimeSlice(void);
+
+/* Call from radio.c's RADIO_SetupRegisters(), right after it (re)writes
+ * REG_3F for its own voice/squelch/CTCSS/VOX interrupts -- see build.sh's
+ * patch and imgfsk_rx.c's own comment for why: this function is called by
+ * far more than just our own TX teardown, and every call silently erases
+ * whatever FSK RX state was armed. */
+void IMGFSK_OnRadioSetupRegisters(void);
 
 #endif /* APP_IMGFSK_RX_H */
