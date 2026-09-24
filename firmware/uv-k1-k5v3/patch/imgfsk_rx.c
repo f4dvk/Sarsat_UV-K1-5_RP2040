@@ -409,10 +409,13 @@ void IMGFSK_TimeSlice(void)
 
     while (BK4819_ReadRegister(BK4819_REG_0C) & 1u) {
         s_irq_count++;
-        /* ⚠️ (2026-09-24) LED verte de diagnostic desactivee sur demande --
-         * son role (bascule sur chaque interruption materielle) est desormais
-         * couvert par s_irq_count/le diag serie, redevenu la seule source de
-         * verite depuis que la communication RP2040 est reactivee. */
+        /* ⚠️ (2026-09-24) Reactivee sur demande, pour un essai avec le
+         * RP2040/C-Board physiquement debranche (visibilite locale seule,
+         * sans dependre de l'UART) -- bascule a CHAQUE interruption
+         * materielle vue, meme sans FIFO_ALMOST_FULL. */
+        static bool s_green_toggle;
+        s_green_toggle = !s_green_toggle;
+        BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, s_green_toggle);
 
         BK4819_WriteRegister(BK4819_REG_02, 0);          /* latch, same order
                                                           * as CheckRadioInterrupts() */
