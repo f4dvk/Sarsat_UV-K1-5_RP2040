@@ -102,17 +102,12 @@ static void imgfsk_rx_arm(bool fsk2400)
      * 000=1.2K (AirCopy's own 0x00C1 unchanged) / 100=2.4K, enable bit0=1. */
     BK4819_WriteRegister(BK4819_REG_58, fsk2400 ? 0x00C9u : 0x00C1u);
     BK4819_WriteRegister(BK4819_REG_5C, 0x5665u);   /* AirCopy's own value    */
-    /* ⚠️ (2026-09-25, DIAGNOSTIC TEMPORAIRE, retour terrain : irq=0/fifo=0
-     * en continu, compteur fiable -- à 1200 bauds, tout le reste est
-     * désormais identique bit à bit à AirCopy sauf cette valeur (256 o ici,
-     * 72 o chez AirCopy) -- la seule variable jamais isolée. Repli
-     * temporaire sur 0x4700, la valeur AirCopy EXACTE et inchangée (72 o),
-     * pour voir si le simple fait de changer cette longueur est ce qui
-     * empêche toute interruption. Si irq/fifo avancent avec cette valeur,
-     * la vraie longueur SSDV (256 o) devra être creusée séparément ; si ça
-     * reste à 0 même ainsi, le problème n'est pas dans ce registre. À
-     * REMETTRE à 0xFF00 (256 o) une fois ce test fait. */
-    BK4819_WriteRegister(BK4819_REG_5D, 0x4700u);
+    /* Diagnostic temporaire (repli sur la longueur AirCopy 72 o) concluant :
+     * irq=0/fifo=0 même ainsi -- la longueur n'était pas la cause. Retour à
+     * la vraie taille SSDV (256 o = 255<<8, voir imgfsk_tx.c) maintenant que
+     * la vraie cause probable (REG_3F réécrit par le code de fond, voir
+     * imgfsk_ensure_irq_mask()) est traitée séparément. */
+    BK4819_WriteRegister(BK4819_REG_5D, 0xFF00u);
     BK4819_WriteRegister(0x5E, 0x3204u);            /* AirCopy's own value    */
 
     BK4819_PrepareFSKReceive();   /* proven: ResetFSK + RX_TurnOn + IRQ mask +
@@ -195,6 +190,35 @@ static void imgfsk_rx_send_diag(void)
  * l'identique, juste avec 128 mots (256 o, taille SSDV) au lieu de 36. */
 #define IMGFSK_IRQ_FIFO_ALMOST_FULL (1u << 12)   /* REG_02 bit 12, App/app/app.c */
 
+/* ⚠️ (2026-09-25, retour terrain : irq=0/fifo=0 en continu, même avec des
+ * registres désormais identiques au bit près à AirCopy) -- trouvé en
+ * analysant un troisième projet indépendant qui fait aussi de la messagerie
+ * FSK sur ce même chip (github.com/Gogu-Qs/GOGUFW-UV-K1-Messenger,
+ * App/app/messenger_rf.c) : son propre historique de bogues documente EXACTEMENT
+ * ce symptôme -- "messages se décodent quand REG_3F a les bits IRQ FSK
+ * activés (0x3002) et échouent quand F4HWN laisse REG_3F à des valeurs
+ * voix uniquement (0x0C0C)". BK4819_PrepareFSKReceive() n'écrit REG_3F
+ * (le masque d'ACTIVATION des interruptions) qu'une seule fois, à
+ * l'armement -- si un traitement normal de fond (squelch/CTCSS, sans
+ * rapport avec ce module) réécrit ensuite REG_3F pour son propre usage,
+ * les bits FSK sont silencieusement effacés du masque : le moteur peut
+ * très bien fonctionner en interne, son signal n'atteint simplement plus
+ * REG_0C. Contrairement à BK4819_PrepareFSKReceive() (armée une seule
+ * fois, jamais réécrite après), ce correctif réaffirme -- lecture puis
+ * OR, jamais un écrasement complet, pour ne pas casser le squelch/CTCSS
+ * normal -- ces bits à CHAQUE cycle, comme le fait cet autre projet
+ * (MSG_RF_EnsureFskIrqMask()). Inclut aussi FSK_RX_SYNC, activé là-bas
+ * mais absent du masque que pose BK4819_PrepareFSKReceive() lui-même. */
+static void imgfsk_ensure_irq_mask(void)
+{
+    const uint16_t wanted_bits = BK4819_REG_3F_FSK_RX_SYNC |
+                                 BK4819_REG_3F_FSK_RX_FINISHED |
+                                 BK4819_REG_3F_FSK_FIFO_ALMOST_FULL;
+    const uint16_t r3f = BK4819_ReadRegister(BK4819_REG_3F);
+    if ((r3f & wanted_bits) != wanted_bits)
+        BK4819_WriteRegister(BK4819_REG_3F, r3f | wanted_bits);
+}
+
 void IMGFSK_TimeSlice(void)
 {
     static bool was_tx;
@@ -208,6 +232,9 @@ void IMGFSK_TimeSlice(void)
      * never gives the correlator a chance to lock). */
     if (gCurrentFunction == FUNCTION_TRANSMIT) { was_tx = true; return; }
     if (was_tx) { was_tx = false; imgfsk_rx_arm(s_fsk2400); s_widx = 0; return; }
+
+    imgfsk_ensure_irq_mask();   /* see its own comment -- cheap, must run
+                                * every tick, not just once at arm time */
 
     /* ~1 s at the ~10 ms tick rate this is called at */
     static uint16_t s_diag_ticks;
