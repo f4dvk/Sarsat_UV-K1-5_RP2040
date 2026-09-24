@@ -215,25 +215,18 @@ void IMGFSK_ToggleRx2400(void)
 
 static void imgfsk_rx_forward(const uint8_t *pkt)
 {
-    /* ⚠️ (2026-09-24, sur demande : "essai... sans interaction avec le
-     * rp2040, il y a peut-etre un bug du a la communication") -- SendReply()
-     * (UART, 260 o) desactive pour cet essai d'isolation : si son cout
-     * (bloquant ? desactive des interruptions ?) retarde le service de la
-     * FIFO materielle (8 mots seulement), ca pourrait expliquer le blocage
-     * qu'on cherche justement a diagnostiquer avec cet outil-la. Plus AUCUNE
-     * visibilite serie pendant cet essai -- observer la LED VERTE seule
-     * (bascule sur chaque interruption materielle, independamment de l'UART,
-     * voir IMGFSK_TimeSlice()) : bat-elle regulierement sur tout le test, ou
-     * se fige-t-elle comme irq/fifo le faisaient dans les logs precedents ? */
-    (void)pkt;
-#if 0
+    /* ⚠️ (2026-09-24) Essai d'isolation (SendReply() desactive) concluant :
+     * "une trame sur deux la led reste verte et le blocage se produit
+     * egalement" -- MEME SANS AUCUNE communication UART. Ecarte definitivement
+     * la communication RP2040 comme cause : le blocage est intrinseque au
+     * correlateur/a notre sequence de reamement, independant de tout ce
+     * qu'on envoie en dehors. Reactive sur demande. */
     uint8_t b[4 + 256];
     b[0] = 0xE2; b[1] = 0x06;   /* CMD_IMGFSK_RXPKT, 0x06E2 LE -- keep in
                                 * sync with rp2040/src/decoder_config.h */
     b[2] = 0x00; b[3] = 0x01;   /* size = 256 LE */
     memcpy(b + 4, pkt, 256);
     SendReply(UART_PORT_UART, b, sizeof(b));
-#endif
 }
 
 /* ⚠️ (2026-09-25, retour terrain : "pas de RSSI, pas d'audio" -- normal
@@ -271,13 +264,10 @@ static uint32_t s_irq_count, s_fifo_count;
  * blocage, plutot que de continuer a deviner cote rearmement. */
 static void imgfsk_rx_send_diag(void)
 {
-    /* ⚠️ (2026-09-24) Desactive pour l'essai d'isolation de la communication
-     * RP2040 -- voir le commentaire d'imgfsk_rx_forward(). Ce diag partait
-     * sur un cycle fixe (~1 s) INDEPENDANT de l'activite FSK, donc pouvait
-     * tomber en plein milieu d'une rafale n'importe quand -- candidat encore
-     * plus direct que imgfsk_rx_forward() pour perturber le service de la
-     * FIFO au mauvais moment. */
-#if 0
+    /* ⚠️ (2026-09-24) Reactive -- l'essai d'isolation (voir
+     * imgfsk_rx_forward()) a ecarte la communication RP2040 comme cause du
+     * blocage : celui-ci se produit identiquement meme SendReply()
+     * completement desactive. */
     uint8_t b[22];
     uint16_t reg3f = BK4819_ReadRegister(BK4819_REG_3F);
     uint16_t reg58 = BK4819_ReadRegister(BK4819_REG_58);
@@ -291,7 +281,6 @@ static void imgfsk_rx_send_diag(void)
     memcpy(b + 18, &reg58, 2);
     memcpy(b + 20, &reg0c, 2);
     SendReply(UART_PORT_UART, b, sizeof(b));
-#endif
 }
 
 /* ⚠️ (2026-09-25, retour terrain : LED armée, mais rien décodé) -- comparé
@@ -420,16 +409,10 @@ void IMGFSK_TimeSlice(void)
 
     while (BK4819_ReadRegister(BK4819_REG_0C) & 1u) {
         s_irq_count++;
-        /* ⚠️ (2026-09-25, retour terrain : rien du tout, même pas de fausses
-         * données) -- diagnostic bon marché : bascule la LED verte (distincte
-         * du rouge "armé") à CHAQUE interruption matérielle vue, même sans
-         * FIFO_ALMOST_FULL. Si elle ne change jamais d'état pendant un test,
-         * le moteur FSK ne réagit à rien du tout (mauvaise fréquence/débit,
-         * ou le calage lui-même ne convient pas) -- pas la peine de chercher
-         * plus loin dans le décodage tant que ce signal n'a pas bougé. */
-        static bool s_green_toggle;
-        s_green_toggle = !s_green_toggle;
-        BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, s_green_toggle);
+        /* ⚠️ (2026-09-24) LED verte de diagnostic desactivee sur demande --
+         * son role (bascule sur chaque interruption materielle) est desormais
+         * couvert par s_irq_count/le diag serie, redevenu la seule source de
+         * verite depuis que la communication RP2040 est reactivee. */
 
         BK4819_WriteRegister(BK4819_REG_02, 0);          /* latch, same order
                                                           * as CheckRadioInterrupts() */
