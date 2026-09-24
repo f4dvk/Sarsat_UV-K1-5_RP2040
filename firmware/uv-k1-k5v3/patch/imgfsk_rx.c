@@ -77,10 +77,16 @@ static void imgfsk_rx_arm(bool fsk2400)
 
     gEeprom.BATTERY_SAVE      = 0;              /* boot.c                    */
     gEeprom.DUAL_WATCH        = DUAL_WATCH_OFF; /* boot.c                    */
-    /* ⚠️ (2026-09-24, sur demande : comparer au WIDE) -- boot.c (AirCopy)
-     * utilise NARROW, valeur normalement gardee ici -- bascule TEMPORAIRE en
-     * WIDE pour ce test comparatif (blocages/qualite), a repasser en NARROW
-     * si le WIDE n'apporte rien de mieux. */
+    /* ⚠️ (2026-09-24, retour terrain, comparatif demande) -- boot.c (AirCopy)
+     * utilise NARROW, essaye ici en comparaison : WIDE s'avere nettement
+     * meilleur sur le terrain -- 10 paquets consecutifs recus sans le
+     * moindre declenchement du chien de garde (contre une recuperation
+     * toutes les 1-2 trames en NARROW), et REG_0C bit 1 (squelch "Link")
+     * reste actif en continu au lieu de clignoter par intermittence. NARROW
+     * rognait vraisemblablement une partie de la deviation FSK (surtout si
+     * l'accord frequence n'est pas parfaitement centre), causant les pertes
+     * de verrouillage frequentes chassees sur plusieurs tours precedents.
+     * Fixe ici comme reglage definitif, pas juste un essai comparatif. */
     gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_WIDE;
     gRxVfo->Modulation        = MODULATION_FM;    /* what a fresh VFO already
                                                    * defaults to in boot.c   */
