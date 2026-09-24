@@ -128,6 +128,24 @@ static void imgfsk_rx_arm(bool fsk2400)
     gCurrentVfo = gRxVfo;                           /* boot.c, same order    */
     RADIO_SetupRegisters(true);                     /* boot.c                */
 
+    /* ⚠️ (2026-09-24, retour terrain : "un afc peut-il faire planter ?" --
+     * apres avoir efface le meme phenomene de "reset achete quelques paquets
+     * puis reblocage" avec toutes les autres pistes) -- OUI, deja documente
+     * dans CE MEME projet : patch/sarsat.c a du desactiver completement
+     * l'AFC pour son propre travail de precision frequentielle ("AFC
+     * continuously nudges the LO based on the average received frequency").
+     * RADIO_SetModulation() (App/radio.c, appelee a l'interieur de
+     * RADIO_SetupRegisters() juste au-dessus) fait
+     * `BK4819_SetRegValue(afcDisableRegSpec, modulation != MODULATION_FM)` --
+     * pour MODULATION_FM (notre choix, confirme meilleur que RAW), l'AFC
+     * reste ACTIF en continu, y compris entre deux paquets ou aucun signal
+     * legitime n'est present -- il peut alors deriver vers le bruit ambiant,
+     * desaccordant progressivement l'oscillateur local avant l'arrivee du
+     * paquet suivant. Cohere avec TOUT ce qui a ete observe (reset =
+     * quelques paquets de repit, jamais durable). Desactivee ici, comme
+     * sarsat.c le fait deja pour la meme raison. */
+    BK4819_SetRegValue(afcDisableRegSpec, true);
+
     /* ⚠️ (2026-09-25, retour terrain : REG_58 maintenant identique au bit
      * près à la valeur AirCopy prouvée -- 0x00C1, aucune modification --
      * NARROW/FM confirmés appliqués (écran : "FM N"), toujours aucune
