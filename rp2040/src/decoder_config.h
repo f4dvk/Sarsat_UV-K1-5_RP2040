@@ -157,7 +157,10 @@
  * APRS (picked purely from the radio's RX frequency) it cannot be auto-
  * selected that way; the radio's SARSAT_HELLO reply's screen-state byte
  * (d[6]) carries a 3rd value (3 = "Sonde screen open") the RP2040 uses
- * instead, alongside the existing 0/1/2. Two parallel demod chains share
+ * instead, alongside the existing 0/1/2. MODE_IMGFSK (see further down,
+ * "branch SSTV_SSDV") reuses this same byte with two more values (4/5),
+ * for the same reason: an explicit request, not something derivable from
+ * RX frequency alone. Two parallel demod chains share
  * this one ADC stream: RS41 (+ the older header-only M10/M20 detector) at
  * 4800 baud, and the full M10/M20 GPS decoder at 9600 baud (see
  * sonde_sync.h / sonde_m10.h) -- DFM is not attempted (no confirmed sync
@@ -229,47 +232,37 @@
                                          /* CMD_SARSAT_TEXT, own line buffer */
                                          /* on the radio side (app/sonde.c)  */
 
-/* branch SSTV_SSDV: radio -> RP2040, sans ACK -- un paquet SSDV de 256 o,
- * demodule EN MATERIEL par le moteur FSK brut du BK4819/29 (le meme deja
- * prouve par l'AirCopy stock, cf. patch/imgfsk_rx.c cote radio), pas par le
- * RP2040 -- celui-ci ne fait que relayer les octets tels quels sur son
- * propre USB pour l'outil PC `ssdv`. Remplace la premiere version
- * (imgfsk_sync.c, demodulation logicielle depuis l'audio RAW/DSC), retiree :
- * elle exigeait un second poste + C-Board pour la reception, alors que le
- * BK4819/29 du poste recepteur suffit desormais a lui seul. */
-#define CMD_IMGFSK_RXPKT     0x06E2u     /* 256 o bruts, un paquet SSDV      */
-#define CMD_IMGFSK_RXDIAG    0x06E3u     /* {irq:u32, fifo:u32, dirty:u32,
-                                         *  reg3f:u16, reg58:u16, reg0c:u16} LE
-                                         * -- retour terrain (2026-09-25) : la
-                                         * LED verte de diagnostic (imgfsk_rx.c)
-                                         * ne donnait jamais aucun signe
-                                         * visible, doute sur sa fiabilite
-                                         * (visibilite/duree du flash) plutot
-                                         * que sur le matériel FSK lui-meme
-                                         * -- compteur envoye par le meme
-                                         * canal deja prouve fonctionnel
-                                         * (celui de CMD_IMGFSK_RXPKT), toutes
-                                         * les ~1 s pendant que l'écoute est
-                                         * armee, pour trancher sans ce doute.
-                                         * dirty ajoute (2026-09-25) : retour
-                                         * terrain "le rx se bloque apres la
-                                         * premiere image" -- verifie si
-                                         * IMGFSK_OnRadioSetupRegisters() (qui
-                                         * force un rearmement complet a
-                                         * chaque appel de
-                                         * RADIO_SetupRegisters(), meme hors
-                                         * de notre propre TX) se declenche en
-                                         * tache de fond bien plus souvent que
-                                         * prevu, empechant toute ecoute
-                                         * soutenue -- ecarte par le terrain
-                                         * (dirty=0 constant, blocage quand
-                                         * meme). reg3f/reg58/reg0c ajoutes
-                                         * (2026-09-25) pour voir l'etat REEL
-                                         * des registres au moment du blocage,
-                                         * les deux hypotheses de rearmement
-                                         * (leger puis complet) n'ayant ni
-                                         * l'une ni l'autre resolu la
-                                         * degradation progressive observee. */
+/* branch SSTV_SSDV, v2 (2026-09-25) : RX repasse en demodulation LOGICIELLE
+ * cote RP2040, comme APRS/Sonde -- PLUS de correlateur FSK brut du BK4819/29
+ * cote radio pour la reception. Historique : la v1 (radio -> RP2040,
+ * CMD_IMGFSK_RXPKT/RXDIAG, un paquet SSDV de 256 o demodule EN MATERIEL par
+ * le meme moteur que l'AirCopy stock) a ete extensivement debuggee sur le
+ * terrain (~30 commits, firmware/uv-k1-k5v3/patch/imgfsk_rx.c) sans jamais
+ * atteindre une reception fiable multi-paquets : le correlateur materiel
+ * s'arrete par intermittence de generer la moindre interruption apres
+ * quelques paquets, malgre des registres identiques au bit pres a l'AirCopy
+ * prouve, testes tour a tour : toutes les sequences de reamement, WIDE/
+ * NARROW, FM/RAW, desactivation de l'AFC, le minuteur de veille auto F4HWN,
+ * et meme le RP2040 physiquement debranche (blocage identique). Cause
+ * jamais elucidee. Revient donc a l'architecture RAW/DSC deja fiable pour
+ * SARSAT/Sonde (des heures de reception sans ce genre de blocage) : TX reste
+ * MATERIEL (BK4819/29, prouve robuste -- AirCopy en reception recoit notre
+ * TX en boucle jusqu'a 100% sans jamais bloquer), seul RX change.
+ *
+ * Pas de nouvelle commande UART necessaire : le RP2040 demodule localement
+ * (rp2040/src/imgfsk_sync.c, meme PLL de bits "DireWolf-style" que Sonde/
+ * sonde_demod.h -- notre FSK est un vrai decalage de frequence RF, le
+ * discriminateur FM ressort un signal binaire deux niveaux directement,
+ * comme RS41/M10, pas des tons audio Bell-202 comme APRS) et journalise
+ * chaque paquet directement sur son propre port serie USB (meme format
+ * `[imgfsk] pkt n=... <hex>` qu'avant, lu tel quel par
+ * tools/imgfsk_log_to_ssdv.py -- aucun changement cote outil PC). Le
+ * choix du mode reutilise le meme octet "screen_state" de CMD_SARSAT_HELLO
+ * (d[6]) que Sonde (valeur 3) : 4 = ecoute IMGFSK 1200 bauds demandee,
+ * 5 = ecoute IMGFSK 2400 bauds demandee (patch/sarsat.c cote radio,
+ * IMGFSK_RxActive()/IMGFSK_RxIsFsk2400() -- l'utilisateur arme/desarme via
+ * les memes actions de menu ImgFskRx1200/2400 qu'avant, elles ne font plus
+ * que positionner un drapeau lu par ce statut). */
 
 /* ---- GPS (NMEA in on UART1, C-Board GPS header GP4/GP5) --------------- */
 #define CFG_GPS_ENABLE        1

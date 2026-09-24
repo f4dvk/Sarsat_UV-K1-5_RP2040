@@ -37,6 +37,7 @@
 #include "sonde_demod.h"
 #include "sonde_sync.h"
 #include "sonde_m10.h"
+#include "imgfsk_sync.h"
 
 /* KISS TNC mode: the USB-CDC carries a binary KISS stream, not the debug log,
  * so every LOG() must fall silent while it is on (see the APRS menu's KISS
@@ -72,7 +73,7 @@ static uint32_t       g_acks;
  * band, so frequency alone can't tell them apart -- it is only entered when
  * the radio reports its dedicated Sonde screen open (SARSAT_HELLO reply
  * byte 6 == 3, see decoder_config.h and each firmware's patch/sonde.c). */
-enum { MODE_SARSAT = 0, MODE_APRS = 1, MODE_SONDE = 2 };
+enum { MODE_SARSAT = 0, MODE_APRS = 1, MODE_SONDE = 2, MODE_IMGFSK = 3 };
 static int  g_mode         = MODE_SARSAT;
 static int  g_mode_pending  = MODE_SARSAT;
 static bool g_lvl_view      = false;   /* radio's SARSAT level screen is open */
@@ -112,9 +113,19 @@ static absolute_time_t g_sonde_next_m10_push;   /* dedup: M10 detection is a
                                                  * bare header lock, cheap to
                                                  * re-trigger on real noise */
 
-/* SSTV_SSDV: no RP2040-side demod state any more -- see CMD_IMGFSK_RXPKT's
- * comment in decoder_config.h. Just a packet counter for the log line. */
-static uint32_t g_imgfsk_pkts;
+/* SSTV_SSDV v2: software demod, same shape as Sonde -- see decoder_config.h's
+ * "branch SSTV_SSDV" comment for why. Shares g_aprs_ring (never active at the
+ * same time as APRS) instead of a dedicated buffer: this target's free RAM
+ * is tight (~41 KB measured), and a third 16 KB ring just for a mode that
+ * can never run concurrently with APRS would be wasteful. */
+static uint32_t      g_imgfsk_rd;
+static sonde_demod_t g_imgfsk_demod;
+static imgfsk_sync_t g_imgfsk_sync;
+static uint32_t      g_imgfsk_pkts;
+static bool          g_imgfsk_requested;    /* set by CMD_SARSAT_HELLO screen_state
+                                             * 4/5 (patch/sarsat.c), like Sonde's
+                                             * own screen-open flag */
+static bool          g_imgfsk_baud2400;
 
 /* M10/M20 full GPS decode: a SEPARATE 9600 baud chain on the same raw ADC
  * stream (confirmed chip rate, see sonde_m10.h -- different from the 4800
@@ -236,12 +247,19 @@ static void link_poll(void)
             }
             g_radio_mod = mod;
 
-            /* pick the decoder: the radio's own Sonde screen open (d[6]==3)
-             * wins outright (it shares SARSAT's 400-406 MHz band, so
-             * frequency can't arbitrate the two -- see decoder_config.h);
-             * else 2 m -> APRS, else SARSAT. */
+            /* pick the decoder: an explicit IMGFSK RX request (d[6]==4/5,
+             * see decoder_config.h's "branch SSTV_SSDV" comment) wins
+             * outright, same reasoning as Sonde's own screen-open flag
+             * (d[6]==3) -- neither can be told apart from SARSAT/APRS by RX
+             * frequency alone. Sonde checked first only because it was
+             * already there; the two conditions are mutually exclusive in
+             * practice (different menu actions on the radio). */
+            g_imgfsk_requested = (d[6] == 4 || d[6] == 5);
+            g_imgfsk_baud2400  = (d[6] == 5);
             if (d[6] == 3)
                 g_mode_pending = MODE_SONDE;
+            else if (g_imgfsk_requested)
+                g_mode_pending = MODE_IMGFSK;
             else if (f10 != 0)
                 g_mode_pending = (f10 >= CFG_APRS_BAND_LO_10HZ &&
                                   f10 <= CFG_APRS_BAND_HI_10HZ)
@@ -275,31 +293,6 @@ static void link_poll(void)
                     g_kiss = kiss;
                     memset(&g_kiss_rx, 0, sizeof g_kiss_rx);
                 }
-            }
-        } else if (id == CMD_IMGFSK_RXPKT && dl >= 256) {
-            /* Hardware-demodulated by the radio's own BK4819/29 (see
-             * patch/imgfsk_rx.c) -- this side only relays the bytes, same
-             * hex format tools/imgfsk_log_to_ssdv.py already parses. */
-            g_imgfsk_pkts++;
-            LOG("[imgfsk] pkt n=%lu ", (unsigned long)g_imgfsk_pkts);
-            for (int i = 0; i < 256; i++)
-                LOG("%02X", d[i]);
-            LOG("\n");
-        } else if (id == CMD_IMGFSK_RXDIAG && dl >= 8) {
-            uint32_t irq   = d[0] | (d[1] << 8) | (d[2] << 16) | ((uint32_t)d[3] << 24);
-            uint32_t fifo  = d[4] | (d[5] << 8) | (d[6] << 16) | ((uint32_t)d[7] << 24);
-            uint32_t dirty = (dl >= 12) ?
-                (d[8] | (d[9] << 8) | (d[10] << 16) | ((uint32_t)d[11] << 24)) : 0;
-            if (dl >= 18) {
-                uint16_t reg3f = d[12] | (d[13] << 8);
-                uint16_t reg58 = d[14] | (d[15] << 8);
-                uint16_t reg0c = d[16] | (d[17] << 8);
-                LOG("[imgfsk] diag irq=%lu fifo=%lu dirty=%lu reg3f=%04X reg58=%04X reg0c=%04X\n",
-                    (unsigned long)irq, (unsigned long)fifo, (unsigned long)dirty,
-                    reg3f, reg58, reg0c);
-            } else {
-                LOG("[imgfsk] diag irq=%lu fifo=%lu dirty=%lu\n",
-                    (unsigned long)irq, (unsigned long)fifo, (unsigned long)dirty);
             }
         } else if ((id & 0x8000) && (id & 0x00FF) >= 0xC0) {
 #if CFG_TX_HEXDUMP
@@ -911,6 +904,66 @@ static void sarsat_mode_enter(void)
         CFG_SAMPLE_RATE_HZ);
 }
 
+/* SSTV_SSDV v2 -- see decoder_config.h's "branch SSTV_SSDV" comment. Same
+ * continuous-ring shape as aprs_mode_enter()/sonde_mode_enter(); reuses
+ * g_aprs_ring itself (never active at the same time as APRS -- one mode at
+ * a time) rather than a dedicated buffer, see g_imgfsk_rd's comment. Sample
+ * rate: APRS_RX_SAMPLE_RATE_HZ (13200 Hz) -- an already-proven ADC clkdiv on
+ * this same target, comfortable oversampling for either baud (11x at 1200,
+ * 5.5x at 2400; the DireWolf-style PLL's fractional phase accumulator does
+ * not need an integer ratio, unlike a naive fixed-decimation scheme). */
+static void imgfsk_mode_enter(bool baud2400)
+{
+    adc_run(false);
+    dma_channel_abort(g_dma_chan);
+    adc_fifo_drain();
+    adc_set_clkdiv((float)48000000.0f / (float)APRS_RX_SAMPLE_RATE_HZ - 1.0f);
+
+    sonde_demod_init(&g_imgfsk_demod, APRS_RX_SAMPLE_RATE_HZ, baud2400 ? 2400 : 1200);
+    imgfsk_sync_init(&g_imgfsk_sync);
+    g_imgfsk_rd = 0;
+
+    dma_channel_config c = dma_channel_get_default_config(g_dma_chan);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
+    channel_config_set_read_increment(&c, false);
+    channel_config_set_write_increment(&c, true);
+    channel_config_set_ring(&c, true, APRS_RING_BITS);
+    channel_config_set_dreq(&c, DREQ_ADC);
+    dma_channel_configure(g_dma_chan, &c, g_aprs_ring, &adc_hw->fifo,
+                          0xFFFFFFFFu, true);
+    adc_run(true);
+
+    g_mode = MODE_IMGFSK;
+    LOG("[imgfsk] mode IMGFSK  (%d Hz, %d baud)  -- tune both radios to the "
+        "same frequency\n", APRS_RX_SAMPLE_RATE_HZ, baud2400 ? 2400 : 1200);
+}
+
+/* Drain the (shared APRS) ADC ring through the demod + sync hunter -- same
+ * pattern as sonde_service() below, just one demod chain instead of three. */
+static void imgfsk_service(void)
+{
+    uint32_t base = (uint32_t)(uintptr_t)g_aprs_ring;
+    uint32_t widx = ((dma_hw->ch[g_dma_chan].write_addr - base) / 2)
+                    & (APRS_RING_SAMPLES - 1);
+    while (g_imgfsk_rd != widx) {
+        uint16_t raw = g_aprs_ring[g_imgfsk_rd] & 0x0FFF;
+        g_imgfsk_rd = (g_imgfsk_rd + 1) & (APRS_RING_SAMPLES - 1);
+
+        int32_t sample = ((int32_t)raw - 2048) << CFG_AUDIO_GAIN_SHIFT;
+
+        uint8_t bit;
+        if (sonde_demod_sample(&g_imgfsk_demod, sample, &bit)) {
+            if (imgfsk_sync_feed(&g_imgfsk_sync, bit)) {
+                g_imgfsk_pkts++;
+                LOG("[imgfsk] pkt n=%lu ", (unsigned long)g_imgfsk_pkts);
+                for (int i = 0; i < IMGFSK_PACKET_SIZE; i++)
+                    LOG("%02X", g_imgfsk_sync.frame[i]);
+                LOG("\n");
+            }
+        }
+    }
+}
+
 static void radio_send_sonde_text(uint8_t line, uint8_t invert, const char *s)
 {
     uint8_t p[SARSAT_LINE_CHARS + 2];
@@ -1284,10 +1337,18 @@ int main(void)
         }
 #endif
 
-        if (g_mode_pending != g_mode) {
-            if      (g_mode_pending == MODE_APRS)  aprs_mode_enter();
-            else if (g_mode_pending == MODE_SONDE) sonde_mode_enter();
-            else                                   sarsat_mode_enter();
+        /* IMGFSK also re-enters on a baud change alone (1200<->2400), which
+         * g_mode_pending != g_mode would otherwise miss (both map to the
+         * same MODE_IMGFSK). */
+        static bool s_imgfsk_last_baud2400;
+        bool imgfsk_baud_changed = (g_mode == MODE_IMGFSK) &&
+                                   (g_imgfsk_baud2400 != s_imgfsk_last_baud2400);
+        if (g_mode_pending != g_mode || imgfsk_baud_changed) {
+            if      (g_mode_pending == MODE_APRS)   aprs_mode_enter();
+            else if (g_mode_pending == MODE_SONDE)  sonde_mode_enter();
+            else if (g_mode_pending == MODE_IMGFSK) imgfsk_mode_enter(g_imgfsk_baud2400);
+            else                                    sarsat_mode_enter();
+            s_imgfsk_last_baud2400 = g_imgfsk_baud2400;
         }
 
         int64_t since_us = absolute_time_diff_us(g_last_reply, get_absolute_time());
@@ -1299,7 +1360,8 @@ int main(void)
             LOG("[link]   %s  acks=%lu  last reply %lds ago  mode %s%s\n",
                 g_link_up == 1 ? "UP" : "DOWN",
                 (unsigned long)g_acks, (long)(since_us / 1000000),
-                g_mode == MODE_APRS ? "APRS" : g_mode == MODE_SONDE ? "SONDE" : "SARSAT",
+                g_mode == MODE_APRS ? "APRS" : g_mode == MODE_SONDE ? "SONDE" :
+                g_mode == MODE_IMGFSK ? "IMGFSK" : "SARSAT",
                 g_link_up == 1 ? "" :
                 "  -- check GP1 wiring + that the radio runs the Phase 2 firmware");
             next_link = make_timeout_time_ms(20000);
@@ -1427,6 +1489,14 @@ int main(void)
                 }
             }
             sonde_dump_flush();
+            sleep_us(300);
+            continue;
+        }
+
+        /* -------- IMGFSK mode: stream the (shared APRS) ADC ring through -- */
+        /* -------- the bit PLL + sync hunter, see decoder_config.h -------- */
+        if (g_mode == MODE_IMGFSK) {
+            imgfsk_service();
             sleep_us(300);
             continue;
         }

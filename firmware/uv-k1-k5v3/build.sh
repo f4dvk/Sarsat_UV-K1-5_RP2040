@@ -391,20 +391,7 @@ grep -q 'BK4819_SetRegValue(afcDisableRegSpec, false);' App/driver/bk4829.c || {
 # App/app/app.c #0 : include de sarsat.h + afgain.h + aprs.h + sonde.h
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#include "app/afgain.h"\n#endif\n}' App/app/app.c
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs.h"\n#endif\n}' App/app/app.c
-perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_IMGFSK\n#include "app/imgfsk_rx.h"\n#endif\n}' App/app/app.c
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n}' App/app/app.c
-
-# App/radio.c : hook IMGFSK_OnRadioSetupRegisters() -- retour terrain,
-# irq/fifo restaient a 0 en continu meme apres un armement dont les
-# registres etaient pourtant confirmes identiques a AirCopy. RADIO_SetupRegisters()
-# remet REG_3F a 0 puis le reecrit avec son propre masque voix/squelch/CTCSS/VOX
-# EN FIN de fonction, quelle que soit la raison de son appel (pas seulement notre
-# propre TX) -- jusqu'ici seule la transition TX->RX etait detectee et rearmee.
-# Meme besoin deja resous par GOGUFW-UV-K1-Messenger (MSG_RF_OnRadioSetupRegisters(),
-# appele au meme endroit dans LEUR radio.c) : marquer l'etat matériel "a refaire"
-# a chaque appel, sans condition sur la cause -- voir patch/imgfsk_rx.c.
-perl -0pi -e 's{#include "app/dtmf.h"\n}{$&#ifdef ENABLE_IMGFSK\n#include "app/imgfsk_rx.h"\n#endif\n}' App/radio.c
-perl -0pi -e 's{    BK4819_WriteRegister\(BK4819_REG_3F, InterruptMask\);\n}{$&\n#ifdef ENABLE_IMGFSK\n    IMGFSK_OnRadioSetupRegisters();\n#endif\n}' App/radio.c
 
 # App/app/app.c #1 : APP_TimeSlice10ms(), juste après le service UART_PORT_UART
 # -> AFGAIN_TimeSlice() en tache de fond (indep. de l'ecran, ~10 ms tick) pour
@@ -413,7 +400,6 @@ perl -0pi -e 's{    BK4819_WriteRegister\(BK4819_REG_3F, InterruptMask\);\n}{$&\
 perl -0pi -e 's{        UART_HandleCommand\(UART_PORT_UART\);\n        // SCHEDULER_Enable\(\);\n    \}\n#endif\n}{$&\n#ifdef ENABLE_SARSAT\n    AFGAIN_TimeSlice();\n    if (gSarsatShowRequest) {\n        gSarsatShowRequest = false;\n        APP_RunSarsat();   /* auto-guarde ; se rearme si la radio est occupee */\n    }\n#endif\n}' App/app/app.c
 # meme point d'ancrage : APRS_TimeSlice() (beacon auto, squelch rapide, gain
 # fixe, icone GPS) + popup RX auto sur trame decodee (gAprsShowRequest).
-perl -0pi -e 's{        UART_HandleCommand\(UART_PORT_UART\);\n        // SCHEDULER_Enable\(\);\n    \}\n#endif\n}{$&\n#ifdef ENABLE_IMGFSK\n    IMGFSK_TimeSlice();\n#endif\n}' App/app/app.c
 perl -0pi -e 's{        UART_HandleCommand\(UART_PORT_UART\);\n        // SCHEDULER_Enable\(\);\n    \}\n#endif\n}{$&\n#ifdef ENABLE_APRS\n    APRS_TimeSlice();\n    if (gAprsShowRequest)\n        APP_RunAprs();     /* popup auto : ouvre en vue RX, auto-temporise/garde */\n#endif\n}' App/app/app.c
 # meme point d'ancrage : ouvre l'ecran Sonde quand une trame 0x06E1 vient
 # d'arriver (gSondeShowRequest) -- pas de TimeSlice() dedie (pas de beacon/
@@ -704,10 +690,8 @@ grep -q 'ACTION_OPT_IMGFSK_RX1200.*IMGFSK_ToggleRx1200' App/app/action.c || { ec
 grep -q 'ACTION_OPT_IMGFSK_RX2400.*IMGFSK_ToggleRx2400' App/app/action.c || { echo "!! action.c : table imgfsk rx 2400"; exit 1; }
 grep -q 'ImgFskRx1200.*ACTION_OPT_IMGFSK_RX1200' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk rx 1200"; exit 1; }
 grep -q 'ImgFskRx2400.*ACTION_OPT_IMGFSK_RX2400' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk rx 2400"; exit 1; }
-grep -q 'app/imgfsk_rx.h' App/app/app.c || { echo "!! app.c : include imgfsk_rx"; exit 1; }
-grep -q 'IMGFSK_TimeSlice' App/app/app.c || { echo "!! app.c : hook IMGFSK_TimeSlice"; exit 1; }
-grep -q 'app/imgfsk_rx.h' App/radio.c || { echo "!! radio.c : include imgfsk_rx"; exit 1; }
-grep -q 'IMGFSK_OnRadioSetupRegisters' App/radio.c || { echo "!! radio.c : hook IMGFSK_OnRadioSetupRegisters"; exit 1; }
+grep -q 'app/imgfsk_rx.h' App/app/sarsat.c || { echo "!! sarsat.c : include imgfsk_rx"; exit 1; }
+grep -q 'IMGFSK_RxActive' App/app/sarsat.c || { echo "!! sarsat.c : fusion etat screen imgfsk"; exit 1; }
 grep -q 'ACTION_OPT_SONDE' App/settings.h || { echo "!! settings.h : enum sonde"; exit 1; }
 grep -q 'app/sonde.h'   App/app/action.c || { echo "!! action.c : include sonde"; exit 1; }
 grep -q 'ACTION_OPT_SONDE.*APP_RunSonde' App/app/action.c || { echo "!! action.c : table sonde"; exit 1; }
