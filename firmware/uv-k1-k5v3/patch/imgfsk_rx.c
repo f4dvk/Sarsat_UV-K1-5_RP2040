@@ -47,6 +47,7 @@ static void imgfsk_rx_arm(bool fsk2400)
                                    * preamble/sync -- see App/driver/bk4829.c */
     s_armed   = true;
     s_fsk2400 = fsk2400;
+    BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);   /* see disarm's comment */
 }
 
 static void imgfsk_rx_disarm(void)
@@ -54,8 +55,16 @@ static void imgfsk_rx_disarm(void)
     s_armed = false;
     BK4819_ResetFSK();
     RADIO_SetupRegisters(true);
+    BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
 }
 
+/* ⚠️ (2026-09-25, retour terrain : "pas de réaction" en armant, puis "pas de
+ * bip car le C-Board coupe l'audio, il faut du visuel") -- un bip ne pouvait
+ * pas marcher tant que le C-Board est branché (il capte/coupe l'audio pour
+ * son propre décodage). Repli sur la LED rouge (normalement TX uniquement,
+ * jamais allumée au repos en RX -- aucune ambiguïté possible ici) : allumée
+ * en continu tant que l'écoute est armée, éteinte au désarmement -- signal
+ * persistant, pas juste un flash qu'on peut rater. */
 void IMGFSK_ToggleRx1200(void)
 {
     if (s_armed && !s_fsk2400) imgfsk_rx_disarm();
