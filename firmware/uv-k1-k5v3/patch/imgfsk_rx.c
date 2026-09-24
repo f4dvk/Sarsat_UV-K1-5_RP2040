@@ -33,15 +33,14 @@ static uint32_t s_dirty_count;   /* diag: how often that hook actually fires,
                                   * see imgfsk_rx_send_diag()'s comment */
 static bool    s_fsk2400;
 static uint8_t s_pkt[256];
-/* ⚠️ (2026-09-24, comprendre pourquoi AirCopy ne plante jamais cote RX) --
- * voir imgfsk_tx.c : le paquet SSDV de 256 o est maintenant emis comme 4
- * sous-rafales independamment preambulees/synchronisees de 64 o chacune
- * (au lieu d'une seule rafale continue de 1.7 s a 1200 bauds, bien au-dela
- * de ce qu'AirCopy exerce jamais -- ~480 ms max, 72 o). s_widx compte les
- * mots DANS la sous-rafale en cours (0..32) ; s_subchunk_idx indique
- * laquelle des 4 sous-rafales est en train de se remplir dans s_pkt. */
+/* ⚠️ (2026-09-24) Le decoupage en 4 sous-rafales de 64 o (pensant reproduire
+ * la duree de verrouillage continu d'AirCopy) a ete essaye ici et retire :
+ * retour terrain, le blocage persistait IDENTIQUE, et le decoupage
+ * introduisait en plus un bug de reassemblage (sous-rafales de paquets
+ * DIFFERENTS melangees dans le meme tampon des qu'une etait manquee).
+ * Retour a un seul bloc de 256 o par paquet -- s_widx compte les mots
+ * accumules (0..128). */
 static int     s_widx;
-static int     s_subchunk_idx;
 static uint8_t          s_saved_battery_save;
 static uint8_t          s_saved_dual_watch;
 static uint8_t          s_saved_bandwidth;
@@ -143,18 +142,17 @@ static void imgfsk_rx_arm(bool fsk2400)
      * 000=1.2K (AirCopy's own 0x00C1 unchanged) / 100=2.4K, enable bit0=1. */
     BK4819_WriteRegister(BK4819_REG_58, fsk2400 ? 0x00C9u : 0x00C1u);
     BK4819_WriteRegister(BK4819_REG_5C, 0x5665u);   /* AirCopy's own value    */
-    /* REG_5D: longueur = 64 o PAR SOUS-RAFALE (valeur = longueur-1 = 63 =
-     * 0x3F), pas 256 o -- voir s_subchunk_idx et imgfsk_tx.c pour le
-     * decoupage en 4 sous-rafales independamment synchronisees. */
-    BK4819_WriteRegister(BK4819_REG_5D, 0x3F00u);
+    /* REG_5D: longueur = 256 o (valeur = longueur-1 = 255 = 0xFF) -- le
+     * decoupage en sous-rafales de 64 o a ete essaye et retire (voir plus
+     * haut), retour a un seul bloc par paquet. */
+    BK4819_WriteRegister(BK4819_REG_5D, 0xFF00u);
     BK4819_WriteRegister(0x5E, 0x3204u);            /* AirCopy's own value    */
 
     BK4819_PrepareFSKReceive();   /* proven: ResetFSK + RX_TurnOn + IRQ mask +
                                    * preamble/sync -- see App/driver/bk4829.c */
-    s_armed        = true;
-    s_fsk2400      = fsk2400;
-    s_widx         = 0;
-    s_subchunk_idx = 0;
+    s_armed   = true;
+    s_fsk2400 = fsk2400;
+    s_widx    = 0;
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);   /* see disarm's comment */
 }
 
@@ -419,16 +417,9 @@ void IMGFSK_TimeSlice(void)
         /* ⚠️ (2026-09-24) Historique : sans ce traitement, un reverrouillage
          * (FSK_RX_SYNC) en cours de capture concatenait les octets d'un
          * paquet precedent incomplet avec ceux du suivant, verifie octet par
-         * octet contre imgfsk_test_data.h. Depuis le decoupage en 4
-         * sous-rafales independamment synchronisees (voir imgfsk_tx.c et le
-         * commentaire de s_widx/s_subchunk_idx plus haut), UN reverrouillage
-         * par sous-rafale est desormais NORMAL et ATTENDU (chacune a son
-         * propre preambule/sync) -- il signale juste le debut d'une NOUVELLE
-         * sous-rafale, jamais un vrai paquet different concatene au mauvais
-         * endroit (ca, c'est traite par les 4 sous-rafales elles-memes,
-         * chacune isolee dans son propre segment de 64 o de s_pkt). Un
-         * reverrouillage intempestif (bruit) ne coute plus qu'au pire les 64
-         * o de LA sous-rafale en cours, jamais les 256 o entiers comme avant. */
+         * octet contre imgfsk_test_data.h -- chaque paquet (une seule rafale
+         * de 256 o, decoupage en sous-rafales essaye puis retire) doit donc
+         * repartir de zero a chaque reverrouillage. */
         if (irq & IMGFSK_IRQ_RX_SYNC)
             s_widx = 0;
 
@@ -436,17 +427,15 @@ void IMGFSK_TimeSlice(void)
             continue;
         s_fifo_count++;
 
-        for (int i = 0; i < 4 && s_widx < 32; i++) {
+        for (int i = 0; i < 4 && s_widx < 128; i++) {
             uint16_t w = BK4819_ReadRegister(BK4819_REG_5F);
-            int abs_word = s_subchunk_idx * 32 + s_widx;
-            s_pkt[abs_word * 2]     = (uint8_t)(w >> 8);
-            s_pkt[abs_word * 2 + 1] = (uint8_t)(w & 0xFF);
+            s_pkt[s_widx * 2]     = (uint8_t)(w >> 8);
+            s_pkt[s_widx * 2 + 1] = (uint8_t)(w & 0xFF);
             s_widx++;
         }
 
-        if (s_widx >= 32) {
+        if (s_widx >= 128) {
             s_widx = 0;
-            s_subchunk_idx++;
 
             /* ⚠️ (2026-09-24, sur demande : comprendre AirCopy plutot que
              * masquer avec le chien de garde) -- TX prouve robuste (AirCopy
@@ -461,14 +450,13 @@ void IMGFSK_TimeSlice(void)
              * (BK4819_ResetFSK()+BK4819_PrepareFSKReceive(), pas
              * PrepareFSKReceive() seul) avant de continuer -- chose que
              * notre code n'a JAMAIS faite, meme reamement leger que la
-             * trame soit propre ou non. Si des erreurs materielles se
-             * produisent chez nous aussi (bruit, timing) sans jamais ce
-             * reset plus dur, l'etat du correlateur pourrait se degrader
-             * progressivement jusqu'au blocage observe, la ou AirCopy
-             * s'auto-corrige a chaque fois. Reproduit ici a l'IDENTIQUE
-             * (meme ordre : lire REG_0B AVANT de reamener, PrepareFSKReceive()
+             * trame soit propre ou non. Reproduit ici a l'IDENTIQUE (meme
+             * ordre : lire REG_0B AVANT de reamener, PrepareFSKReceive()
              * inconditionnel, PUIS le reset dur EN PLUS si le bit est pose --
-             * pas un simple if/else, comme AIRCOPY_StorePacket() le fait). */
+             * pas un simple if/else, comme AIRCOPY_StorePacket() le fait).
+             * (2026-09-24, retour terrain : essaye avec le decoupage en
+             * sous-rafales, blocage identique -- garde ici malgre tout,
+             * matche AirCopy a l'identique, harmless si jamais insuffisant.) */
             uint16_t reg0b = BK4819_ReadRegister(BK4819_REG_0B);
             BK4819_PrepareFSKReceive();
             if (reg0b & 0x0010u) {
@@ -476,10 +464,7 @@ void IMGFSK_TimeSlice(void)
                 BK4819_PrepareFSKReceive();
             }
 
-            if (s_subchunk_idx >= 4) {
-                s_subchunk_idx = 0;
-                imgfsk_rx_forward(s_pkt);
-            }
+            imgfsk_rx_forward(s_pkt);
         }
     }
 }

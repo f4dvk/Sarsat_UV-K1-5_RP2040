@@ -34,6 +34,15 @@
  * so re-synchronising per packet trades a little airtime for much better
  * resilience to a missed bit or two, which matters more on a real link than
  * in this bring-up test.
+ *
+ * ⚠️ (2026-09-24) Un decoupage en 4 sous-rafales de 64 o (pour raccourcir la
+ * duree de verrouillage continu du correlateur, en pensant reproduire au plus
+ * pres l'enveloppe d'AirCopy) a ete essaye ici et retire : retour terrain, le
+ * blocage RX persistait IDENTIQUE, et le decoupage introduisait en plus un
+ * bug de reassemblage (des sous-rafales de PAQUETS DIFFERENTS finissant
+ * melangees dans le meme tampon quand une sous-rafale etait manquee) --
+ * complexite ajoutee sans aucun benefice. Retour a un seul bloc de 256 o par
+ * paquet, plus simple et sans ce risque de desalignement.
  * ---------------------------------------------------------------------
  * REG_30 (the RF DSP / PA / PLL enable BK4819_ResetFSK()'s BK4819_Idle()
  * call would zero) is deliberately never touched by the per-packet reset
@@ -50,45 +59,36 @@
  * bits, soit ~1707 ms à 1200 bauds (le calcul précédent, ~853 ms, était
  * faux -- confusion avec le débit 2400). L'ancien budget de 400 ms coupait
  * donc CHAQUE paquet en plein milieu de son émission, bien avant la fin des
- * bits -- le paquet suivant écrasait alors la FIFO en cours de trame.
- *
- * ⚠️ (2026-09-24, sur demande : comprendre pourquoi AirCopy ne plante jamais
- * côté RX alors que nous si, malgré des registres identiques) -- AirCopy ne
- * reste JAMAIS verrouillé en continu plus de ~480 ms (72 o = 36 mots à 1200
- * bauds) avant un réamement complet (nouveau préambule/sync par paquet,
- * AIRCOPY_StorePacket() appelle BK4819_PrepareFSKReceive() après CHAQUE
- * paquet). Notre paquet SSDV de 256 o forçait un verrouillage continu de
- * ~1.7 s -- près de 4x plus longtemps -- avant chaque réamement, une
- * enveloppe qu'AUCUNE utilisation connue d'AirCopy n'exerce jamais. Ce
- * paquet SSDV est maintenant découpé en IMGFSK_SUBCHUNKS_PER_PACKET
- * sous-rafales indépendamment préambulées/synchronisées de
- * IMGFSK_SUBCHUNK_SIZE o chacune -- ramène la durée de verrouillage continu
- * à ~427 ms (64 o a 1200 bauds), sous l'enveloppe déjà prouvée robuste par
- * AirCopy lui-même. Voir imgfsk_rx.c pour la reassemblage cote reception. */
-#define IMGFSK_SUBCHUNK_SIZE            64
-#define IMGFSK_SUBCHUNKS_PER_PACKET     (IMGFSK_PACKET_SIZE / IMGFSK_SUBCHUNK_SIZE)
-
-#define IMGFSK_FIFO_TIMEOUT_MS   800   /* pire cas 1200 bauds, 64 o = ~427 ms
-                                       * + marge; poll loop re-checks every
-                                       * 5 ms so this is the whole sub-burst's
-                                       * budget, not a per-iteration one. */
+ * bits -- le paquet suivant écrasait alors la FIFO en cours de trame. Porté
+ * à 2000 ms (marge au-delà des 1707 ms nécessaires au pire cas, 1200 bauds)
+ * ; poll loop re-checks every 5 ms so this is the whole burst's budget, not
+ * a per-iteration one. */
+#define IMGFSK_FIFO_TIMEOUT_MS   2000
 #define IMGFSK_FIFO_POLL_MS      5
 
-static void imgfsk_send_subchunk(const uint8_t *chunk)
+/* ⚠️ (2026-09-24, sur demande : comprendre pourquoi AirCopy ne plante jamais
+ * côté RX alors que nous si) -- AIRCOPY_SendMessage() (App/app/aircopy.c),
+ * appelee toutes les 10 ms depuis APP_TimeSlice10ms(), n'envoie reellement
+ * un nouveau paquet AirCopy que toutes les gAircopySendCountdown=30 appels,
+ * soit un espacement REEL de ~300 ms entre deux paquets -- pas les 20 ms
+ * qu'on utilisait ici. 15x plus de temps de repos entre deux rafales. */
+#define IMGFSK_INTERPACKET_GAP_MS 300
+
+static void imgfsk_send_one_packet(const uint8_t *pkt)
 {
-    /* ⚠️ (2026-09-24, retour terrain anterieur) -- BK4819_SendFSKData() active
+    /* ⚠️ (2026-09-24, meme retour terrain) -- BK4819_SendFSKData() active
      * explicitement BK4819_REG_3F_FSK_TX_FINISHED avant de declencher la
      * rafale ; notre code ecrivait REG_3F=0 (TOUTES les interruptions
-     * masquees) une seule fois avant la boucle d'envoi -- la source
-     * d'interruption qu'on poll juste en dessous (REG_0C bit 0) ne pouvait
-     * alors jamais se lever pour la bonne raison, seul le timeout faisait
-     * sortir la boucle. */
+     * masquees) une seule fois avant la boucle d'envoi, dans
+     * IMGFSK_SendTestImage() -- la source d'interruption qu'on poll juste en
+     * dessous (REG_0C bit 0) ne pouvait alors jamais se lever pour la bonne
+     * raison, seul le timeout (voir ci-dessus) faisait sortir la boucle. */
     BK4819_WriteRegister(BK4819_REG_3F, BK4819_REG_3F_FSK_TX_FINISHED);
     BK4819_WriteRegister(BK4819_REG_59, 0x8068);   /* clear TX FIFO */
     BK4819_WriteRegister(BK4819_REG_59, 0x0068);   /* un-clear */
 
-    for (int i = 0; i < IMGFSK_SUBCHUNK_SIZE / 2; i++) {
-        uint16_t w = ((uint16_t)chunk[i * 2] << 8) | chunk[i * 2 + 1];
+    for (int i = 0; i < IMGFSK_PACKET_SIZE / 2; i++) {
+        uint16_t w = ((uint16_t)pkt[i * 2] << 8) | pkt[i * 2 + 1];
         BK4819_WriteRegister(BK4819_REG_5F, w);
     }
 
@@ -101,16 +101,7 @@ static void imgfsk_send_subchunk(const uint8_t *chunk)
             break;
     }
     BK4819_WriteRegister(BK4819_REG_02, 0);        /* clear, as proven elsewhere */
-    BK4819_WriteRegister(BK4819_REG_59, 0x0068);   /* back to idle for the next sub-chunk */
-}
-
-static void imgfsk_send_one_packet(const uint8_t *pkt)
-{
-    for (int c = 0; c < IMGFSK_SUBCHUNKS_PER_PACKET; c++) {
-        imgfsk_send_subchunk(pkt + c * IMGFSK_SUBCHUNK_SIZE);
-        SYSTEM_DelayMs(20);   /* brief gap between sub-bursts, same as
-                               * between whole packets below */
-    }
+    BK4819_WriteRegister(BK4819_REG_59, 0x0068);   /* back to idle for the next packet */
 }
 
 void IMGFSK_SendTestImage(bool fsk2400)
@@ -164,15 +155,14 @@ void IMGFSK_SendTestImage(bool fsk2400)
                                                      * bits -- also missing
                                                      * from TX until now */
 
-    /* REG_5D: FSK data length = 64 bytes PER SOUS-RAFALE (value = length-1 =
-     * 63 = 0x3F, low 8 bits at <15:8>, high 3 bits at <7:5> -- same formula
-     * AirCopy's own 0x4700/72-byte value follows) -- pas 256 o, voir le
-     * decoupage en sous-rafales plus haut. */
-    BK4819_WriteRegister(BK4819_REG_5D, 0x3F00u);
+    /* REG_5D: FSK data length = 256 bytes (value = length-1 = 255 = 0xFF,
+     * low 8 bits at <15:8>, high 3 bits at <7:5> -- same formula AirCopy's
+     * own 0x4700/72-byte value follows). */
+    BK4819_WriteRegister(BK4819_REG_5D, 0xFF00u);
 
     for (int p = 0; p < IMGFSK_TEST_PACKET_COUNT; p++) {
         imgfsk_send_one_packet(&g_imgfsk_test_packets[p * IMGFSK_PACKET_SIZE]);
-        SYSTEM_DelayMs(20);   /* brief inter-packet gap */
+        SYSTEM_DelayMs(IMGFSK_INTERPACKET_GAP_MS);
     }
 
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
