@@ -447,13 +447,34 @@ void IMGFSK_TimeSlice(void)
         if (s_widx >= 32) {
             s_widx = 0;
             s_subchunk_idx++;
-            /* Reamement APRES CHAQUE sous-rafale (64 o, ~427 ms de
-             * verrouillage continu a 1200 bauds) -- voir le commentaire de
-             * imgfsk_tx.c : c'est exactement l'enveloppe qu'AirCopy exerce
-             * lui-meme entre ses propres paquets (72 o, ~480 ms), jamais
-             * plus. AIRCOPY_StorePacket() fait ce meme reamement
-             * inconditionnellement apres chaque paquet, reussite ou echec. */
+
+            /* ⚠️ (2026-09-24, sur demande : comprendre AirCopy plutot que
+             * masquer avec le chien de garde) -- TX prouve robuste (AirCopy
+             * en reception recoit notre TX en boucle jusqu'a 100% sans
+             * jamais bloquer), donc le probleme est bien dans NOTRE code RX.
+             * En relisant AIRCOPY_StorePacket() (App/app/aircopy.c) une
+             * derniere fois en detail : elle lit REG_0B AVANT de reamener --
+             * bit 4 = "FSK Rx CRC Indicator" (note d'application BK4819(V3)),
+             * un CRC materiel calcule par la puce elle-meme (REG_5C l'active
+             * deja chez nous, 0x5665, jamais exploite). Si ce bit signale un
+             * probleme, AirCopy fait un reset PLUS DUR
+             * (BK4819_ResetFSK()+BK4819_PrepareFSKReceive(), pas
+             * PrepareFSKReceive() seul) avant de continuer -- chose que
+             * notre code n'a JAMAIS faite, meme reamement leger que la
+             * trame soit propre ou non. Si des erreurs materielles se
+             * produisent chez nous aussi (bruit, timing) sans jamais ce
+             * reset plus dur, l'etat du correlateur pourrait se degrader
+             * progressivement jusqu'au blocage observe, la ou AirCopy
+             * s'auto-corrige a chaque fois. Reproduit ici a l'IDENTIQUE
+             * (meme ordre : lire REG_0B AVANT de reamener, PrepareFSKReceive()
+             * inconditionnel, PUIS le reset dur EN PLUS si le bit est pose --
+             * pas un simple if/else, comme AIRCOPY_StorePacket() le fait). */
+            uint16_t reg0b = BK4819_ReadRegister(BK4819_REG_0B);
             BK4819_PrepareFSKReceive();
+            if (reg0b & 0x0010u) {
+                BK4819_ResetFSK();
+                BK4819_PrepareFSKReceive();
+            }
 
             if (s_subchunk_idx >= 4) {
                 s_subchunk_idx = 0;
