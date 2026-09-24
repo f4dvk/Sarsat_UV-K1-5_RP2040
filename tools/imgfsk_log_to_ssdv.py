@@ -3,11 +3,13 @@
 imgfsk_log_to_ssdv.py -- bench-test helper for the SSTV_SSDV raw-FSK image
 link (branch SSTV_SSDV), part of the Sarsat_UV-K1-5_RP2040 project.
 
-The RP2040 (rp2040/src/main.c, fed by imgfsk_sync.c) dumps every captured
-256-byte SSDV packet as a plain-text hex line on its USB serial diagnostic
-port, e.g.:
+The radio's own BK4819/29 hardware-demodulates each 256-byte SSDV packet
+(patch/imgfsk_rx.c, the same raw-FSK engine already proven by the stock
+AirCopy feature) and relays it to the RP2040 (CMD_IMGFSK_RXPKT, see
+decoder_config.h), which just dumps it as a plain-text hex line on its own
+USB serial diagnostic port, e.g.:
 
-    [imgfsk2400] pkt n=1 55660100000500000...   (512 hex chars = 256 bytes)
+    [imgfsk] pkt n=1 55660100000500000...   (512 hex chars = 256 bytes)
 
 This script reads that log (from a serial port live, or a file already
 captured with a terminal program) and writes out the matching binary
@@ -25,21 +27,21 @@ import argparse
 import re
 import sys
 
-LINE_RE = re.compile(r"\[imgfsk(1200|2400)\]\s+pkt\s+n=(\d+)\s+([0-9A-Fa-f]+)")
+LINE_RE = re.compile(r"\[imgfsk\]\s+pkt\s+n=(\d+)\s+([0-9A-Fa-f]+)")
 
 
 def handle_line(line, out, seen_counts):
     m = LINE_RE.search(line)
     if not m:
         return
-    rate, n, hexdata = m.group(1), int(m.group(2)), m.group(3)
+    n, hexdata = int(m.group(1)), m.group(2)
     if len(hexdata) != 512:
-        print(f"-- skipped {rate} baud pkt n={n}: {len(hexdata)} hex chars, expected 512",
+        print(f"-- skipped pkt n={n}: {len(hexdata)} hex chars, expected 512",
               file=sys.stderr)
         return
-    seen_counts[rate] = seen_counts.get(rate, 0) + 1
+    seen_counts["imgfsk"] = seen_counts.get("imgfsk", 0) + 1
     out.write(bytes.fromhex(hexdata))
-    print(f"pkt n={n} ({rate} baud) -> {seen_counts[rate]} packets written so far")
+    print(f"pkt n={n} -> {seen_counts['imgfsk']} packets written so far")
 
 
 def main():

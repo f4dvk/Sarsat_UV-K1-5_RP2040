@@ -229,6 +229,16 @@
                                          /* CMD_SARSAT_TEXT, own line buffer */
                                          /* on the radio side (app/sonde.c)  */
 
+/* branch SSTV_SSDV: radio -> RP2040, sans ACK -- un paquet SSDV de 256 o,
+ * demodule EN MATERIEL par le moteur FSK brut du BK4819/29 (le meme deja
+ * prouve par l'AirCopy stock, cf. patch/imgfsk_rx.c cote radio), pas par le
+ * RP2040 -- celui-ci ne fait que relayer les octets tels quels sur son
+ * propre USB pour l'outil PC `ssdv`. Remplace la premiere version
+ * (imgfsk_sync.c, demodulation logicielle depuis l'audio RAW/DSC), retiree :
+ * elle exigeait un second poste + C-Board pour la reception, alors que le
+ * BK4819/29 du poste recepteur suffit desormais a lui seul. */
+#define CMD_IMGFSK_RXPKT     0x06E2u     /* 256 o bruts, un paquet SSDV      */
+
 /* ---- GPS (NMEA in on UART1, C-Board GPS header GP4/GP5) --------------- */
 #define CFG_GPS_ENABLE        1
 #define CFG_GPS_UART          uart1
