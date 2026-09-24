@@ -88,8 +88,13 @@ static void imgfsk_rx_arm(bool fsk2400)
      * de verrouillage frequentes chassees sur plusieurs tours precedents.
      * Fixe ici comme reglage definitif, pas juste un essai comparatif. */
     gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_WIDE;
-    gRxVfo->Modulation        = MODULATION_FM;    /* what a fresh VFO already
-                                                   * defaults to in boot.c   */
+    /* ⚠️ (2026-09-24, sur demande : essai en RAW) -- boot.c (AirCopy) laisse
+     * la modulation a MODULATION_FM (valeur par defaut d'une VFO fraiche) ;
+     * bascule TEMPORAIRE en MODULATION_RAW pour ce comparatif (le
+     * correlateur FSK lit le discriminateur directement, RAW pourrait
+     * eviter un traitement audio FM qui ne sert a rien ici), a repasser en
+     * FM si RAW n'apporte rien de mieux. */
+    gRxVfo->Modulation        = MODULATION_RAW;
 
     RADIO_ConfigureSquelchAndOutputPower(gRxVfo);   /* boot.c, same order    */
     gCurrentVfo = gRxVfo;                           /* boot.c, same order    */
@@ -352,19 +357,32 @@ void IMGFSK_TimeSlice(void)
      * inchangee) -- rien d'anormal cote configuration. Sans bit dedie pour
      * trancher la cause exacte, seuil resserre de 4 s a 2.5 s (encore
      * nettement au-dessus de l'espacement normal ~1.7-2 s) pour recuperer
-     * plus vite quelle que soit la cause, en attendant une piste plus sure. */
+     * plus vite quelle que soit la cause, en attendant une piste plus sure.
+     *
+     * ⚠️ (2026-09-24, sur demande : "peux-tu desactiver le watchdog qui me
+     * parait se declencher souvent") -- desactive pour isoler si ce que le
+     * terrain observe (resets en cours de trame, duplications) vient
+     * vraiment du chien de garde ou d'autre chose (essai RAW en cours en
+     * parallele). Le suivi reste actif (cout negligeable) pour pouvoir le
+     * reactiver facilement ; seule l'ACTION (desarmement+reamement force)
+     * est coupee. */
     static uint32_t s_watchdog_last_irq;
     static uint16_t s_watchdog_ticks;
     if (s_irq_count != s_watchdog_last_irq) {
         s_watchdog_last_irq = s_irq_count;
         s_watchdog_ticks = 0;
-    } else if (++s_watchdog_ticks >= 250) {   /* ~2.5 s a ~10 ms/tick */
+    } else {
+        ++s_watchdog_ticks;
+    }
+#if 0   /* desactive sur demande -- voir commentaire ci-dessus */
+    if (s_watchdog_ticks >= 250) {   /* ~2.5 s a ~10 ms/tick */
         s_watchdog_ticks = 0;
         imgfsk_rx_disarm();
         SYSTEM_DelayMs(300);
         imgfsk_rx_arm(s_fsk2400);
         return;
     }
+#endif
 
     /* ~1 s at the ~10 ms tick rate this is called at */
     static uint16_t s_diag_ticks;
