@@ -103,9 +103,29 @@ void IMGFSK_SendTestImage(bool fsk2400)
                                                     * no scramble, idle --
                                                     * AirCopy's own value */
 
+    /* ⚠️ (2026-09-24, retour terrain : "ca ne reagit pas encore" meme apres
+     * la correction REG_3F/timeout) -- en relisant BK4819_SetupAircopy()
+     * elle-meme (App/driver/bk4829.c) au lieu de se fier a une note prise
+     * plus tot dans cette session (qui donnait REG_70=0x00C3, une valeur
+     * FAUSSE, deja recopiee a tort dans imgfsk_rx.c) : cette fonction, TOUJOURS
+     * appelee par AirCopy avant tout TX ou RX, ecrit aussi REG_70 (gain du
+     * ton FSK) et REG_72 (mot de controle du debit FSK) -- notre TX ne les
+     * ecrivait JAMAIS, en dehors de tout menu AirCopy, laissant ces registres
+     * a leur valeur RX/vocale normale du canal courant. Sans REG_72 correct,
+     * la deviation/le debit reellement emis est incorrect -- un signal
+     * invalide pour N'IMPORTE quel correlateur FSK, expliquant pourquoi meme
+     * l'AirCopy d'en face ne reagit a rien, independamment du cote RX. */
+    BK4819_WriteRegister(BK4819_REG_70, 0x00E0u);   /* Tone2 enable, gain 48 */
+    BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* Tone2 baudrate 1200  */
+
     /* REG_58: FSK1.2K/2.4K TX mode (bits<15:13>=000), bandwidth
      * (bits<3:1>: 000=1.2K, 100=2.4K), FSK enable (bit0=1). */
     BK4819_WriteRegister(BK4819_REG_58, fsk2400 ? 0x0009u : 0x0001u);
+
+    BK4819_WriteRegister(BK4819_REG_5C, 0x5665u);   /* AirCopy's own value,
+                                                     * CRC enable + unknown
+                                                     * bits -- also missing
+                                                     * from TX until now */
 
     /* REG_5D: FSK data length = 256 bytes (value = length-1 = 255 = 0xFF,
      * low 8 bits at <15:8>, high 3 bits at <7:5> -- same formula AirCopy's

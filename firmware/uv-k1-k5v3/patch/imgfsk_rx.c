@@ -96,7 +96,13 @@ static void imgfsk_rx_arm(bool fsk2400)
      * propre lien -- jamais répliqué côté RX jusqu'ici. */
     SYSTEM_DelayMs(50);
 
-    BK4819_WriteRegister(BK4819_REG_70, 0x00C3u);   /* AirCopy's own value    */
+    /* ⚠️ (2026-09-24) Corrige : 0x00C3 etait une valeur FAUSSE, prise d'une
+     * note erronee plus tot dans cette session -- la vraie valeur ecrite par
+     * BK4819_SetupAircopy() (App/driver/bk4829.c, relue directement) est
+     * 0x00E0 (Tone2 enable, gain 48). Trouve en corrigeant le meme bug cote
+     * TX (imgfsk_tx.c), ou son absence totale expliquait "ca ne reagit pas
+     * encore" meme apres la correction REG_3F/timeout. */
+    BK4819_WriteRegister(BK4819_REG_70, 0x00E0u);   /* AirCopy's own value    */
     BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* AirCopy's own value    */
     /* REG_58: RX mode = FSK1.2K/2.4K (bits<12:10>=000, AirCopy's own family),
      * RX gain = 3 (bits<9:8>, AirCopy's own value), bandwidth bits<3:1>:
