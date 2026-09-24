@@ -344,10 +344,25 @@ void IMGFSK_TimeSlice(void)
 
         if (s_widx >= 128) {
             imgfsk_rx_forward(s_pkt);
-            s_widx = 0;
-            BK4819_PrepareFSKReceive();   /* re-arm for the next packet, same
-                                          * as AIRCOPY_StorePacket() does
-                                          * unconditionally on completion */
+            /* ⚠️ (2026-09-24, retour terrain : "le rx se bloque" -- pas
+             * d'un coup, mais de façon degradee sur des envois successifs :
+             * 5 paquets captures, puis 4, puis plus aucune reaction, alors
+             * que dirty=0 tout du long (ecarte l'hypothese precedente).
+             * BK4819_PrepareFSKReceive() seul (utilise ici a chaque paquet,
+             * ~1.7 s d'intervalle) est ce qu'AirCopy utilise aussi entre ses
+             * paquets, mais un transfert AirCopy normal ne s'attarde jamais
+             * en reception continue pendant plusieurs sessions de test comme
+             * ici -- semble accumuler un etat degrade (AGC/DC/squelch non
+             * rafraichis, contrairement a un armement initial) jusqu'au
+             * blocage complet. Notre propre armement complet
+             * (imgfsk_rx_arm(), avec RADIO_ConfigureSquelchAndOutputPower()
+             * + RADIO_SetupRegisters() + delai de stabilisation) n'a lui
+             * JAMAIS echoue a redemarrer une ecoute, a chaque test manuel --
+             * utilise ici a la place du seul BK4819_PrepareFSKReceive(),
+             * au prix d'un blocage synchrone de ~50 ms (SYSTEM_DelayMs())
+             * tous les ~1.7 s pendant une reception active, juge acceptable
+             * pour cet essai. */
+            imgfsk_rx_arm(s_fsk2400);
         }
     }
 }
