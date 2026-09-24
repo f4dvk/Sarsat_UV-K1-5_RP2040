@@ -31,58 +31,55 @@ static bool    s_fsk2400;
 static uint8_t s_pkt[256];
 static int     s_widx;   /* words accumulated so far (0..128), see
                           * IMGFSK_TimeSlice()'s comment */
-static uint8_t s_saved_battery_save;
-static uint8_t s_saved_dual_watch;
-static uint8_t s_saved_bandwidth;
+static uint8_t          s_saved_battery_save;
+static uint8_t          s_saved_dual_watch;
+static uint8_t          s_saved_bandwidth;
+static ModulationMode_t s_saved_modulation;
 
-/* ⚠️ (2026-09-25, retour terrain : AirCopy stock confirmé fonctionnel entre
- * les deux mêmes postes -- donc le moteur matériel marche vraiment, le bug
- * est spécifique à ce fichier) -- comparé à la vraie séquence d'entrée
- * d'AirCopy (App/helper/boot.c, BOOT_MODE_AIRCOPY) : elle désactive
- * explicitement l'économie de batterie et le dual-watch avant d'armer quoi
- * que ce soit. Absent ici jusqu'à présent -- si l'économie de batterie est
- * active (réglage courant par défaut sur ces radios), le récepteur coupe
- * périodiquement l'écoute pour économiser l'énergie : le corrélateur FSK ne
- * verrait le signal qu'une fraction du temps, potentiellement jamais. Même
- * classe de problème déjà rencontrée et corrigée côté APRS
- * (APRS_KeepAwake(), aprs.h) pour la même raison. Sauvegardés/restaurés
- * plutôt que simplement écrasés, pour ne pas modifier silencieusement les
- * réglages de l'opérateur après un simple test. */
+/* ⚠️ (2026-09-25) Rewritten as a byte-for-byte replica of AirCopy's actual,
+ * complete, CONFIRMED-WORKING receive sequence (on the operator's own two
+ * radios) instead of one guessed-and-tested variable at a time -- on
+ * explicit request, after several rounds of single-register hypotheses
+ * (REG_2B, WIDE vs NARROW, APP_StartListening, battery-save/dual-watch)
+ * each only partially matched what the reference actually does. The full
+ * reference is App/helper/boot.c (BOOT_MODE_AIRCOPY, screen entry) +
+ * App/app/aircopy.c (AIRCOPY_Key_EXIT(), when the operator starts
+ * receiving) + App/driver/bk4829.c (BK4819_SetupAircopy() /
+ * BK4819_PrepareFSKReceive()). Differences from that reference that remain
+ * here, all deliberate:
+ *   - No RADIO_InitInfo() -- that blanks the VFO to AirCopy's own fixed LPD
+ *     frequency; we want whatever channel/frequency the operator already
+ *     tuned both radios to.
+ *   - gRxVfo->Modulation is set to the FIELD value MODULATION_FM (matching
+ *     what a freshly RADIO_InitInfo()'d VFO already defaults to, which is
+ *     why AirCopy itself never calls RADIO_SetModulation() at all) instead
+ *     of calling RADIO_SetModulation() afterward -- if the operator's
+ *     channel was actually in a non-FM modulation (RAW, seen on screen
+ *     after arming in an earlier attempt), forcing the field before
+ *     RADIO_SetupRegisters() runs is the same state AirCopy starts from,
+ *     rather than trying to undo RAW-specific setup after the fact.
+ *   - REG_58 (bandwidth: 1.2K vs 2.4K) and REG_5D (256-byte SSDV packet
+ *     length instead of AirCopy's 72 bytes) still deliberately differ --
+ *     the whole point of this module.
+ *   - No APP_StartListening()/squelch-forcing: AirCopy itself never calls
+ *     it either, so it was a guess that didn't match the proven reference
+ *     and is removed here. */
 static void imgfsk_rx_arm(bool fsk2400)
 {
     s_saved_battery_save = gEeprom.BATTERY_SAVE;
     s_saved_dual_watch   = gEeprom.DUAL_WATCH;
     s_saved_bandwidth    = gRxVfo->CHANNEL_BANDWIDTH;
-    gEeprom.BATTERY_SAVE     = 0;
-    gEeprom.DUAL_WATCH       = DUAL_WATCH_OFF;
-    gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_NARROW;   /* see the NARROW comment
-                                                    * below -- set on the VFO
-                                                    * itself, not just the
-                                                    * register, matching
-                                                    * AirCopy's own sequence
-                                                    * (boot.c) exactly, in
-                                                    * case RADIO_SetupRegisters()
-                                                    * derives anything else
-                                                    * (squelch/AGC) from it */
+    s_saved_modulation   = gRxVfo->Modulation;
 
-    RADIO_SetupRegisters(true);   /* normal RX for the currently tuned channel */
+    gEeprom.BATTERY_SAVE      = 0;              /* boot.c                    */
+    gEeprom.DUAL_WATCH        = DUAL_WATCH_OFF; /* boot.c                    */
+    gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_NARROW; /* boot.c -- NOT wide      */
+    gRxVfo->Modulation        = MODULATION_FM;    /* what a fresh VFO already
+                                                   * defaults to in boot.c   */
 
-    /* ⚠️ (2026-09-25, retour terrain : LED rouge fixe, aucune réaction --
-     * pas le moindre flash même pendant une vraie transmission de l'autre
-     * poste) -- REG_2B écarté (filtre audio, sans rapport avec le moteur
-     * FSK numérique, objection justifiée de l'opérateur). Deuxième piste,
-     * trouvée en relisant la séquence d'entrée COMPLÈTE d'AirCopy
-     * (App/helper/boot.c, BOOT_MODE_AIRCOPY) plus attentivement : elle
-     * force `gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_NARROW` -- PAS WIDE. Le
-     * WIDE ci-dessous avait été copié par analogie avec l'écran SARSAT (un
-     * signal différent, bi-phase-L analogique), sans preuve que ça
-     * s'applique au moteur FSK numérique -- et on a maintenant la preuve du
-     * contraire : la seule configuration confirmée fonctionnelle (AirCopy
-     * stock, entre ces deux mêmes postes) utilise NARROW. Un mauvais
-     * réglage de filtre IF expliquerait un silence total et immédiat,
-     * exactement le symptôme observé. */
-    RADIO_SetModulation(MODULATION_FM);
-    BK4819_SetFilterBandwidth(BK4819_FILTER_BW_NARROW, true);
+    RADIO_ConfigureSquelchAndOutputPower(gRxVfo);   /* boot.c, same order    */
+    gCurrentVfo = gRxVfo;                           /* boot.c, same order    */
+    RADIO_SetupRegisters(true);                     /* boot.c                */
 
     BK4819_WriteRegister(BK4819_REG_70, 0x00C3u);   /* AirCopy's own value    */
     BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* AirCopy's own value    */
@@ -109,6 +106,7 @@ static void imgfsk_rx_disarm(void)
     gEeprom.BATTERY_SAVE      = s_saved_battery_save;
     gEeprom.DUAL_WATCH        = s_saved_dual_watch;
     gRxVfo->CHANNEL_BANDWIDTH = s_saved_bandwidth;
+    gRxVfo->Modulation        = s_saved_modulation;
     BK4819_ResetFSK();
     RADIO_SetupRegisters(true);
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
