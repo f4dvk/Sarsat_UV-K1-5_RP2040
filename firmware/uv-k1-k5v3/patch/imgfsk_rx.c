@@ -119,6 +119,17 @@ void IMGFSK_TimeSlice(void)
     if (was_tx) { was_tx = false; imgfsk_rx_arm(s_fsk2400); s_widx = 0; return; }
 
     while (BK4819_ReadRegister(BK4819_REG_0C) & 1u) {
+        /* ⚠️ (2026-09-25, retour terrain : rien du tout, même pas de fausses
+         * données) -- diagnostic bon marché : bascule la LED verte (distincte
+         * du rouge "armé") à CHAQUE interruption matérielle vue, même sans
+         * FIFO_ALMOST_FULL. Si elle ne change jamais d'état pendant un test,
+         * le moteur FSK ne réagit à rien du tout (mauvaise fréquence/débit,
+         * ou le calage lui-même ne convient pas) -- pas la peine de chercher
+         * plus loin dans le décodage tant que ce signal n'a pas bougé. */
+        static bool s_green_toggle;
+        s_green_toggle = !s_green_toggle;
+        BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, s_green_toggle);
+
         BK4819_WriteRegister(BK4819_REG_02, 0);          /* latch, same order
                                                           * as CheckRadioInterrupts() */
         uint16_t irq = BK4819_ReadRegister(BK4819_REG_02);
