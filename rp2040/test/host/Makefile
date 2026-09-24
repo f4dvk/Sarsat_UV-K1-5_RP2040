@@ -29,7 +29,7 @@ PORT_SRCS := $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406.c \
 APRS_DIR := ../../../firmware/uv-k5v1-kd8cec/patch
 
 .PHONY: all parity check clean
-all: test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_gps test_aprs_digi test_kiss test_sonde_rs41 test_sonde_demod test_sonde_dfm test_sonde_sync test_sonde_m10
+all: test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_gps test_aprs_digi test_kiss test_sonde_rs41 test_sonde_demod test_sonde_dfm test_sonde_sync test_sonde_m10 test_imgfsk_sync
 
 test_decode: hexmain.c $(PORT_SRCS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -77,6 +77,9 @@ test_sonde_sync: test_sonde_sync.c $(SRC_DIR)/sonde_sync.c $(SRC_DIR)/sonde_rs41
 test_sonde_m10: test_sonde_m10.c $(SRC_DIR)/sonde_m10.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+test_imgfsk_sync: test_imgfsk_sync.c $(SRC_DIR)/imgfsk_sync.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
 parity: test_decode
 	@./run_parity.sh "$(UPSTREAM)"
 
@@ -94,6 +97,7 @@ check: all parity
 	@./test_sonde_dfm
 	@./test_sonde_sync
 	@./test_sonde_m10
+	@./test_imgfsk_sync
 
 clean:
-	rm -f test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_aprs_wav test_gps test_aprs_digi test_kiss test_sonde_rs41 test_sonde_demod test_sonde_dfm test_sonde_sync test_sonde_m10 fgb_bits.csv
+	rm -f test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_aprs_wav test_gps test_aprs_digi test_kiss test_sonde_rs41 test_sonde_demod test_sonde_dfm test_sonde_sync test_sonde_m10 test_imgfsk_sync fgb_bits.csv

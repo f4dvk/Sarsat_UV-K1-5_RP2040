@@ -36,6 +36,7 @@
 #include "kiss.h"
 #include "sonde_demod.h"
 #include "sonde_sync.h"
+#include "imgfsk_sync.h"
 #include "sonde_m10.h"
 
 /* KISS TNC mode: the USB-CDC carries a binary KISS stream, not the debug log,
@@ -111,6 +112,16 @@ static uint32_t      g_sonde_rs41_ok, g_sonde_rs41_bad, g_sonde_m10_hits;
 static absolute_time_t g_sonde_next_m10_push;   /* dedup: M10 detection is a
                                                  * bare header lock, cheap to
                                                  * re-trigger on real noise */
+
+/* SSTV_SSDV bring-up (branch SSTV_SSDV): raw-FSK image link, same ADC ring
+ * as the radiosonde decoders above (same RAW/DSC flat-discriminator feed) --
+ * two independent bit-cell PLLs + sync hunters, one per rate the V3 side's
+ * menu can transmit at (ImgFSK1200/ImgFSK2400), running concurrently so
+ * whichever the operator picks on the bench, this side catches it without a
+ * rebuild. See imgfsk_sync.h for the framing this hunts for. */
+static sonde_demod_t g_imgfsk_demod_1200, g_imgfsk_demod_2400;
+static imgfsk_sync_t g_imgfsk_sync_1200,  g_imgfsk_sync_2400;
+static uint32_t      g_imgfsk_pkts_1200,  g_imgfsk_pkts_2400;
 
 /* M10/M20 full GPS decode: a SEPARATE 9600 baud chain on the same raw ADC
  * stream (confirmed chip rate, see sonde_m10.h -- different from the 4800
@@ -914,6 +925,10 @@ static void sonde_mode_enter(void)
 
     sonde_demod_init(&g_sonde_demod, CFG_SONDE_SAMPLE_RATE_HZ, 4800);
     sonde_sync_init(&g_sonde_sync);
+    sonde_demod_init(&g_imgfsk_demod_1200, CFG_SONDE_SAMPLE_RATE_HZ, 1200);
+    sonde_demod_init(&g_imgfsk_demod_2400, CFG_SONDE_SAMPLE_RATE_HZ, 2400);
+    imgfsk_sync_init(&g_imgfsk_sync_1200);
+    imgfsk_sync_init(&g_imgfsk_sync_2400);
     /* ⚠️ FIXED (2026-09-16, on user pointer to HTCommander's own M10
      * demodulator, github.com/Ylianst/HTCommander/.../m10_demodulator.dart):
      * M10 transmits at 9615 baud, not 9600 -- HTCommander's own M10Demodulator
@@ -1088,6 +1103,27 @@ static void sonde_service(void)
             } else if (e == SONDE_EVT_M10) {
                 g_sonde_m10_hits++;
                 sonde_push_m10();
+            }
+        }
+
+        uint8_t bit1200;
+        if (sonde_demod_sample(&g_imgfsk_demod_1200, sample, &bit1200)) {
+            if (imgfsk_sync_feed(&g_imgfsk_sync_1200, bit1200)) {
+                g_imgfsk_pkts_1200++;
+                LOG("[imgfsk1200] pkt n=%lu ", (unsigned long)g_imgfsk_pkts_1200);
+                for (int i = 0; i < IMGFSK_PACKET_SIZE; i++)
+                    LOG("%02X", g_imgfsk_sync_1200.frame[i]);
+                LOG("\n");
+            }
+        }
+        uint8_t bit2400;
+        if (sonde_demod_sample(&g_imgfsk_demod_2400, sample, &bit2400)) {
+            if (imgfsk_sync_feed(&g_imgfsk_sync_2400, bit2400)) {
+                g_imgfsk_pkts_2400++;
+                LOG("[imgfsk2400] pkt n=%lu ", (unsigned long)g_imgfsk_pkts_2400);
+                for (int i = 0; i < IMGFSK_PACKET_SIZE; i++)
+                    LOG("%02X", g_imgfsk_sync_2400.frame[i]);
+                LOG("\n");
             }
         }
 
