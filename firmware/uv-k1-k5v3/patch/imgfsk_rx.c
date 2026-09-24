@@ -218,14 +218,29 @@ static uint32_t s_irq_count, s_fifo_count;
  * de corriger a l'aveugle : s_dirty_count doit rester quasi plat si
  * RADIO_SetupRegisters() n'est appele qu'occasionnellement en fond, ou
  * grimper au rythme du tick (~100/s) si c'est la vraie cause. */
+/* ⚠️ (2026-09-24, retour terrain : "meme probleme" avec le rearmement
+ * complet aussi -- degradation progressive (5 puis 4 puis 0 paquets)
+ * identique qu'avec le rearmement leger, dirty= sans rapport avec le
+ * nombre de paquets captes avant blocage -- ecarte les DEUX hypotheses
+ * logicielles de rearmement testees jusqu'ici. Ajoute la lecture directe de
+ * REG_3F (masque d'interruption reellement actif), REG_58 (mode FSK/bande
+ * TOUJOURS actif) et REG_0C (statut brut) au moment de l'envoi du diag, pour
+ * voir si un registre a change de valeur de facon inattendue au moment du
+ * blocage, plutot que de continuer a deviner cote rearmement. */
 static void imgfsk_rx_send_diag(void)
 {
-    uint8_t b[16];
+    uint8_t b[22];
+    uint16_t reg3f = BK4819_ReadRegister(BK4819_REG_3F);
+    uint16_t reg58 = BK4819_ReadRegister(BK4819_REG_58);
+    uint16_t reg0c = BK4819_ReadRegister(BK4819_REG_0C);
     b[0] = 0xE3; b[1] = 0x06;   /* CMD_IMGFSK_RXDIAG, 0x06E3 LE */
-    b[2] = 0x0C; b[3] = 0x00;   /* size = 12 LE */
+    b[2] = 0x12; b[3] = 0x00;   /* size = 18 LE */
     memcpy(b + 4, &s_irq_count, 4);
     memcpy(b + 8, &s_fifo_count, 4);
     memcpy(b + 12, &s_dirty_count, 4);
+    memcpy(b + 16, &reg3f, 2);
+    memcpy(b + 18, &reg58, 2);
+    memcpy(b + 20, &reg0c, 2);
     SendReply(UART_PORT_UART, b, sizeof(b));
 }
 

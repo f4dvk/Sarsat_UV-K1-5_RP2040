@@ -290,8 +290,17 @@ static void link_poll(void)
             uint32_t fifo  = d[4] | (d[5] << 8) | (d[6] << 16) | ((uint32_t)d[7] << 24);
             uint32_t dirty = (dl >= 12) ?
                 (d[8] | (d[9] << 8) | (d[10] << 16) | ((uint32_t)d[11] << 24)) : 0;
-            LOG("[imgfsk] diag irq=%lu fifo=%lu dirty=%lu\n",
-                (unsigned long)irq, (unsigned long)fifo, (unsigned long)dirty);
+            if (dl >= 18) {
+                uint16_t reg3f = d[12] | (d[13] << 8);
+                uint16_t reg58 = d[14] | (d[15] << 8);
+                uint16_t reg0c = d[16] | (d[17] << 8);
+                LOG("[imgfsk] diag irq=%lu fifo=%lu dirty=%lu reg3f=%04X reg58=%04X reg0c=%04X\n",
+                    (unsigned long)irq, (unsigned long)fifo, (unsigned long)dirty,
+                    reg3f, reg58, reg0c);
+            } else {
+                LOG("[imgfsk] diag irq=%lu fifo=%lu dirty=%lu\n",
+                    (unsigned long)irq, (unsigned long)fifo, (unsigned long)dirty);
+            }
         } else if ((id & 0x8000) && (id & 0x00FF) >= 0xC0) {
 #if CFG_TX_HEXDUMP
             LOG("[link]   ACK 0x%04X status=%u\n", id & 0x7FFF, dl ? d[0] : 0);

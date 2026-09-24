@@ -238,7 +238,8 @@
  * elle exigeait un second poste + C-Board pour la reception, alors que le
  * BK4819/29 du poste recepteur suffit desormais a lui seul. */
 #define CMD_IMGFSK_RXPKT     0x06E2u     /* 256 o bruts, un paquet SSDV      */
-#define CMD_IMGFSK_RXDIAG    0x06E3u     /* {irq:u32, fifo:u32, dirty:u32} LE
+#define CMD_IMGFSK_RXDIAG    0x06E3u     /* {irq:u32, fifo:u32, dirty:u32,
+                                         *  reg3f:u16, reg58:u16, reg0c:u16} LE
                                          * -- retour terrain (2026-09-25) : la
                                          * LED verte de diagnostic (imgfsk_rx.c)
                                          * ne donnait jamais aucun signe
@@ -260,7 +261,15 @@
                                          * de notre propre TX) se declenche en
                                          * tache de fond bien plus souvent que
                                          * prevu, empechant toute ecoute
-                                         * soutenue. */
+                                         * soutenue -- ecarte par le terrain
+                                         * (dirty=0 constant, blocage quand
+                                         * meme). reg3f/reg58/reg0c ajoutes
+                                         * (2026-09-25) pour voir l'etat REEL
+                                         * des registres au moment du blocage,
+                                         * les deux hypotheses de rearmement
+                                         * (leger puis complet) n'ayant ni
+                                         * l'une ni l'autre resolu la
+                                         * degradation progressive observee. */
 
 /* ---- GPS (NMEA in on UART1, C-Board GPS header GP4/GP5) --------------- */
 #define CFG_GPS_ENABLE        1
