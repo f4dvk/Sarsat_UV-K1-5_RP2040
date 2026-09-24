@@ -25,8 +25,11 @@ extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
  * proved that deviating from the proven baseline (REG_58 first, then the
  * REG_59 scramble bit) is exactly where new bugs show up. */
 
-static bool s_armed;
-static bool s_fsk2400;
+static bool    s_armed;
+static bool    s_fsk2400;
+static uint8_t s_pkt[256];
+static int     s_widx;   /* words accumulated so far (0..128), see
+                          * IMGFSK_TimeSlice()'s comment */
 
 static void imgfsk_rx_arm(bool fsk2400)
 {
@@ -47,6 +50,7 @@ static void imgfsk_rx_arm(bool fsk2400)
                                    * preamble/sync -- see App/driver/bk4829.c */
     s_armed   = true;
     s_fsk2400 = fsk2400;
+    s_widx    = 0;
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);   /* see disarm's comment */
 }
 
@@ -87,6 +91,19 @@ static void imgfsk_rx_forward(const uint8_t *pkt)
     SendReply(UART_PORT_UART, b, sizeof(b));
 }
 
+/* ⚠️ (2026-09-25, retour terrain : LED armée, mais rien décodé) -- comparé
+ * au code réel d'AirCopy (App/app/app.c, CheckRadioInterrupts()) : la FIFO
+ * matérielle ne fait que 8 mots (REG_5E), pas assez pour 128 mots (256 o)
+ * d'un coup. AirCopy ne lit JAMAIS tout en une fois -- il draine exactement
+ * 4 mots à chaque interruption "FIFO presque pleine" (bit 12 de REG_02,
+ * REG_5E réglé pour ce seuil), en boucle, et ne traite le tampon qu'une
+ * fois les 36 mots (72 o, sa taille de paquet) accumulés. La version
+ * précédente lisait 128 mots dès la première interruption vue -- la
+ * quasi-totalité aurait été du bruit/valeurs périmées, pas de vraies
+ * données, même symptôme que la tentative AFSK abandonnée. Repris ici à
+ * l'identique, juste avec 128 mots (256 o, taille SSDV) au lieu de 36. */
+#define IMGFSK_IRQ_FIFO_ALMOST_FULL (1u << 12)   /* REG_02 bit 12, App/app/app.c */
+
 void IMGFSK_TimeSlice(void)
 {
     static bool was_tx;
@@ -99,19 +116,29 @@ void IMGFSK_TimeSlice(void)
      * as the earlier hardware-AFSK attempt: never reset every tick, it
      * never gives the correlator a chance to lock). */
     if (gCurrentFunction == FUNCTION_TRANSMIT) { was_tx = true; return; }
-    if (was_tx) { was_tx = false; imgfsk_rx_arm(s_fsk2400); return; }
+    if (was_tx) { was_tx = false; imgfsk_rx_arm(s_fsk2400); s_widx = 0; return; }
 
-    if ((BK4819_ReadRegister(BK4819_REG_0C) & 1u) == 0)
-        return;
+    while (BK4819_ReadRegister(BK4819_REG_0C) & 1u) {
+        BK4819_WriteRegister(BK4819_REG_02, 0);          /* latch, same order
+                                                          * as CheckRadioInterrupts() */
+        uint16_t irq = BK4819_ReadRegister(BK4819_REG_02);
 
-    uint8_t pkt[256];
-    for (int i = 0; i < 128; i++) {
-        uint16_t w = BK4819_ReadRegister(BK4819_REG_5F);
-        pkt[i * 2]     = (uint8_t)(w >> 8);
-        pkt[i * 2 + 1] = (uint8_t)(w & 0xFF);
+        if (!(irq & IMGFSK_IRQ_FIFO_ALMOST_FULL))
+            continue;
+
+        for (int i = 0; i < 4 && s_widx < 128; i++) {
+            uint16_t w = BK4819_ReadRegister(BK4819_REG_5F);
+            s_pkt[s_widx * 2]     = (uint8_t)(w >> 8);
+            s_pkt[s_widx * 2 + 1] = (uint8_t)(w & 0xFF);
+            s_widx++;
+        }
+
+        if (s_widx >= 128) {
+            imgfsk_rx_forward(s_pkt);
+            s_widx = 0;
+            BK4819_PrepareFSKReceive();   /* re-arm for the next packet, same
+                                          * as AIRCOPY_StorePacket() does
+                                          * unconditionally on completion */
+        }
     }
-    BK4819_WriteRegister(BK4819_REG_02, 0);   /* clear, as proven elsewhere */
-    BK4819_PrepareFSKReceive();               /* re-arm for the next packet */
-
-    imgfsk_rx_forward(pkt);
 }
