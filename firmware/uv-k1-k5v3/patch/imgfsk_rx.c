@@ -35,6 +35,21 @@ static void imgfsk_rx_arm(bool fsk2400)
 {
     RADIO_SetupRegisters(true);   /* normal RX for the currently tuned channel */
 
+    /* ⚠️ (2026-09-25, retour terrain : LED verte jamais bougée -- le moteur
+     * FSK ne réagissait à rien du tout) -- piste explorée puis corrigée sur
+     * objection de l'opérateur : REG_2B (dé-emphase/HPF300/LPF3K) est un
+     * filtre côté AUDIO (post-discriminateur, analogique), pas un réglage
+     * du moteur FSK matériel (FIFO + interruption "presque pleine", qui lit
+     * un signal numérique en interne) -- pas de raison solide qu'il
+     * l'affecte, contrairement au bi-phase-L de SARSAT qui, lui, passe
+     * réellement par ce chemin audio. Retiré. Gardé en revanche : le filtre
+     * IF WIDE (BK4819_SetFilterBandwidth), qui agit EN AMONT du
+     * discriminateur (domaine RF/IF, pas AF) et pourrait légitimement
+     * écrêter la déviation FSK si le canal était resté en filtre étroit --
+     * justification indépendante du débat REG_2B. */
+    RADIO_SetModulation(MODULATION_FM);
+    BK4819_SetFilterBandwidth(BK4819_FILTER_BW_WIDE, true);
+
     BK4819_WriteRegister(BK4819_REG_70, 0x00C3u);   /* AirCopy's own value    */
     BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* AirCopy's own value    */
     /* REG_58: RX mode = FSK1.2K/2.4K (bits<12:10>=000, AirCopy's own family),
