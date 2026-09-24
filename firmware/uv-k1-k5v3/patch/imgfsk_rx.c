@@ -77,7 +77,11 @@ static void imgfsk_rx_arm(bool fsk2400)
 
     gEeprom.BATTERY_SAVE      = 0;              /* boot.c                    */
     gEeprom.DUAL_WATCH        = DUAL_WATCH_OFF; /* boot.c                    */
-    gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_NARROW; /* boot.c -- NOT wide      */
+    /* ⚠️ (2026-09-24, sur demande : comparer au WIDE) -- boot.c (AirCopy)
+     * utilise NARROW, valeur normalement gardee ici -- bascule TEMPORAIRE en
+     * WIDE pour ce test comparatif (blocages/qualite), a repasser en NARROW
+     * si le WIDE n'apporte rien de mieux. */
+    gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_WIDE;
     gRxVfo->Modulation        = MODULATION_FM;    /* what a fresh VFO already
                                                    * defaults to in boot.c   */
 
