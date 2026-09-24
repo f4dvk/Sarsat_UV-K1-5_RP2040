@@ -43,15 +43,30 @@
  * packets; only BK4819_ResetFSK() itself (which the full teardown at the
  * end calls) is safe to touch REG_30, once un-keyed. */
 
-#define IMGFSK_FIFO_TIMEOUT_MS   400   /* one 256 B / 2400 baud burst is
-                                       * ~853 ms at worst (1200 baud); poll
-                                       * loop below re-checks every 5 ms so
-                                       * this is a per-iteration budget, not
-                                       * the whole burst -- see the loop */
+/* ⚠️ (2026-09-24, retour terrain : "le RX aircopy ne réagit pas" à notre
+ * émission -- confirme que le bug est côté TX, pas RX, en comparant à un
+ * récepteur AirCopy d'origine, déjà prouvé fonctionnel) -- trouvé en relisant
+ * BK4819_SendFSKData() ligne à ligne (App/driver/bk4829.c) : 256 o = 2048
+ * bits, soit ~1707 ms à 1200 bauds (le calcul précédent, ~853 ms, était
+ * faux -- confusion avec le débit 2400). L'ancien budget de 400 ms coupait
+ * donc CHAQUE paquet en plein milieu de son émission, bien avant la fin des
+ * bits -- le paquet suivant écrasait alors la FIFO en cours de trame. Porté
+ * à 2000 ms (marge au-delà des 1707 ms nécessaires au pire cas, 1200 bauds)
+ * ; poll loop re-checks every 5 ms so this is the whole burst's budget, not
+ * a per-iteration one. */
+#define IMGFSK_FIFO_TIMEOUT_MS   2000
 #define IMGFSK_FIFO_POLL_MS      5
 
 static void imgfsk_send_one_packet(const uint8_t *pkt)
 {
+    /* ⚠️ (2026-09-24, meme retour terrain) -- BK4819_SendFSKData() active
+     * explicitement BK4819_REG_3F_FSK_TX_FINISHED avant de declencher la
+     * rafale ; notre code ecrivait REG_3F=0 (TOUTES les interruptions
+     * masquees) une seule fois avant la boucle d'envoi, dans
+     * IMGFSK_SendTestImage() -- la source d'interruption qu'on poll juste en
+     * dessous (REG_0C bit 0) ne pouvait alors jamais se lever pour la bonne
+     * raison, seul le timeout (voir ci-dessus) faisait sortir la boucle. */
+    BK4819_WriteRegister(BK4819_REG_3F, BK4819_REG_3F_FSK_TX_FINISHED);
     BK4819_WriteRegister(BK4819_REG_59, 0x8068);   /* clear TX FIFO */
     BK4819_WriteRegister(BK4819_REG_59, 0x0068);   /* un-clear */
 
@@ -84,7 +99,6 @@ void IMGFSK_SendTestImage(bool fsk2400)
     BK4819_EnableTXLink();
     SYSTEM_DelayMs(50);
 
-    BK4819_WriteRegister(BK4819_REG_3F, 0);
     BK4819_WriteRegister(BK4819_REG_59, 0x0068);   /* preamble 7B, sync 4B,
                                                     * no scramble, idle --
                                                     * AirCopy's own value */

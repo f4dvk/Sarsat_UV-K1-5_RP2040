@@ -1,1 +1,1 @@
-753cc3e92ca8b6774448069a44420bd9dcd1b8f57ec718fbbc5ec0836fb01efa  uv-k1-k5v3-f4hwn-fusion-sarsat-5.9.0-435192e.bin
+2018e20136bf4078e04d8bd08dd65057d74eeec145adad067ba118a82d00a3b6  uv-k1-k5v3-f4hwn-fusion-sarsat-5.9.0-435192e.bin
