@@ -304,6 +304,35 @@ void IMGFSK_TimeSlice(void)
     imgfsk_ensure_irq_mask();   /* see its own comment -- cheap, must run
                                 * every tick, not just once at arm time */
 
+    /* ⚠️ (2026-09-24, retour terrain : blocage sporadique confirme, parfois
+     * en plein milieu d'un paquet -- REG_3F/REG_58 intacts, TX confirme
+     * valide au meme instant via un recepteur AirCopy d'origine) -- quatre
+     * sequences de rearmement post-paquet differentes n'ont pas empeche ce
+     * blocage de survenir (voir le commentaire retire plus bas dans cette
+     * fonction), ce qui ecarte la sequence de rearmement elle-meme comme
+     * cause. Plutot que de continuer a chercher LA bonne recette pour
+     * EMPECHER le corrélateur de se figer -- ce que la seule recuperation
+     * fiable connue a ce jour (menu, confirmee par le terrain) ne permet
+     * pas de comprendre depuis ce siege -- ce chien de garde detecte
+     * simplement l'ABSENCE d'activite (aucune interruption FSK vue depuis
+     * plusieurs secondes alors que l'ecoute est armee) et force un cycle
+     * complet desarmement+reamement, quelle que soit la cause reelle du
+     * blocage. Seuil choisi nettement au-dessus de l'espacement normal
+     * entre deux paquets (~1.7-2 s a 1200 bauds) pour ne jamais interrompre
+     * une reception qui progresse normalement, meme lentement. */
+    static uint32_t s_watchdog_last_irq;
+    static uint16_t s_watchdog_ticks;
+    if (s_irq_count != s_watchdog_last_irq) {
+        s_watchdog_last_irq = s_irq_count;
+        s_watchdog_ticks = 0;
+    } else if (++s_watchdog_ticks >= 400) {   /* ~4 s a ~10 ms/tick */
+        s_watchdog_ticks = 0;
+        imgfsk_rx_disarm();
+        SYSTEM_DelayMs(300);
+        imgfsk_rx_arm(s_fsk2400);
+        return;
+    }
+
     /* ~1 s at the ~10 ms tick rate this is called at */
     static uint16_t s_diag_ticks;
     if (++s_diag_ticks >= 100) {
@@ -359,52 +388,22 @@ void IMGFSK_TimeSlice(void)
 
         if (s_widx >= 128) {
             imgfsk_rx_forward(s_pkt);
-            /* ⚠️ (2026-09-24, retour terrain : "le rx se bloque" -- pas
-             * d'un coup, mais de façon degradee sur des envois successifs :
-             * 5 paquets captures, puis 4, puis plus aucune reaction, alors
-             * que dirty=0 tout du long (ecarte l'hypothese precedente).
-             * BK4819_PrepareFSKReceive() seul (utilise ici a chaque paquet,
-             * ~1.7 s d'intervalle) est ce qu'AirCopy utilise aussi entre ses
-             * paquets, mais un transfert AirCopy normal ne s'attarde jamais
-             * en reception continue pendant plusieurs sessions de test comme
-             * ici -- semble accumuler un etat degrade (AGC/DC/squelch non
-             * rafraichis, contrairement a un armement initial) jusqu'au
-             * blocage complet. Le seul imgfsk_rx_arm() (sans passer par
-             * imgfsk_rx_disarm() d'abord) a ensuite ete essaye ici a la
-             * place -- retour terrain : mieux (5, 9 puis 11 paquets selon
-             * les essais, au lieu de 4-5 systematiquement), mais toujours un
-             * blocage fini par arriver, avec REG_3F/REG_58 pourtant
-             * parfaitement stables (3002/00C1) meme pendant le blocage --
-             * pas de corruption de registre. Question posee : le
-             * desarmement/reamement MANUEL (menu) repare-t-il le blocage ?
-             * Reponse terrain : OUI, il faut repasser par le menu. Or
-             * imgfsk_rx_arm() seul, appele en boucle, fait EXACTEMENT ce que
-             * le menu ferait a l'armement -- la seule etape qui manquait est
-             * imgfsk_rx_disarm() D'ABORD : elle restaure la bande passante/
-             * modulation ORIGINALES du canal (pas NARROW/FM) le temps d'un
-             * RADIO_SetupRegisters(), avant qu'un nouvel armement ne repasse
-             * en NARROW/FM -- un aller-retour que la boucle precedente
-             * (toujours restee en NARROW/FM, jamais revenue en arriere)
-             * ne faisait jamais. Reproduit ici le cycle complet
-             * desarmement+reamement, pas le seul armement.
-             *
-             * ⚠️ (2026-09-24, retour terrain : "bloquage" encore une fois,
-             * meme avec ce cycle complet -- 5 paquets, comme avant) -- le
-             * TX reste pourtant valide au moment du blocage (verifie via un
-             * recepteur AirCopy d'origine, "le TX fonctionne"), ce qui
-             * ecarte une degradation cote emission. Le seul reste : la
-             * difference entre un desarmement/reamement MANUEL (confirme
-             * reparer le blocage) et ce cycle-ci, strictement identique au
-             * niveau des registres mais enchaine en quelques microsecondes
-             * -- alors qu'un appui manuel laisse naturellement plusieurs
-             * centaines de ms entre les deux (navigation menu). Si la puce a
-             * besoin d'un vrai temps de repos (PLL, decharge) entre
-             * desarmement et reamement, un cycle instantane ne compte pas
-             * comme un vrai desarmement pour elle. Delai ajoute pour tester
-             * cette hypothese avant d'en chercher une autre. */
-            imgfsk_rx_disarm();
-            SYSTEM_DelayMs(300);
-            imgfsk_rx_arm(s_fsk2400);
+            /* ⚠️ (2026-09-24) Quatre variantes de rearmement post-paquet ont
+             * ete essayees ici et retirees, aucune n'ayant resolu le
+             * blocage rapporte par le terrain (BK4819_PrepareFSKReceive()
+             * seul ; imgfsk_rx_arm() seul ; imgfsk_rx_disarm()+arm() ;
+             * meme avec 300 ms d'attente entre les deux) : le blocage
+             * survient de facon sporadique, parfois EN PLEIN MILIEU d'un
+             * paquet (pas seulement juste apres un rearmement), avec REG_3F/
+             * REG_58 pourtant intacts et le TX confirme valide au meme
+             * moment (recepteur AirCopy d'origine) -- ce n'est donc pas la
+             * sequence de rearmement post-paquet qui est en cause. Revenu
+             * ici a la version la plus simple, celle qu'utilise AirCopy lui
+             * meme entre ses propres paquets (App/app/aircopy.c,
+             * AIRCOPY_StorePacket()) ; la recuperation du blocage lui-meme
+             * est traitee separement par un chien de garde -- voir son
+             * commentaire plus bas. */
+            BK4819_PrepareFSKReceive();
         }
     }
 }
