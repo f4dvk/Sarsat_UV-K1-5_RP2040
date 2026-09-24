@@ -33,6 +33,7 @@ static int     s_widx;   /* words accumulated so far (0..128), see
                           * IMGFSK_TimeSlice()'s comment */
 static uint8_t s_saved_battery_save;
 static uint8_t s_saved_dual_watch;
+static uint8_t s_saved_bandwidth;
 
 /* ⚠️ (2026-09-25, retour terrain : AirCopy stock confirmé fonctionnel entre
  * les deux mêmes postes -- donc le moteur matériel marche vraiment, le bug
@@ -51,25 +52,37 @@ static void imgfsk_rx_arm(bool fsk2400)
 {
     s_saved_battery_save = gEeprom.BATTERY_SAVE;
     s_saved_dual_watch   = gEeprom.DUAL_WATCH;
-    gEeprom.BATTERY_SAVE = 0;
-    gEeprom.DUAL_WATCH   = DUAL_WATCH_OFF;
+    s_saved_bandwidth    = gRxVfo->CHANNEL_BANDWIDTH;
+    gEeprom.BATTERY_SAVE     = 0;
+    gEeprom.DUAL_WATCH       = DUAL_WATCH_OFF;
+    gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_NARROW;   /* see the NARROW comment
+                                                    * below -- set on the VFO
+                                                    * itself, not just the
+                                                    * register, matching
+                                                    * AirCopy's own sequence
+                                                    * (boot.c) exactly, in
+                                                    * case RADIO_SetupRegisters()
+                                                    * derives anything else
+                                                    * (squelch/AGC) from it */
 
     RADIO_SetupRegisters(true);   /* normal RX for the currently tuned channel */
 
-    /* ⚠️ (2026-09-25, retour terrain : LED verte jamais bougée -- le moteur
-     * FSK ne réagissait à rien du tout) -- piste explorée puis corrigée sur
-     * objection de l'opérateur : REG_2B (dé-emphase/HPF300/LPF3K) est un
-     * filtre côté AUDIO (post-discriminateur, analogique), pas un réglage
-     * du moteur FSK matériel (FIFO + interruption "presque pleine", qui lit
-     * un signal numérique en interne) -- pas de raison solide qu'il
-     * l'affecte, contrairement au bi-phase-L de SARSAT qui, lui, passe
-     * réellement par ce chemin audio. Retiré. Gardé en revanche : le filtre
-     * IF WIDE (BK4819_SetFilterBandwidth), qui agit EN AMONT du
-     * discriminateur (domaine RF/IF, pas AF) et pourrait légitimement
-     * écrêter la déviation FSK si le canal était resté en filtre étroit --
-     * justification indépendante du débat REG_2B. */
+    /* ⚠️ (2026-09-25, retour terrain : LED rouge fixe, aucune réaction --
+     * pas le moindre flash même pendant une vraie transmission de l'autre
+     * poste) -- REG_2B écarté (filtre audio, sans rapport avec le moteur
+     * FSK numérique, objection justifiée de l'opérateur). Deuxième piste,
+     * trouvée en relisant la séquence d'entrée COMPLÈTE d'AirCopy
+     * (App/helper/boot.c, BOOT_MODE_AIRCOPY) plus attentivement : elle
+     * force `gRxVfo->CHANNEL_BANDWIDTH = BANDWIDTH_NARROW` -- PAS WIDE. Le
+     * WIDE ci-dessous avait été copié par analogie avec l'écran SARSAT (un
+     * signal différent, bi-phase-L analogique), sans preuve que ça
+     * s'applique au moteur FSK numérique -- et on a maintenant la preuve du
+     * contraire : la seule configuration confirmée fonctionnelle (AirCopy
+     * stock, entre ces deux mêmes postes) utilise NARROW. Un mauvais
+     * réglage de filtre IF expliquerait un silence total et immédiat,
+     * exactement le symptôme observé. */
     RADIO_SetModulation(MODULATION_FM);
-    BK4819_SetFilterBandwidth(BK4819_FILTER_BW_WIDE, true);
+    BK4819_SetFilterBandwidth(BK4819_FILTER_BW_NARROW, true);
 
     BK4819_WriteRegister(BK4819_REG_70, 0x00C3u);   /* AirCopy's own value    */
     BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* AirCopy's own value    */
@@ -93,8 +106,9 @@ static void imgfsk_rx_arm(bool fsk2400)
 static void imgfsk_rx_disarm(void)
 {
     s_armed = false;
-    gEeprom.BATTERY_SAVE = s_saved_battery_save;
-    gEeprom.DUAL_WATCH   = s_saved_dual_watch;
+    gEeprom.BATTERY_SAVE      = s_saved_battery_save;
+    gEeprom.DUAL_WATCH        = s_saved_dual_watch;
+    gRxVfo->CHANNEL_BANDWIDTH = s_saved_bandwidth;
     BK4819_ResetFSK();
     RADIO_SetupRegisters(true);
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
