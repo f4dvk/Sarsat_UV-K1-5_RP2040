@@ -386,8 +386,24 @@ void IMGFSK_TimeSlice(void)
              * en NARROW/FM -- un aller-retour que la boucle precedente
              * (toujours restee en NARROW/FM, jamais revenue en arriere)
              * ne faisait jamais. Reproduit ici le cycle complet
-             * desarmement+reamement, pas le seul armement. */
+             * desarmement+reamement, pas le seul armement.
+             *
+             * ⚠️ (2026-09-24, retour terrain : "bloquage" encore une fois,
+             * meme avec ce cycle complet -- 5 paquets, comme avant) -- le
+             * TX reste pourtant valide au moment du blocage (verifie via un
+             * recepteur AirCopy d'origine, "le TX fonctionne"), ce qui
+             * ecarte une degradation cote emission. Le seul reste : la
+             * difference entre un desarmement/reamement MANUEL (confirme
+             * reparer le blocage) et ce cycle-ci, strictement identique au
+             * niveau des registres mais enchaine en quelques microsecondes
+             * -- alors qu'un appui manuel laisse naturellement plusieurs
+             * centaines de ms entre les deux (navigation menu). Si la puce a
+             * besoin d'un vrai temps de repos (PLL, decharge) entre
+             * desarmement et reamement, un cycle instantane ne compte pas
+             * comme un vrai desarmement pour elle. Delai ajoute pour tester
+             * cette hypothese avant d'en chercher une autre. */
             imgfsk_rx_disarm();
+            SYSTEM_DelayMs(300);
             imgfsk_rx_arm(s_fsk2400);
         }
     }
