@@ -114,8 +114,19 @@ static void imgfsk_rx_arm(bool fsk2400)
      * 0x00E0 (Tone2 enable, gain 48). Trouve en corrigeant le meme bug cote
      * TX (imgfsk_tx.c), ou son absence totale expliquait "ca ne reagit pas
      * encore" meme apres la correction REG_3F/timeout. */
+    /* ⚠️ (2026-09-24, retour terrain : "le 2400 ne fonctionne pas ... je peux
+     * meme regler le tx 1200, rx 2400 et ca decode") -- REG_72 etait fixe a
+     * 0x3065 quel que soit fsk2400. D'apres la note d'application BK4819(V3)
+     * (deja telechargee cette session) : REG_72 = "TONE2/FSK frequency
+     * control word" = freq(Hz) * 10.32444 (XTAL 26 MHz) -- c'est litteralement
+     * l'horloge du debit, pas juste "la valeur AirCopy" comme suppose a tort
+     * jusqu'ici. 0x3065 = 12389 = 1200 Hz pile -- jamais change, le debit
+     * reel restait donc TOUJOURS 1200 en interne, quel que soit le mode
+     * choisi au menu, expliquant a la fois la duree TX identique et un RX
+     * "2400" qui decode un TX "1200" (les deux tournaient reellement a 1200).
+     * Pour 2400 Hz : 2400*10.32444 = 24778.656 -> arrondi 24779 = 0x60CB. */
     BK4819_WriteRegister(BK4819_REG_70, 0x00E0u);   /* AirCopy's own value    */
-    BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* AirCopy's own value    */
+    BK4819_WriteRegister(BK4819_REG_72, fsk2400 ? 0x60CBu : 0x3065u);
     /* REG_58: RX mode = FSK1.2K/2.4K (bits<12:10>=000, AirCopy's own family),
      * RX gain = 3 (bits<9:8>, AirCopy's own value), bandwidth bits<3:1>:
      * 000=1.2K (AirCopy's own 0x00C1 unchanged) / 100=2.4K, enable bit0=1. */

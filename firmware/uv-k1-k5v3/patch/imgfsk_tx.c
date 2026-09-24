@@ -115,8 +115,19 @@ void IMGFSK_SendTestImage(bool fsk2400)
      * la deviation/le debit reellement emis est incorrect -- un signal
      * invalide pour N'IMPORTE quel correlateur FSK, expliquant pourquoi meme
      * l'AirCopy d'en face ne reagit a rien, independamment du cote RX. */
+    /* ⚠️ (2026-09-24, retour terrain : "le 2400 ne fonctionne pas ... la
+     * duree de transmission est identique au 1200") -- REG_72 etait fixe a
+     * 0x3065 quel que soit fsk2400. D'apres la note d'application BK4819(V3) :
+     * REG_72 = "TONE2/FSK frequency control word" = freq(Hz) * 10.32444
+     * (XTAL 26 MHz) -- c'est litteralement l'horloge du debit, pas juste
+     * "la valeur AirCopy" comme suppose a tort jusqu'ici (voir aussi
+     * imgfsk_rx.c, meme bug, meme retour terrain). 0x3065 = 12389 = 1200 Hz
+     * pile -- jamais change, le debit reel restait donc TOUJOURS 1200 en
+     * interne quel que soit le mode choisi, expliquant la duree TX
+     * identique. Pour 2400 Hz : 2400*10.32444 = 24778.656 -> arrondi 24779
+     * = 0x60CB. */
     BK4819_WriteRegister(BK4819_REG_70, 0x00E0u);   /* Tone2 enable, gain 48 */
-    BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* Tone2 baudrate 1200  */
+    BK4819_WriteRegister(BK4819_REG_72, fsk2400 ? 0x60CBu : 0x3065u);
 
     /* REG_58: FSK1.2K/2.4K TX mode (bits<15:13>=000), bandwidth
      * (bits<3:1>: 000=1.2K, 100=2.4K), FSK enable (bit0=1). */
