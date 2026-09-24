@@ -33,8 +33,15 @@ static uint32_t s_dirty_count;   /* diag: how often that hook actually fires,
                                   * see imgfsk_rx_send_diag()'s comment */
 static bool    s_fsk2400;
 static uint8_t s_pkt[256];
-static int     s_widx;   /* words accumulated so far (0..128), see
-                          * IMGFSK_TimeSlice()'s comment */
+/* ⚠️ (2026-09-24, comprendre pourquoi AirCopy ne plante jamais cote RX) --
+ * voir imgfsk_tx.c : le paquet SSDV de 256 o est maintenant emis comme 4
+ * sous-rafales independamment preambulees/synchronisees de 64 o chacune
+ * (au lieu d'une seule rafale continue de 1.7 s a 1200 bauds, bien au-dela
+ * de ce qu'AirCopy exerce jamais -- ~480 ms max, 72 o). s_widx compte les
+ * mots DANS la sous-rafale en cours (0..32) ; s_subchunk_idx indique
+ * laquelle des 4 sous-rafales est en train de se remplir dans s_pkt. */
+static int     s_widx;
+static int     s_subchunk_idx;
 static uint8_t          s_saved_battery_save;
 static uint8_t          s_saved_dual_watch;
 static uint8_t          s_saved_bandwidth;
@@ -136,19 +143,18 @@ static void imgfsk_rx_arm(bool fsk2400)
      * 000=1.2K (AirCopy's own 0x00C1 unchanged) / 100=2.4K, enable bit0=1. */
     BK4819_WriteRegister(BK4819_REG_58, fsk2400 ? 0x00C9u : 0x00C1u);
     BK4819_WriteRegister(BK4819_REG_5C, 0x5665u);   /* AirCopy's own value    */
-    /* Diagnostic temporaire (repli sur la longueur AirCopy 72 o) concluant :
-     * irq=0/fifo=0 même ainsi -- la longueur n'était pas la cause. Retour à
-     * la vraie taille SSDV (256 o = 255<<8, voir imgfsk_tx.c) maintenant que
-     * la vraie cause probable (REG_3F réécrit par le code de fond, voir
-     * imgfsk_ensure_irq_mask()) est traitée séparément. */
-    BK4819_WriteRegister(BK4819_REG_5D, 0xFF00u);
+    /* REG_5D: longueur = 64 o PAR SOUS-RAFALE (valeur = longueur-1 = 63 =
+     * 0x3F), pas 256 o -- voir s_subchunk_idx et imgfsk_tx.c pour le
+     * decoupage en 4 sous-rafales independamment synchronisees. */
+    BK4819_WriteRegister(BK4819_REG_5D, 0x3F00u);
     BK4819_WriteRegister(0x5E, 0x3204u);            /* AirCopy's own value    */
 
     BK4819_PrepareFSKReceive();   /* proven: ResetFSK + RX_TurnOn + IRQ mask +
                                    * preamble/sync -- see App/driver/bk4829.c */
-    s_armed   = true;
-    s_fsk2400 = fsk2400;
-    s_widx    = 0;
+    s_armed        = true;
+    s_fsk2400      = fsk2400;
+    s_widx         = 0;
+    s_subchunk_idx = 0;
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);   /* see disarm's comment */
 }
 
@@ -363,19 +369,28 @@ void IMGFSK_TimeSlice(void)
      * fifo=190" reste fige durablement SANS que le chien de garde intervienne
      * (action coupee), preuve que le blocage est reel et independant de lui
      * -- il corrigeait un vrai gel du correlateur, pas un faux reset qu'il
-     * aurait lui-meme provoque. Reactive. */
+     * aurait lui-meme provoque.
+     *
+     * ⚠️ (2026-09-24, sur demande explicite : "Ne pas reactiver le chien de
+     * garde. Il faut comprendre ce qu'il se passe par rapport a aircopy qui
+     * ne plante pas") -- reste desactive. Piste suivie a la place : AirCopy
+     * ne reste JAMAIS verrouille en continu plus de ~480 ms (72 o = 36 mots
+     * a 1200 bauds) avant un reamement complet (nouveau preambule/sync par
+     * paquet), alors que notre paquet SSDV de 256 o forcait un verrouillage
+     * continu de ~1.7 s -- pres de 4x plus longtemps -- avant chaque
+     * reamement. Voir imgfsk_tx.c et le decoupage en sous-rafales de 64 o
+     * ci-dessous : la duree de verrouillage continu redescend a ~427 ms,
+     * sous l'enveloppe deja prouvee robuste par AirCopy lui-meme. */
     static uint32_t s_watchdog_last_irq;
     static uint16_t s_watchdog_ticks;
     if (s_irq_count != s_watchdog_last_irq) {
         s_watchdog_last_irq = s_irq_count;
         s_watchdog_ticks = 0;
-    } else if (++s_watchdog_ticks >= 250) {   /* ~2.5 s a ~10 ms/tick */
-        s_watchdog_ticks = 0;
-        imgfsk_rx_disarm();
-        SYSTEM_DelayMs(300);
-        imgfsk_rx_arm(s_fsk2400);
-        return;
+    } else {
+        ++s_watchdog_ticks;
     }
+    (void)s_watchdog_ticks;   /* suivi garde pour diagnostic futur, action
+                              * desactivee sur demande -- voir ci-dessus */
 
     /* ~1 s at the ~10 ms tick rate this is called at */
     static uint16_t s_diag_ticks;
@@ -401,21 +416,19 @@ void IMGFSK_TimeSlice(void)
                                                           * as CheckRadioInterrupts() */
         uint16_t irq = BK4819_ReadRegister(BK4819_REG_02);
 
-        /* ⚠️ (2026-09-24, retour terrain : premier paquet reçu -- irq/fifo
-         * enfin non nuls -- mais son contenu est la concatenation exacte des
-         * 32 premiers octets de DEUX paquets de test DIFFERENTS, verifie
-         * octet par octet contre imgfsk_test_data.h) -- chacun des 6 paquets
-         * de imgfsk_tx.c est envoye comme sa PROPRE rafale preambulee/
-         * synchronisee independamment. Si l'ecoute demarre en cours de
-         * sequence (l'operateur arme la RX apres que la TX ait deja
-         * commence), le correlateur materiel peut tres bien se reverrouiller
-         * (FSK_RX_SYNC) sur le PREAMBULE D'UN PAQUET SUIVANT alors que des
-         * octets du paquet precedent, incomplets, etaient deja accumules
-         * dans s_pkt -- sans ce traitement, ils etaient simplement concatenes
-         * a la suite, produisant un "paquet" corrompu melant deux trames.
-         * Chaque reverrouillage (bit 1, deja active par
-         * imgfsk_ensure_irq_mask()) doit donc jeter toute capture partielle
-         * en cours et repartir de zero. */
+        /* ⚠️ (2026-09-24) Historique : sans ce traitement, un reverrouillage
+         * (FSK_RX_SYNC) en cours de capture concatenait les octets d'un
+         * paquet precedent incomplet avec ceux du suivant, verifie octet par
+         * octet contre imgfsk_test_data.h. Depuis le decoupage en 4
+         * sous-rafales independamment synchronisees (voir imgfsk_tx.c et le
+         * commentaire de s_widx/s_subchunk_idx plus haut), UN reverrouillage
+         * par sous-rafale est desormais NORMAL et ATTENDU (chacune a son
+         * propre preambule/sync) -- il signale juste le debut d'une NOUVELLE
+         * sous-rafale, jamais un vrai paquet different concatene au mauvais
+         * endroit (ca, c'est traite par les 4 sous-rafales elles-memes,
+         * chacune isolee dans son propre segment de 64 o de s_pkt). Un
+         * reverrouillage intempestif (bruit) ne coute plus qu'au pire les 64
+         * o de LA sous-rafale en cours, jamais les 256 o entiers comme avant. */
         if (irq & IMGFSK_IRQ_RX_SYNC)
             s_widx = 0;
 
@@ -423,31 +436,29 @@ void IMGFSK_TimeSlice(void)
             continue;
         s_fifo_count++;
 
-        for (int i = 0; i < 4 && s_widx < 128; i++) {
+        for (int i = 0; i < 4 && s_widx < 32; i++) {
             uint16_t w = BK4819_ReadRegister(BK4819_REG_5F);
-            s_pkt[s_widx * 2]     = (uint8_t)(w >> 8);
-            s_pkt[s_widx * 2 + 1] = (uint8_t)(w & 0xFF);
+            int abs_word = s_subchunk_idx * 32 + s_widx;
+            s_pkt[abs_word * 2]     = (uint8_t)(w >> 8);
+            s_pkt[abs_word * 2 + 1] = (uint8_t)(w & 0xFF);
             s_widx++;
         }
 
-        if (s_widx >= 128) {
-            imgfsk_rx_forward(s_pkt);
-            /* ⚠️ (2026-09-24) Quatre variantes de rearmement post-paquet ont
-             * ete essayees ici et retirees, aucune n'ayant resolu le
-             * blocage rapporte par le terrain (BK4819_PrepareFSKReceive()
-             * seul ; imgfsk_rx_arm() seul ; imgfsk_rx_disarm()+arm() ;
-             * meme avec 300 ms d'attente entre les deux) : le blocage
-             * survient de facon sporadique, parfois EN PLEIN MILIEU d'un
-             * paquet (pas seulement juste apres un rearmement), avec REG_3F/
-             * REG_58 pourtant intacts et le TX confirme valide au meme
-             * moment (recepteur AirCopy d'origine) -- ce n'est donc pas la
-             * sequence de rearmement post-paquet qui est en cause. Revenu
-             * ici a la version la plus simple, celle qu'utilise AirCopy lui
-             * meme entre ses propres paquets (App/app/aircopy.c,
-             * AIRCOPY_StorePacket()) ; la recuperation du blocage lui-meme
-             * est traitee separement par un chien de garde -- voir son
-             * commentaire plus bas. */
+        if (s_widx >= 32) {
+            s_widx = 0;
+            s_subchunk_idx++;
+            /* Reamement APRES CHAQUE sous-rafale (64 o, ~427 ms de
+             * verrouillage continu a 1200 bauds) -- voir le commentaire de
+             * imgfsk_tx.c : c'est exactement l'enveloppe qu'AirCopy exerce
+             * lui-meme entre ses propres paquets (72 o, ~480 ms), jamais
+             * plus. AIRCOPY_StorePacket() fait ce meme reamement
+             * inconditionnellement apres chaque paquet, reussite ou echec. */
             BK4819_PrepareFSKReceive();
+
+            if (s_subchunk_idx >= 4) {
+                s_subchunk_idx = 0;
+                imgfsk_rx_forward(s_pkt);
+            }
         }
     }
 }
