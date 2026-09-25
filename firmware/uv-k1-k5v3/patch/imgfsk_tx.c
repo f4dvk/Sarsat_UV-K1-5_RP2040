@@ -87,9 +87,20 @@
  * chaque paquet.
  *
  * ⚠️ (2026-09-24, retour terrain : "on dirait pire" a 3000 ms) -- hypothese
- * du temps de repos proportionnel ECARTEE. Retour a un rythme rapide pour
- * l'essai suivant (isoler la communication RP2040 -- voir imgfsk_rx.c). */
-#define IMGFSK_INTERPACKET_GAP_MS 300
+ * du temps de repos proportionnel ECARTEE (le blocage etait cote
+ * correlateur materiel RX, jamais elucide -- voir imgfsk_rx.c/decoder_config.h,
+ * "branch SSTV_SSDV" v2 : RX a depuis abandonne ce correlateur au profit
+ * d'une demodulation logicielle continue cote RP2040, comme APRS/Sonde).
+ *
+ * ⚠️ (2026-09-25) Tout ce raisonnement sur l'espacement AirCopy (300 ms) et
+ * ses essais (300/3000 ms) visaient uniquement a menager le correlateur
+ * materiel du COTE RECEPTEUR -- une contrainte qui n'existe plus du tout
+ * depuis que RX est passe en demodulation logicielle continue (PLL de bits
+ * type Sonde, jamais reamorce paquet par paquet, aucun etat materiel a
+ * menager entre deux rafales). Revient donc a l'espacement minimal
+ * d'origine, dicte seulement par le temps necessaire cote EMISSION pour que
+ * REG_59 repasse proprement a l'etat idle avant la rafale suivante. */
+#define IMGFSK_INTERPACKET_GAP_MS 20
 
 static void imgfsk_send_one_packet(const uint8_t *pkt)
 {
