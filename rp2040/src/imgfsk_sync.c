@@ -3,10 +3,19 @@
 
 #include <string.h>
 
-#define IMGFSK_SYNC_PATTERN 0x85CFAB45UL   /* BK4819(V3) App Note default
-                                            * FSK sync bytes 0..3, MSB-first
-                                            * per byte -- see the header's
-                                            * caveat about bit order */
+/* ⚠️ (2026-09-25, retour terrain : capture de bits bruts, "aucun decodage")
+ * -- CORRIGE : 0x85CFAB45 (valeur par defaut documentee dans la note
+ * d'application BK4819(V3)) ne matchait jamais, meme avec une tolerance
+ * elargie et sous toutes les hypotheses d'ordre de bits testees (inversion,
+ * octets inverses, NRZI). Deux captures independantes des bits demodules
+ * juste apres le preambule (lui, correctement reconnu : ~59 bits alternes,
+ * tres proche des 56 attendus) se sont revelees identiques a 61 bits pres
+ * sur 64 -- bien trop reproductible pour etre du bruit, donc un vrai mot de
+ * synchro, juste PAS celui documente. imgfsk_tx.c ne configure jamais
+ * REG_5A/5B explicitement (il compte sur la valeur par defaut du silicium a
+ * la mise sous tension) -- cette valeur reelle differe apparemment de celle
+ * documentee, sur ce chip precis. Remplace par la valeur observee. */
+#define IMGFSK_SYNC_PATTERN 0x8CDC72E8UL
 #define IMGFSK_SYNC_MAX_ERR 2               /* out of 32 bits (~6.25%),
                                              * between RS41's (2/64) and
                                              * M10's (2/28) tolerance */

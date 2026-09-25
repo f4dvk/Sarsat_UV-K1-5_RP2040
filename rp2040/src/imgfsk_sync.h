@@ -33,14 +33,16 @@
  * way sonde_sync.c's RS41/M10 hunt ignores whatever precedes their own sync
  * words.
  *
- * ⚠️ Unverified assumption, first thing to check if sync never locks on a
- * real bench capture: the BK4819(V3) Application Note documents the SYNC
- * BYTE *order* (byte 0 first, then 1, 2, 3) but not the bit order *within*
- * each byte. This hunts for 0x85CFAB45 assuming MSB-first-per-byte (the
- * same convention already proven for RS41's sync word in sonde_sync.c) --
- * if that turns out wrong, the fix is a one-line bit-reversal of the
- * pattern, same as M10's header needed the *opposite* (LSB-first) choice.
- */
+ * ⚠️ (2026-09-25) RESOLVED on a real bench capture (see imgfsk_sync.c's own
+ * comment): the assumed sync word (0x85CFAB45, the BK4819(V3) Application
+ * Note's documented default) never matched, under any bit-order/inversion/
+ * NRZI hypothesis. Two independent raw-bit captures right after the
+ * preamble (itself correctly recognised) agreed on 61/64 bits -- far too
+ * reproducible to be noise, so a real sync word, just not the documented
+ * one: imgfsk_tx.c never sets REG_5A/5B explicitly (relies on the chip's
+ * own power-on default), and that real default differs from the datasheet
+ * on this particular chip. imgfsk_sync.c now hunts for the OBSERVED value
+ * (0x8CDC72E8) instead. */
 #ifndef IMGFSK_SYNC_H
 #define IMGFSK_SYNC_H
 
