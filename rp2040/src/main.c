@@ -127,6 +127,21 @@ static bool          g_imgfsk_requested;    /* set by CMD_SARSAT_HELLO screen_st
                                              * own screen-open flag */
 static bool          g_imgfsk_baud2400;
 
+/* ⚠️ (2026-09-25, retour terrain : "aucun decodage" meme avec un vrai envoi
+ * TX pendant la capture -- samples/bits montent, env reagit, mais pkts=0)
+ * -- capture des bits DEMODULES bruts (pas les echantillons ADC -- 8x plus
+ * compact, un paquet complet de 256 o = 2048 bits tient en 256 o de RAM au
+ * lieu de ~4 Ko en ADC brut) pour verifier hors-ligne l'hypothese la plus
+ * probable : l'ordre des bits du mot de synchro (imgfsk_sync.h le
+ * signalait deja comme jamais verifie sur l'air). Meme principe que la
+ * capture 'y' de Sonde (sonde_dump), arme par une touche pendant que le
+ * mode IMGFSK tourne -- voir son utilisation dans la boucle principale. */
+#define IMGFSK_DUMP_BITS  3072                   /* > 1 paquet (2048) + marge */
+#define IMGFSK_DUMP_BYTES (IMGFSK_DUMP_BITS / 8)
+static uint8_t  g_imgfsk_dump[IMGFSK_DUMP_BYTES];
+static uint32_t g_imgfsk_dump_n;                 /* bits captures jusqu'ici */
+static enum { IDUMP_IDLE, IDUMP_RECORDING, IDUMP_READY } g_imgfsk_dump_st;
+
 /* M10/M20 full GPS decode: a SEPARATE 9600 baud chain on the same raw ADC
  * stream (confirmed chip rate, see sonde_m10.h -- different from the 4800
  * baud chain above, which stays wired to the older header-only detector
@@ -962,6 +977,15 @@ static void imgfsk_service(void)
         uint8_t bit;
         if (sonde_demod_sample(&g_imgfsk_demod, sample, &bit)) {
             g_imgfsk_bits++;
+
+            if (g_imgfsk_dump_st == IDUMP_RECORDING) {
+                uint32_t byte_i = g_imgfsk_dump_n >> 3;
+                uint32_t bit_i  = 7 - (g_imgfsk_dump_n & 7u);
+                if (bit) g_imgfsk_dump[byte_i] |= (uint8_t)(1u << bit_i);
+                if (++g_imgfsk_dump_n >= IMGFSK_DUMP_BITS)
+                    g_imgfsk_dump_st = IDUMP_READY;
+            }
+
             if (imgfsk_sync_feed(&g_imgfsk_sync, bit)) {
                 g_imgfsk_pkts++;
                 LOG("[imgfsk] pkt n=%lu ", (unsigned long)g_imgfsk_pkts);
@@ -971,6 +995,25 @@ static void imgfsk_service(void)
             }
         }
     }
+}
+
+/* Dump the armed IMGFSK bit capture as [imgfsk.raw] hex, one bit-packed byte
+ * per printed byte (NOT the demodulated SSDV data -- the raw sliced bit
+ * stream, preamble included, for offline bit-order/alignment analysis). */
+static void imgfsk_dump_flush(void)
+{
+    if (g_imgfsk_dump_st != IDUMP_READY)
+        return;
+    LOG("[imgfsk.raw] begin bits=%lu\n", (unsigned long)g_imgfsk_dump_n);
+    for (uint32_t i = 0; i < IMGFSK_DUMP_BYTES; i += 32) {
+        char ln[32 * 2 + 1];
+        int k = 0;
+        for (uint32_t j = i; j < i + 32 && j < IMGFSK_DUMP_BYTES; j++)
+            k += snprintf(ln + k, sizeof ln - k, "%02X", g_imgfsk_dump[j]);
+        LOG("[imgfsk.raw] %s\n", ln);
+    }
+    LOG("[imgfsk.raw] end\n");
+    g_imgfsk_dump_st = IDUMP_IDLE;
 }
 
 static void radio_send_sonde_text(uint8_t line, uint8_t invert, const char *s)
@@ -1512,6 +1555,27 @@ int main(void)
                     (unsigned long)g_imgfsk_pkts, (long)g_imgfsk_demod.env);
                 next_lvl = make_timeout_time_ms(CFG_LEVEL_LOG_MS);
             }
+            {
+                int c = getchar_timeout_us(0);
+                if (c == 'i' || c == 'I') {
+                    if (g_imgfsk_dump_st != IDUMP_IDLE) {
+                        LOG("[imgfsk.raw] busy (still recording/flushing) -- "
+                            "wait for [imgfsk.raw] end first\n");
+                    } else {
+                        memset(g_imgfsk_dump, 0, sizeof g_imgfsk_dump);
+                        g_imgfsk_dump_n  = 0;
+                        g_imgfsk_dump_st = IDUMP_RECORDING;
+                        LOG("[imgfsk] recording the next %lu demodulated bits "
+                            "now -- trigger a TX burst on the other radio\n",
+                            (unsigned long)IMGFSK_DUMP_BITS);
+                    }
+                } else if (c == 'h' || c == 'H' || c == '?') {
+                    LOG("[imgfsk] 'i' = capture the next %lu demodulated bits "
+                        "([imgfsk.raw] hex, bit-order/alignment analysis "
+                        "off-line)\n", (unsigned long)IMGFSK_DUMP_BITS);
+                }
+            }
+            imgfsk_dump_flush();
             sleep_us(300);
             continue;
         }
