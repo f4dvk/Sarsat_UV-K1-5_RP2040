@@ -3,19 +3,19 @@
 
 #include <string.h>
 
-/* ⚠️ (2026-09-25, retour terrain : capture de bits bruts, "aucun decodage")
- * -- CORRIGE : 0x85CFAB45 (valeur par defaut documentee dans la note
- * d'application BK4819(V3)) ne matchait jamais, meme avec une tolerance
- * elargie et sous toutes les hypotheses d'ordre de bits testees (inversion,
- * octets inverses, NRZI). Deux captures independantes des bits demodules
- * juste apres le preambule (lui, correctement reconnu : ~59 bits alternes,
- * tres proche des 56 attendus) se sont revelees identiques a 61 bits pres
- * sur 64 -- bien trop reproductible pour etre du bruit, donc un vrai mot de
- * synchro, juste PAS celui documente. imgfsk_tx.c ne configure jamais
- * REG_5A/5B explicitement (il compte sur la valeur par defaut du silicium a
- * la mise sous tension) -- cette valeur reelle differe apparemment de celle
- * documentee, sur ce chip precis. Remplace par la valeur observee. */
-#define IMGFSK_SYNC_PATTERN 0x8CDC72E8UL
+/* ⚠️ (2026-09-25) Historique : 0x8CDC72E8 (une valeur trouvee empiriquement
+ * par capture reelle) a brievement remplace la valeur documentee ici, le
+ * temps de comprendre POURQUOI le mot de synchro documente ne matchait
+ * jamais. Cause reelle trouvee depuis (voir imgfsk_tx.c) : le bit "Enable
+ * FSK Scramble" (REG_59<13>) etait actif a l'emission, et la puce ne
+ * desembrouille en materiel QUE quand le corelateur materiel BK4819 est
+ * aussi utilise en reception (BK4819_PrepareFSKReceive() active le meme
+ * bit) -- notre reception etant desormais logicielle (audio brut), ce
+ * desembrouillage n'avait plus lieu, et 0x8CDC72E8 n'etait donc que la
+ * version EMBROUILLEE du vrai mot de synchro. Le scramble desactive a
+ * l'emission, la valeur documentee redevient valide -- revient donc a
+ * 0x85CFAB45 (BK4819(V3) Application Note, Sync Byte 0..3, MSB-first). */
+#define IMGFSK_SYNC_PATTERN 0x85CFAB45UL
 #define IMGFSK_SYNC_MAX_ERR 2               /* out of 32 bits (~6.25%),
                                              * between RS41's (2/64) and
                                              * M10's (2/28) tolerance */

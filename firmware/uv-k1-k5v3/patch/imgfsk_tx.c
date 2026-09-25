@@ -121,7 +121,24 @@ static void imgfsk_send_one_packet(const uint8_t *pkt)
     }
 
     SYSTEM_DelayMs(20);
-    BK4819_WriteRegister(BK4819_REG_59, 0x2868);   /* enable FSK TX -> go */
+    /* ⚠️ (2026-09-25, retour terrain : RX logiciel decodait un flux de bits
+     * reproductible mais qui ne ressemblait jamais a du SSDV valide, meme
+     * apres avoir trouve le bon mot de synchro par capture reelle) --
+     * BK4819_SendFSKData()'s own value here is 0x2868, copie fidelement --
+     * mais bit 13 de REG_59 = "Enable FSK Scramble" (note d'application),
+     * ACTIF dans cette valeur (0x2868 & 0x2000 != 0). BK4819_PrepareFSKReceive()
+     * active le MEME bit cote RX (0x3068, meme bit 13) -- la puce
+     * desembrouille automatiquement EN MATERIEL quand les deux bouts
+     * utilisent son propre correlateur (cas d'AirCopy, et notre toute
+     * premiere conception RX). Notre RX etant desormais logiciel (audio brut
+     * -> RP2040, plus de correlateur materiel cote reception), ce
+     * desembrouillage automatique n'a plus lieu -- le flux recu restait
+     * scramble, jamais valide tel quel. Plutot que de reimplementer le LFSR
+     * de desembrouillage cote RP2040 (algorithme non documente dans la note
+     * d'application), plus simple de ne jamais embrouiller a la source :
+     * bit 13 mis a 0 (0x0868 au lieu de 0x2868), seul bit different. */
+    BK4819_WriteRegister(BK4819_REG_59, 0x0868);   /* enable FSK TX -> go,
+                                                    * scramble OFF (bit13=0) */
 
     for (int waited = 0; waited < IMGFSK_FIFO_TIMEOUT_MS; waited += IMGFSK_FIFO_POLL_MS) {
         SYSTEM_DelayMs(IMGFSK_FIFO_POLL_MS);

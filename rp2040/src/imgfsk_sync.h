@@ -33,16 +33,21 @@
  * way sonde_sync.c's RS41/M10 hunt ignores whatever precedes their own sync
  * words.
  *
- * ⚠️ (2026-09-25) RESOLVED on a real bench capture (see imgfsk_sync.c's own
- * comment): the assumed sync word (0x85CFAB45, the BK4819(V3) Application
- * Note's documented default) never matched, under any bit-order/inversion/
- * NRZI hypothesis. Two independent raw-bit captures right after the
- * preamble (itself correctly recognised) agreed on 61/64 bits -- far too
- * reproducible to be noise, so a real sync word, just not the documented
- * one: imgfsk_tx.c never sets REG_5A/5B explicitly (relies on the chip's
- * own power-on default), and that real default differs from the datasheet
- * on this particular chip. imgfsk_sync.c now hunts for the OBSERVED value
- * (0x8CDC72E8) instead. */
+ * ⚠️ (2026-09-25) RESOLVED. The documented sync word (0x85CFAB45) never
+ * matched a real capture at first, under any bit-order/inversion/NRZI
+ * hypothesis -- two independent raw-bit captures right after the preamble
+ * (itself correctly recognised) agreed with EACH OTHER on 61/64 bits (far
+ * too reproducible to be noise) but not with the datasheet value, and
+ * decoded packets that DID then sync-lock on that observed value never
+ * looked like valid SSDV. Real cause (see imgfsk_tx.c's own comment):
+ * REG_59's "Enable FSK Scramble" bit (13) was active on TX, and the chip
+ * only descrambles automatically IN HARDWARE when the far end also uses its
+ * own raw-FSK correlator for RX (BK4819_PrepareFSKReceive() sets the same
+ * bit) -- with RX now done in software (raw audio, no correlator), that
+ * automatic descrambling never happened, so the hunt was matching the
+ * SCRAMBLED preamble tail, not the true sync. Scrambling is now disabled on
+ * TX instead of reverse-engineering the (undocumented) descrambler LFSR --
+ * the documented 0x85CFAB45 is correct once the source never scrambles. */
 #ifndef IMGFSK_SYNC_H
 #define IMGFSK_SYNC_H
 
