@@ -938,6 +938,13 @@ static void imgfsk_mode_enter(bool baud2400)
         "same frequency\n", APRS_RX_SAMPLE_RATE_HZ, baud2400 ? 2400 : 1200);
 }
 
+/* ⚠️ (2026-09-25, retour terrain : "aucun decodage", tout premier essai de
+ * ce chemin logiciel jamais teste sur du vrai materiel) -- compteurs de
+ * diagnostic pour distinguer "rien n'arrive du tout cote ADC/PLL" de "des
+ * bits arrivent mais la synchro ne matche jamais" (voir la mise en garde de
+ * imgfsk_sync.h sur l'ordre des bits, jamais verifiee sur l'air). */
+static uint32_t g_imgfsk_samples, g_imgfsk_bits;
+
 /* Drain the (shared APRS) ADC ring through the demod + sync hunter -- same
  * pattern as sonde_service() below, just one demod chain instead of three. */
 static void imgfsk_service(void)
@@ -948,11 +955,13 @@ static void imgfsk_service(void)
     while (g_imgfsk_rd != widx) {
         uint16_t raw = g_aprs_ring[g_imgfsk_rd] & 0x0FFF;
         g_imgfsk_rd = (g_imgfsk_rd + 1) & (APRS_RING_SAMPLES - 1);
+        g_imgfsk_samples++;
 
         int32_t sample = ((int32_t)raw - 2048) << CFG_AUDIO_GAIN_SHIFT;
 
         uint8_t bit;
         if (sonde_demod_sample(&g_imgfsk_demod, sample, &bit)) {
+            g_imgfsk_bits++;
             if (imgfsk_sync_feed(&g_imgfsk_sync, bit)) {
                 g_imgfsk_pkts++;
                 LOG("[imgfsk] pkt n=%lu ", (unsigned long)g_imgfsk_pkts);
@@ -1497,6 +1506,12 @@ int main(void)
         /* -------- the bit PLL + sync hunter, see decoder_config.h -------- */
         if (g_mode == MODE_IMGFSK) {
             imgfsk_service();
+            if (time_reached(next_lvl)) {
+                LOG("[imgfsk] samples=%lu bits=%lu pkts=%lu env=%ld\n",
+                    (unsigned long)g_imgfsk_samples, (unsigned long)g_imgfsk_bits,
+                    (unsigned long)g_imgfsk_pkts, (long)g_imgfsk_demod.env);
+                next_lvl = make_timeout_time_ms(CFG_LEVEL_LOG_MS);
+            }
             sleep_us(300);
             continue;
         }
