@@ -34,6 +34,9 @@
 #ifdef ENABLE_SONDE
 	#include "app/sonde.h"
 #endif
+#ifdef ENABLE_SSTV
+	#include "app/sstv_rx.h"
+#endif
 
 static char     s_line[SARSAT_LINES][SARSAT_LINE_CHARS + 1];
 static uint16_t s_invert;          /* one bit per line, from the RP2040    */
@@ -99,21 +102,31 @@ static void SARSAT_ReplyStatus(void)
 	else if (SONDE_ScreenOpen())
 		wire_mod = 0;                       /* FM: same profile, see sonde.c */
 #endif
+#ifdef ENABLE_SSTV
+	else if (SSTV_RxActive())
+		wire_mod = 0;                       /* FM: same profile, plain FM RX */
+#endif
 	else if (v->Modulation == MODULATION_RAW)
 		wire_mod = 5;                       /* DSC slot: same flat-discriminator profile */
 	else
 		wire_mod = (uint8_t)v->Modulation;  /* FM/AM/USB/BYP line up with the wire table */
 
 	/* byte 6: 0 none, 1 SARSAT text view, 2 SARSAT level view, 3 Sonde screen
-	 * open (app/sonde.h) -- the RP2040 picks its capture mode from this (it
-	 * can't tell SARSAT and radiosondes apart by RX frequency alone, both
-	 * live in 400-406 MHz, see rp2040/src/decoder_config.h). */
+	 * open (app/sonde.h), 4 SSTV RX armed (app/sstv_rx.h) -- the RP2040
+	 * picks its capture mode from this (it can't tell SARSAT/radiosondes/
+	 * SSTV apart by RX frequency alone, see rp2040/src/decoder_config.h).
+	 * Value 5 was IMGFSK's 2400-baud variant (branch SSTV_SSDV, abandoned)
+	 * and is free for reuse. */
 	uint8_t screen_state = 0;
 	if (s_screen_open)
 		screen_state = (s_view == 1) ? 2 : 1;
 #ifdef ENABLE_SONDE
 	else if (SONDE_ScreenOpen())
 		screen_state = 3;
+#endif
+#ifdef ENABLE_SSTV
+	else if (SSTV_RxActive())
+		screen_state = 4;
 #endif
 
 	uint8_t p[16] = {
