@@ -29,7 +29,7 @@ PORT_SRCS := $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406.c \
 APRS_DIR := ../../../firmware/uv-k5v1-kd8cec/patch
 
 .PHONY: all parity check clean
-all: test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_gps test_aprs_digi test_kiss test_sonde_rs41 test_sonde_demod test_sonde_dfm test_sonde_sync test_sonde_m10
+all: test_decode test_slicer test_link test_ax25 test_aprs_rx test_aprs_parse test_gps test_aprs_digi test_kiss test_sonde_rs41 test_sonde_demod test_sonde_dfm test_sonde_sync test_sonde_m10 test_sstv_demod
 
 test_decode: hexmain.c $(PORT_SRCS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -75,6 +75,9 @@ test_sonde_sync: test_sonde_sync.c $(SRC_DIR)/sonde_sync.c $(SRC_DIR)/sonde_rs41
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test_sonde_m10: test_sonde_m10.c $(SRC_DIR)/sonde_m10.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+test_sstv_demod: test_sstv_demod.c $(SRC_DIR)/sstv_demod.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 parity: test_decode

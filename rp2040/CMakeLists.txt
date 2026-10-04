@@ -40,7 +40,7 @@ add_executable(sarsat_rp2040
     src/sonde_sync.c
     src/sonde_dfm.c
     src/sonde_m10.c
-    src/imgfsk_sync.c
+    src/sstv_demod.c
 )
 
 target_include_directories(sarsat_rp2040 PRIVATE src)

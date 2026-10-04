@@ -105,11 +105,17 @@
 #define CFG_RADIO_UART        uart0
 #define CFG_RADIO_UART_TX_GPIO 0      /* -> radio serial RX (mic / 2.5mm jack)  */
 #define CFG_RADIO_UART_RX_GPIO 1      /* <- radio serial TX (3.5mm jack ring)   */
-#define CFG_RADIO_UART_BAUD   38400   /* project choice: the UV-K1 and UV-K5    */
-                                      /* SARSAT firmware patches use 38400 too  */
-                                      /* (matches egzumer/F4HWN + benshi tools).*/
-                                      /* KD8CEC's stock C-Board uses 57600, but */
-                                      /* we replace both firmware ends.         */
+/* ⚠️ (2026-09-26) branch SSTV_SSDV, temps reel : porte de 38400 a 230400.
+ * Ce lien est un protocole 100% maison (docs/protocol.md : "le debit est un
+ * choix libre puisque les deux bouts sont a nous"), donc rien ne le fige a
+ * 38400 -- c'etait juste le defaut egzumer/F4HWN. Necessaire pour le
+ * streaming SSTV temps reel (voir CMD_SSTV_START plus bas) : le pire cas
+ * dimensionnant est PD-120 (640x480, 190 us/pixel, source : SSTV Handbook,
+ * OK2MNM) qui demande ~5263 o/s en continu -- 38400 bauds ne donne que
+ * ~3840 o/s (deja insuffisant), 230400 en donne ~23000, marge confortable
+ * meme au-dela de PD-120. Les DEUX bouts (ici et App/driver/uart.c cote
+ * radio, patche par build.sh) doivent changer ensemble. */
+#define CFG_RADIO_UART_BAUD   230400
 
 /* ---- SARSAT application command IDs (radio firmware, Phase 3/4) ----- */
 #define CMD_SARSAT_CLEAR     0x06C0   /* no payload                              */
@@ -157,10 +163,9 @@
  * APRS (picked purely from the radio's RX frequency) it cannot be auto-
  * selected that way; the radio's SARSAT_HELLO reply's screen-state byte
  * (d[6]) carries a 3rd value (3 = "Sonde screen open") the RP2040 uses
- * instead, alongside the existing 0/1/2. MODE_IMGFSK (see further down,
- * "branch SSTV_SSDV") reuses this same byte with two more values (4/5),
- * for the same reason: an explicit request, not something derivable from
- * RX frequency alone. Two parallel demod chains share
+ * instead, alongside the existing 0/1/2 (values 4/5 were IMGFSK, branch
+ * SSTV_SSDV, abandoned -- see git history -- and are free for reuse, e.g.
+ * by the SSTV mode that replaced it). Two parallel demod chains share
  * this one ADC stream: RS41 (+ the older header-only M10/M20 detector) at
  * 4800 baud, and the full M10/M20 GPS decoder at 9600 baud (see
  * sonde_sync.h / sonde_m10.h) -- DFM is not attempted (no confirmed sync
@@ -232,37 +237,229 @@
                                          /* CMD_SARSAT_TEXT, own line buffer */
                                          /* on the radio side (app/sonde.c)  */
 
-/* branch SSTV_SSDV, v2 (2026-09-25) : RX repasse en demodulation LOGICIELLE
- * cote RP2040, comme APRS/Sonde -- PLUS de correlateur FSK brut du BK4819/29
- * cote radio pour la reception. Historique : la v1 (radio -> RP2040,
- * CMD_IMGFSK_RXPKT/RXDIAG, un paquet SSDV de 256 o demodule EN MATERIEL par
- * le meme moteur que l'AirCopy stock) a ete extensivement debuggee sur le
- * terrain (~30 commits, firmware/uv-k1-k5v3/patch/imgfsk_rx.c) sans jamais
- * atteindre une reception fiable multi-paquets : le correlateur materiel
- * s'arrete par intermittence de generer la moindre interruption apres
- * quelques paquets, malgre des registres identiques au bit pres a l'AirCopy
- * prouve, testes tour a tour : toutes les sequences de reamement, WIDE/
- * NARROW, FM/RAW, desactivation de l'AFC, le minuteur de veille auto F4HWN,
- * et meme le RP2040 physiquement debranche (blocage identique). Cause
- * jamais elucidee. Revient donc a l'architecture RAW/DSC deja fiable pour
- * SARSAT/Sonde (des heures de reception sans ce genre de blocage) : TX reste
- * MATERIEL (BK4819/29, prouve robuste -- AirCopy en reception recoit notre
- * TX en boucle jusqu'a 100% sans jamais bloquer), seul RX change.
+/* branch SSTV_SSDV : IMGFSK (transmission d'image SSDV sur porteuse FSK
+ * brute du BK4819/29) ABANDONNEE (2026-09-25) apres deux architectures
+ * essayees en vain :
+ *  - v1 (radio -> RP2040, CMD_IMGFSK_RXPKT/RXDIAG, correlateur FSK materiel
+ *    du BK4819/29, meme moteur que l'AirCopy stock) : ~30 commits de debug
+ *    terrain, le correlateur s'arrete par intermittence de generer la
+ *    moindre interruption apres quelques paquets, cause jamais elucidee
+ *    malgre des registres identiques au bit pres a l'AirCopy prouve.
+ *  - v2 (RX demodulation logicielle cote RP2040, comme APRS/Sonde, TX
+ *    materiel inchange) : le correlateur RX n'etait plus en cause, mais
+ *    apres avoir resolu successivement le mot de synchro, le scramble FSK,
+ *    et l'alignement de trame (tous confirmes par capture reelle), le
+ *    contenu utile ne correspondait jamais aux donnees reellement envoyees
+ *    -- teste exhaustivement, y compris avec un motif de test trivial
+ *    (compteur d'octets), sans trouver de transformation qui fonctionne.
+ * Remplacee par du SSTV (TX materiel BK4819/29 par generation de tonalite
+ * continue REG_70/71, RX logiciel cote RP2040 par estimation de frequence
+ * instantanee) -- protocole plus simple et deja proche de l'architecture
+ * audio/tons AFC deja prouvee par APRS.
  *
- * Pas de nouvelle commande UART necessaire : le RP2040 demodule localement
- * (rp2040/src/imgfsk_sync.c, meme PLL de bits "DireWolf-style" que Sonde/
- * sonde_demod.h -- notre FSK est un vrai decalage de frequence RF, le
- * discriminateur FM ressort un signal binaire deux niveaux directement,
- * comme RS41/M10, pas des tons audio Bell-202 comme APRS) et journalise
- * chaque paquet directement sur son propre port serie USB (meme format
- * `[imgfsk] pkt n=... <hex>` qu'avant, lu tel quel par
- * tools/imgfsk_log_to_ssdv.py -- aucun changement cote outil PC). Le
- * choix du mode reutilise le meme octet "screen_state" de CMD_SARSAT_HELLO
- * (d[6]) que Sonde (valeur 3) : 4 = ecoute IMGFSK 1200 bauds demandee,
- * 5 = ecoute IMGFSK 2400 bauds demandee (patch/sarsat.c cote radio,
- * IMGFSK_RxActive()/IMGFSK_RxIsFsk2400() -- l'utilisateur arme/desarme via
- * les memes actions de menu ImgFskRx1200/2400 qu'avant, elles ne font plus
- * que positionner un drapeau lu par ce statut). */
+ * SSTV RX (rp2040/src/sstv_demod.h) : mode explicitement arme, meme
+ * mecanisme que Sonde/l'ancien IMGFSK -- reutilise le meme octet
+ * "screen_state" de CMD_SARSAT_HELLO (d[6]) avec la valeur 4, laissee
+ * libre par le retrait d'IMGFSK (patch/sarsat.c cote radio,
+ * SSTV_RxActive() -- une seule bascule menu, pas de choix de debit comme
+ * l'ancien IMGFSK puisque Scottie 1 est pour l'instant le seul mode gere).
+ * Frequence d'echantillonnage propre (48 kHz, pas les 13.2 kHz d'APRS) :
+ * les tons SSTV montent a 2300 Hz, et l'estimateur de frequence a
+ * passages par zero interpole a besoin de marge (voir sstv_demod.h) --
+ * verifie empiriquement : a 13.2 kHz l'estimation oscillait de +/-75 Hz
+ * (bien trop pour distinguer 256 niveaux de luminance sur une plage de
+ * 800 Hz), reduit a moins de 2 Hz a 48 kHz avec en plus la correction de
+ * la formule de periode (voir l'historique de sstv_demod.c). Buffer ADC
+ * partage avec APRS (g_aprs_ring, jamais actifs en meme temps), comme
+ * l'etait IMGFSK. */
+#define CFG_SSTV_SAMPLE_RATE_HZ 48000
+
+/* ⚠️ (2026-09-26) SSTV TX temps reel (branch SSTV_SSDV) : l'image de test
+ * embarquee en flash radio (~118 Ko au total, deja a 98% -- voir
+ * sstv_tx.c) plafonnait la qualite bien en dessous de ce que la RESOLUTION
+ * du mode SSTV permettrait (320x256 pour Scottie 1, jusqu'a 640x480 pour
+ * PD-120). Le RP2040 a 2 Mo de flash -- largement de quoi garder l'image
+ * source en pleine qualite -- mais le TX reste materiel (BK4819/29, seul
+ * capable de generer proprement le ton FM en continu). Solution : la
+ * radio garde la generation VIS/sync/gap (fixe, deja prouvee) mais
+ * demande au RP2040, au moment ou l'utilisateur declenche l'emission, de
+ * lui STREAMER en direct un octet de luminance brut par pixel -- plus
+ * aucune image embarquee cote radio.
+ *
+ * CMD_SSTV_START (radio -> RP2040, sans ACK, envoye au tout debut de
+ * SSTV_SendScottie1() avant meme le VIS -- ~1.2 s d'avance avant que le
+ * premier pixel ne soit reellement necessaire) : {mode:u8}. mode=0 =
+ * Scottie 1 (320x256, ordre G-B-R par ligne, 245760 octets au total).
+ * mode=1 = Martin 1 (2026-09-26, meme resolution/ordre d'octets, seul le
+ * cadencement differe). Des valeurs suivantes pourront designer d'autres
+ * modes (PD120...) sans changer la forme du message.
+ *
+ * Une fois CMD_SSTV_START recu, le RP2040 arrete tout autre trafic
+ * SORTANT (HELLO periodique compris) et envoie les 245760 octets de
+ * luminance EN BRUT sur la meme liaison UART, SANS le framing Quansheng
+ * habituel (pas d'ID/taille/CRC) -- cote radio, un lecteur direct du
+ * tampon circulaire DMA de reception (App/driver/uart.c, deja existant,
+ * 256 o) consomme ces octets au rythme exact du pixel (voir sstv_tx.c),
+ * sans repasser par le parseur de trames pour ne pas perdre de temps
+ * pendant la fenetre critique. Debit necessaire : voir le commentaire de
+ * CFG_RADIO_UART_BAUD plus haut. */
+#define CMD_SSTV_START        0x06E2u    /* radio -> RP2040: {mode:u8} */
+#define SSTV_STREAM_MODE_SCOTTIE1 0u
+#define SSTV_STREAM_SCOTTIE1_WIDTH  320
+#define SSTV_STREAM_SCOTTIE1_HEIGHT 256
+#define SSTV_STREAM_SCOTTIE1_BYTES \
+    (SSTV_STREAM_SCOTTIE1_WIDTH * SSTV_STREAM_SCOTTIE1_HEIGHT * 3u)
+
+/* Martin 1 (2026-09-26) : meme resolution et meme ordre d'octets (G-B-R par
+ * ligne) que Scottie 1 -- seul le cadencement gap/sync/pixel differe cote
+ * radio (sstv_tx.c) et RP2040 (main.c, sstv_stream_martin1()). Reutilise
+ * donc directement g_sstv_master_image (sstv_master_image.h), pas besoin
+ * d'une deuxieme image source pour ce mode. */
+#define SSTV_STREAM_MODE_MARTIN1  1u
+#define SSTV_STREAM_MARTIN1_WIDTH  320
+#define SSTV_STREAM_MARTIN1_HEIGHT 256
+#define SSTV_STREAM_MARTIN1_BYTES \
+    (SSTV_STREAM_MARTIN1_WIDTH * SSTV_STREAM_MARTIN1_HEIGHT * 3u)
+
+/* PD90 (2026-09-26, remplace PD120 -- voir git log : PD120 (640x496,
+ * 190 us/pixel) echouait au decodage sur TROIS decodeurs independants,
+ * dont QSSTV, alors que Scottie1/Martin1 (432/457.6 us/pixel) fonctionnent
+ * -- suspicion forte d'une limite materielle reelle du generateur Tone1/PLL
+ * du BK4819/29 (temps de stabilisation apres chaque changement de
+ * frequence, negligeable a 432-457 us mais probablement pas a 190 us). Pas
+ * pousse plus loin cote diagnostic : bascule directement sur PD90, meme
+ * famille YUV mais 532 us/pixel -- comparable aux deux modes deja
+ * eprouves. Meme resolution que Scottie1/Martin1 (320x256) : reutilise
+ * g_sstv_master_image directement, pas besoin d'image source separee
+ * (contrairement a l'ancien PD120 et sa propre image 640x496, supprimee).
+ * Codage YUV420 par PAIRE de lignes (Y de chaque ligne + U/V moyennes sur
+ * la paire) -- pas le meme octet par pixel que Scottie1/Martin1 (RGB brut).
+ * Le RP2040 convertit RGB->YUV a la volee pendant le streaming
+ * (sstv_stream_pd90(), main.c) ; la radio ne voit que des octets de
+ * "niveau" 0..255, exactement comme pour les deux autres modes
+ * (sstv_luma_hz() s'applique identiquement a Y, U et V). */
+#define SSTV_STREAM_MODE_PD90  2u
+#define SSTV_STREAM_PD90_WIDTH  320
+#define SSTV_STREAM_PD90_HEIGHT 256
+
+/* PD120 (2026-09-27, RE-AJOUTE) -- avait ete abandonne au profit de PD90 le
+ * 2026-09-26 (voir commentaire ci-dessus) parce que son debit de 190 us/
+ * pixel revelait un vrai probleme dans le pipeline TIM14 cote radio (voir
+ * sstv_tx.c : le thread ne parvenait pas a suivre le rythme de facon
+ * fiable, quel que soit le mode -- Martin1 et PD90 en souffraient aussi,
+ * juste moins visiblement). Ce probleme de fond a depuis ete corrige par
+ * une refonte en file d'attente (queue) cote radio, qui absorbe les
+ * irregularites ponctuelles au lieu d'exiger une synchronisation parfaite
+ * a chaque pixel -- PD90 en beneficie deja sur le terrain, PD120 devrait
+ * desormais fonctionner aussi. Meme famille YUV420 par paire de lignes que
+ * PD90, mais 640x496 (image source separee, sstv_master_image_pd120.h,
+ * reechantillonnee depuis la meme photo) et 190 us/pixel. */
+#define SSTV_STREAM_MODE_PD120  3u
+#define SSTV_STREAM_PD120_WIDTH  640
+#define SSTV_STREAM_PD120_HEIGHT 496
+
+/* CMD_SSTV_STATUS (radio -> RP2040, sans ACK, envoye juste apres la fin du
+ * flux d'image, avant que la radio ne revienne en RX) : {timeout_count:u16,
+ * tim_late_nonpixel:u16, tim_late_pixel:u16}, tous little-endian.
+ *  - timeout_count : nombre de pixels ou sstv_stream_next_byte() (sstv_tx.c)
+ *    a du abandonner l'attente d'un octet neuf du RP2040 (tampon DMA vide
+ *    plus de ~5 ms) et rendre un pixel noir a la place.
+ *  - tim_late_nonpixel / tim_late_pixel (2026-09-27, scinde en deux --
+ *    voir sstv_tx.c, TIM14_IRQHandler -- suite a un retour terrain PD90/120
+ *    ou le total unique ne permettait pas de savoir SI le retard venait du
+ *    sync/porche (pas de dependance au flux) ou du balayage pixel (lie au
+ *    flux RP2040), un correctif d'ordre wait/fetch n'ayant eu AUCUN effet
+ *    mesure sur le total ni sur le signal reel) : nombre d'intervalles ou
+ *    le thread radio n'avait pas fini de preparer la valeur suivante a
+ *    temps pour l'interruption TIM14, respectivement hors balayage pixel
+ *    (sync/porche/gap) et pendant le balayage pixel.
+ * Idealement 0/0/0 en fonctionnement normal. */
+#define CMD_SSTV_STATUS       0x06E3u    /* radio -> RP2040: {timeout_count:u16, tim_late_nonpixel:u16, tim_late_pixel:u16} */
+
+/* ⚠️ (2026-10-03, retour terrain : "decode mais vu l'image envoyee, je ne
+ * peux pas dire si c'est ok") -- l'unique image de test embarquee
+ * (g_sstv_master_image, une vraie photo) ne permet pas de juger facilement
+ * la qualite du decodage (pas de forme nette/connue a verifier). Ajoute une
+ * SECONDE image de test, le logo ADRASEC (tools/sstv_gen_image.py, noir et
+ * blanc pur -- le moindre artefact de decodage saute aux yeux, sans place
+ * pour un jugement de nuance de gris), et un selecteur pour choisir entre
+ * les deux : {index:u8}, 0 = photo (g_sstv_master_image), 1 = logo ADRASEC
+ * (g_sstv_master_image_adrasec). Persiste cote RP2040 (g_sstv_image_sel,
+ * main.c) jusqu'au prochain changement ou redemarrage -- pas besoin de le
+ * re-signaler a chaque CMD_SSTV_START. */
+#define CMD_SSTV_IMAGE_SELECT 0x06E6u    /* radio -> RP2040: {index:u8} */
+
+/* ⚠️ (2026-10-03, retour terrain : "meme apres exit, il reste sur le
+ * streaming" -- le log montre "stream done" n'arrivant qu'apres le DELAI
+ * COMPLET normal d'une image (~110 s pour Scottie1), alors que la radio
+ * avait annule des le debut) -- CAUSE : sstv_stream_scottie1()/martin1/
+ * pd90/pd120 (main.c) sont des boucles bloquantes cadencees en temps reel
+ * fixe (sstv_stream_wait(), voir son propre historique) qui ne savent PAS
+ * que la touche EXIT, cote radio (sstv_tx.c), a deja coupe l'emission --
+ * rien ne leur disait d'arreter plus tot. Pendant tout ce temps restant, le
+ * RP2040 continue d'ecrire les octets d'image bruts (non trames) sur la
+ * MEME liaison UART que la radio, elle, a deja rebasculee en fonctionnement
+ * normal (trames AB CD...DC BA) -- source plausible du "repasse en
+ * emission par intermittence" observe, en plus du simple gachis de temps
+ * CPU/UART. CMD_SSTV_STOP permet a la radio de dire au RP2040 d'arreter
+ * IMMEDIATEMENT, des que la touche EXIT est detectee (sstv_tx.c) -- les 4
+ * boucles de streaming le verifient une fois par ligne (meme granularite
+ * que le controle EXIT cote radio, pour ne pas perturber le cadencement
+ * pixel deja fragile -- voir l'historique de sstv_stream_wait()). */
+#define CMD_SSTV_STOP          0x06E7u    /* radio -> RP2040: {} (no payload) */
+/* Calibration de l'horloge radio, SANS emission (2026-10-04) :
+ *   CMD_SSTV_CLK_START : RP2040 -> radio {} -- la radio demarre son timer TIM14
+ *                        et repond CMD_SSTV_CLK_ACK (accuse, sert a la mesure).
+ *   CMD_SSTV_CLK_END   : RP2040 -> radio {} -- arret ; la radio repond
+ *                        CMD_SSTV_CLK_REPORT {prog_us: u32 LE}.
+ *   CMD_SSTV_TRIM      : RP2040 -> radio {trim_ppm: i16 LE} -- stocke en EEPROM.
+ * Le RP2040 calcule le trim : prog / (temps reel entre les deux accuses) - 1. */
+#define CMD_SSTV_CLK_START     0x06EBu
+#define CMD_SSTV_CLK_END       0x06ECu
+#define CMD_SSTV_TRIM          0x06E9u
+#define CMD_SSTV_CLK_REPORT    0x06EDu
+#define CMD_SSTV_CLK_ACK       0x06EEu
+/* Menu SSTVCal de la radio (2026-10-04) :
+ *   CMD_SSTV_CLK_REQ    : radio -> RP2040 {} -- lancer une mesure, renvoyer le resultat
+ *   CMD_SSTV_CLK_RESULT : RP2040 -> radio {trim_ppm: i16 LE} -- proposition */
+#define CMD_SSTV_CLK_REQ       0x06F0u
+#define CMD_SSTV_CLK_RESULT    0x06EFu
+
+/* ⚠️ (2026-10-03) SSTV RX en direct sur l'ecran radio (branch SSTV_SSDV) :
+ * jusqu'ici le RP2040 decodait une image REELLEMENT recue (sstv_demod.c,
+ * arme via SSTV_RxActive(), patch/sarsat.c) mais ne faisait qu'un hexdump
+ * debug (sstv_service(), main.c) -- aucune image affichee cote radio. Ces
+ * deux commandes RP2040 -> radio (sens oppose a CMD_SSTV_START/STATUS
+ * ci-dessus, qui servent a l'EMISSION d'une image de test) permettent un
+ * affichage PROGRESSIF, ligne d'ecran par ligne d'ecran, sur le LCD de la
+ * radio pendant la reception -- meme principe que l'ecran SSTV de F4HWN
+ * (uv-k1-k5v3-firmware-custom, feature_update_v6), mais le calcul
+ * (reechantillonnage 320->128 colonnes, tramage) reste ici cote RP2040 (sa
+ * marge CPU/RAM est bien plus confortable que celle, tres juste, de la
+ * radio) -- la radio ne fait plus que dessiner les octets recus.
+ *
+ * 128x56, pas 128x64 : gFrameBuffer cote radio (driver/st7565.h) ne fait que
+ * FRAME_LINES=7 pages (56 px) -- la 8e bande (page 0 du panneau physique)
+ * est gStatusLine, la barre de statut (batterie/RSSI), rendue separement et
+ * laissee intacte, comme pour tous les autres ecrans de ce projet (SARSAT/
+ * APRS/Sonde). 256 lignes Scottie 1 / 56 lignes d'ecran n'est PAS un ratio
+ * entier (gcd = 8 : A=32, B=7) -- contrairement a un ratio entier, le
+ * nombre de lignes reelles par ligne d'ecran varie (4 ou 5) ; voir
+ * sstv_rx_emit_row() (main.c), meme principe d'accumulateur que l'app SSTV
+ * de F4HWN pour repartir ses propres lignes sur les 64 rangees d'ecran.
+ *
+ * CMD_SSTV_RX_CLEAR : envoyee une fois, au tout debut d'une nouvelle image
+ * (line_ready_idx == 0, sstv_demod.c) -- efface l'ecran cote radio.
+ * CMD_SSTV_RX_ROW : une ligne d'ECRAN (pas une ligne SSTV reelle) : les
+ * lignes Scottie 1 reelles du groupe sont moyennees par colonne puis
+ * reechantillonnees de 320 a 128 colonnes et tramees (Bayer 4x4) en 1 bit/
+ * pixel -- {row:u8, bits[16]} (128 bits = 16 o, MSB en premier par octet =
+ * colonne la plus a gauche). */
+#define CMD_SSTV_RX_CLEAR      0x06E4u    /* RP2040 -> radio: {} (no payload) */
+#define CMD_SSTV_RX_ROW        0x06E5u    /* RP2040 -> radio: {row:u8, bits[16]} */
+#define SSTV_RX_SCREEN_WIDTH   128u
+#define SSTV_RX_SCREEN_HEIGHT  56u     /* = gFrameBuffer's FRAME_LINES (7) * 8 px */
+#define SSTV_RX_ROW_BYTES      (SSTV_RX_SCREEN_WIDTH / 8u)
 
 /* ---- GPS (NMEA in on UART1, C-Board GPS header GP4/GP5) --------------- */
 #define CFG_GPS_ENABLE        1

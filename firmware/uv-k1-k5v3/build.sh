@@ -43,11 +43,10 @@ cp "$HERE/patch/ax25.c"    App/app/ax25.c
 cp "$HERE/patch/ax25.h"    App/app/ax25.h
 cp "$HERE/patch/sonde.c"   App/app/sonde.c
 cp "$HERE/patch/sonde.h"   App/app/sonde.h
-cp "$HERE/patch/imgfsk_tx.c"        App/app/imgfsk_tx.c
-cp "$HERE/patch/imgfsk_tx.h"        App/app/imgfsk_tx.h
-cp "$HERE/patch/imgfsk_test_data.h" App/app/imgfsk_test_data.h
-cp "$HERE/patch/imgfsk_rx.c"        App/app/imgfsk_rx.c
-cp "$HERE/patch/imgfsk_rx.h"        App/app/imgfsk_rx.h
+cp "$HERE/patch/sstv_tx.c"         App/app/sstv_tx.c
+cp "$HERE/patch/sstv_tx.h"         App/app/sstv_tx.h
+cp "$HERE/patch/sstv_rx.c"         App/app/sstv_rx.c
+cp "$HERE/patch/sstv_rx.h"         App/app/sstv_rx.h
 cp "$HERE/patch/ui_main.c" App/ui/main.c
 
 echo "== points d'ancrage"
@@ -415,10 +414,20 @@ perl -0pi -e 's/(            \|\| gScreenToDisplay != DISPLAY_MAIN\n)/$1#ifdef E
 # squelch normale entre les paquets.
 perl -0pi -e 's/if \(gSetting_backlight_on_tx_rx & BACKLIGHT_ON_TR_RX\) \{\n        BACKLIGHT_TurnOn\(\);\n    \}/if ((gSetting_backlight_on_tx_rx & BACKLIGHT_ON_TR_RX)\n#ifdef ENABLE_APRS\n        \&\& !APRS_QuietBacklight()   \/\/ 144.8 APRS : lumiere seulement sur trame decodee\n#endif\n       ) {\n        BACKLIGHT_TurnOn();\n    }/' App/app/app.c
 
+# App/driver/uart.c : branch SSTV_SSDV, TX temps reel -- debit 230400 (voir
+# rp2040/src/decoder_config.h, CFG_RADIO_UART_BAUD, meme raisonnement) et
+# deux accesseurs exposant le tampon circulaire DMA de reception deja
+# existant (256 o), pour que sstv_tx.c puisse y lire les octets de pixel
+# bruts SANS repasser par le parseur de trames Quansheng pendant la fenetre
+# critique du balayage (voir CMD_SSTV_START, decoder_config.h).
+perl -0pi -e 's/USART_InitStruct\.BaudRate = 38400;/USART_InitStruct.BaudRate = 230400;/' App/driver/uart.c
+perl -0pi -e 's/void UART_Init\(void\)\n\{/uint16_t SSTV_UartDmaWritePos(void)\n{\n    \/* masked : LL_DMA_GetDataLength() lisant 0 pile au moment ou le\n     * canal circulaire reboucle donnerait 256-0=256, hors plage 0..255,\n     * qui ne correspondrait plus jamais a s_stream_read_pos (sstv_tx.c) *\/\n    return (uint16_t)((sizeof(UART_DMA_Buffer) - LL_DMA_GetDataLength(DMA1, DMA_CHANNEL)) \& (sizeof(UART_DMA_Buffer) - 1));\n}\n\nuint8_t SSTV_UartDmaPeek(uint16_t idx)\n{\n    return UART_DMA_Buffer[idx \& (sizeof(UART_DMA_Buffer) - 1)];\n}\n\nvoid UART_Init(void)\n{/' App/driver/uart.c
+
 # App/app/uart.c : include
 perl -0pi -e 's{#include "app/uart.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#endif\n}' App/app/uart.c
 perl -0pi -e 's{#include "app/uart.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs.h"\n#endif\n}' App/app/uart.c
 perl -0pi -e 's{#include "app/uart.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n}' App/app/uart.c
+perl -0pi -e 's{#include "app/uart.h"\n}{$&#ifdef ENABLE_SSTV\n#include "app/sstv_rx.h"\n#endif\n}' App/app/uart.c
 
 # App/app/uart.c : rendre SendReply() non-static (sarsat.c le reutilise)
 perl -0pi -e 's/static void SendReply\(uint32_t Port, void \*pReply, uint16_t Size\)/void SendReply(uint32_t Port, void *pReply, uint16_t Size)/' App/app/uart.c
@@ -427,13 +436,14 @@ perl -0pi -e 's/static void SendReply\(uint32_t Port, void \*pReply, uint16_t Si
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SARSAT\n        case SARSAT_CMD_CLEAR:\n        case SARSAT_CMD_TEXT:\n        case SARSAT_CMD_LEVEL:\n        case SARSAT_CMD_HELLO:\n        case SARSAT_CMD_BEACON:\n            SARSAT_HandleUART(pUART_Command->Header.ID,\n                              pUART_Command->Buffer + sizeof(Header_t),\n                              pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_APRS\n        case APRS_CMD_RXTEXT:\n        case APRS_CMD_RXINFO:\n        case APRS_CMD_GPS:\n        case APRS_CMD_DIGI:\n            APRS_HandleUART(pUART_Command->Header.ID,\n                            pUART_Command->Buffer + sizeof(Header_t),\n                            pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SONDE\n        case SONDE_CMD_CLEAR:\n        case SONDE_CMD_TEXT:\n            SONDE_HandleUART(pUART_Command->Header.ID,\n                             pUART_Command->Buffer + sizeof(Header_t),\n                             pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
+perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SSTV\n        case SSTV_CMD_RX_CLEAR:\n        case SSTV_CMD_RX_ROW:\n        case SSTV_CMD_CLK_START:\n        case SSTV_CMD_CLK_END:\n        case SSTV_CMD_TRIM:\n        case SSTV_CMD_CLK_RESULT:\n            SSTV_HandleUART(pUART_Command->Header.ID,\n                            pUART_Command->Buffer + sizeof(Header_t),\n                            pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 
 # App/settings.h : nouvelles entrées ACTION_OPT_SARSAT / ACTION_OPT_APRS /
 # ACTION_OPT_SONDE (juste avant le sentinel LEN)
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SARSAT\n    ACTION_OPT_SARSAT,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_APRS\n    ACTION_OPT_APRS,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SONDE\n    ACTION_OPT_SONDE,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
-perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_IMGFSK\n    ACTION_OPT_IMGFSK1200,\n    ACTION_OPT_IMGFSK2400,\n    ACTION_OPT_IMGFSK_RX1200,\n    ACTION_OPT_IMGFSK_RX2400,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
+perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SSTV\n    ACTION_OPT_SSTV1,\n    ACTION_OPT_SSTVM1,\n    ACTION_OPT_SSTVPD90,\n    ACTION_OPT_SSTVPD120,\n    ACTION_OPT_SSTV_RX,\n    ACTION_OPT_SSTV_IMG,\n    ACTION_OPT_SSTV_CAL,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 
 # App/app/action.c : ouvrir l'écran SARSAT / APRS / Sonde depuis une touche
 # assignable (F1/F2 court/long via le menu F4HWN standard "F1Shrt"/"F1Long"/
@@ -443,29 +453,33 @@ perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_IMGFSK\n    ACTION_OPT_IMG
 # une autre combinaison de touche.
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#endif\n}' App/app/action.c
 perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs.h"\n#endif\n}' App/app/action.c
-perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n}' App/app/action.c
-perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_IMGFSK\n#include "app/imgfsk_tx.h"\n#include "app/imgfsk_rx.h"\n#endif\n}' App/app/action.c
+perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n#ifdef ENABLE_SSTV\n#include "app/sstv_tx.h"\n#include "app/sstv_rx.h"\n#endif\n}' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SARSAT\n    [ACTION_OPT_SARSAT] = &APP_RunSarsat,\n#endif\n$&/' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_APRS\n    [ACTION_OPT_APRS] = &APP_RunAprs,\n#endif\n$&/' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SONDE\n    [ACTION_OPT_SONDE] = &APP_RunSonde,\n#endif\n$&/' App/app/action.c
-perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_IMGFSK\n    [ACTION_OPT_IMGFSK1200] = &IMGFSK_Send1200,\n    [ACTION_OPT_IMGFSK2400] = &IMGFSK_Send2400,\n    [ACTION_OPT_IMGFSK_RX1200] = &IMGFSK_ToggleRx1200,\n    [ACTION_OPT_IMGFSK_RX2400] = &IMGFSK_ToggleRx2400,\n#endif\n$&/' App/app/action.c
+perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SSTV\n    [ACTION_OPT_SSTV1] = &SSTV_SendScottie1,\n    [ACTION_OPT_SSTVM1] = &SSTV_SendMartin1,\n    [ACTION_OPT_SSTVPD90] = &SSTV_SendPD90,\n    [ACTION_OPT_SSTVPD120] = &SSTV_SendPD120,\n    [ACTION_OPT_SSTV_RX] = &APP_RunSstvRx,\n    [ACTION_OPT_SSTV_IMG] = &SSTV_ToggleImage,\n    [ACTION_OPT_SSTV_CAL] = &APP_RunSstvCal,\n#endif\n$&/' App/app/action.c
 
 # App/ui/menu.c : entrées "SARSAT" / "APRS" / "SONDE" dans la liste des
 # fonctions assignables
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SARSAT\n    {"SARSAT",          ACTION_OPT_SARSAT},\n#endif\n$&/' App/ui/menu.c
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_APRS\n    {"APRS",            ACTION_OPT_APRS},\n#endif\n$&/' App/ui/menu.c
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SONDE\n    {"SONDE",           ACTION_OPT_SONDE},\n#endif\n$&/' App/ui/menu.c
-perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_IMGFSK\n    {"ImgFSK1200",      ACTION_OPT_IMGFSK1200},\n    {"ImgFSK2400",      ACTION_OPT_IMGFSK2400},\n    {"ImgFskRx1200",    ACTION_OPT_IMGFSK_RX1200},\n    {"ImgFskRx2400",    ACTION_OPT_IMGFSK_RX2400},\n#endif\n$&/' App/ui/menu.c
+perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SSTV\n    {"SSTV1",           ACTION_OPT_SSTV1},\n    {"SSTVM1",          ACTION_OPT_SSTVM1},\n    {"SSTVPD90",         ACTION_OPT_SSTVPD90},\n    {"SSTVPD120",        ACTION_OPT_SSTVPD120},\n    {"SSTVRx",          ACTION_OPT_SSTV_RX},\n    {"SSTVImg",         ACTION_OPT_SSTV_IMG},\n    {"SSTVCal",         ACTION_OPT_SSTV_CAL},\n#endif\n$&/' App/ui/menu.c
 
 # App/driver/eeprom_compat.c : reserver de la place dans la queue non revendiquee
 # du secteur "Settings" (0x00A170.. , juste apres "Settings Version" qui
 # s'arrete a 0x00A170) : 8 o pour le reglage de gain AF C-Board (afgain.c),
-# puis 56 o juste apres pour la config APRS (aprs.c, 7 pages EEPROM 8 o -- 40 o
-# a l'origine, +16 o quand le champ "msg_to" du message report 121 a ete
-# ajoute). Meme secteur physique que les reglages radio, donc protege du reset
-# normal comme eux, efface seulement par "reset ALL".
+# puis 56 o pour la config APRS (aprs.c, 7 pages EEPROM 8 o -- 40 o a
+# l'origine, +16 o quand le champ "msg_to" du message report 121 a ete
+# ajoute), puis 8 o pour la selection image SSTV (sstv_tx.c, retour terrain
+# "la selection ne reste pas apres redemarrage" -- persistance EEPROM cote
+# radio, le RP2040 n'en a pas besoin, la radio la lui repete a chaque
+# emission). Meme secteur physique que les reglages radio, donc protege du
+# reset normal comme eux, efface seulement par "reset ALL".
 perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A170, 0x00A170, 0x00A178),  \/\/ Sarsat_UV-K1-5_RP2040: gain AF C-Board (8 o)\n\};\n/' App/driver/eeprom_compat.c
 perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A178, 0x00A178, 0x00A1B0),  \/\/ Sarsat_UV-K1-5_RP2040: config APRS (56 o)\n\};\n/' App/driver/eeprom_compat.c
+perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A1B0, 0x00A1B0, 0x00A1B8),  \/\/ Sarsat_UV-K1-5_RP2040: selection image SSTV (8 o)\n\};\n/' App/driver/eeprom_compat.c
+perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A1B8, 0x00A1B8, 0x00A1C0),  \/\/ Sarsat_UV-K1-5_RP2040: correction horloge SSTV (trim, 8 o)\n\};\n/' App/driver/eeprom_compat.c
 
 # App/scheduler.h + .c : exposer millis10() (compteur 10 ms deja tenu par
 # SysTick_Handler() dans gGlobalSysTickCounter, jusqu'ici prive a ce fichier) --
@@ -622,12 +636,12 @@ perl -0pi -e 's/#include "app\/generic.h"\n/$&#ifdef ENABLE_SARSAT\n#include "ap
 perl -0pi -e 's/        case KEY_8:\n            if \(!beep\) \{\n                ACTION_BackLightOnDemand\(\); \n            \}\n            else \{\n                gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;\n                gRequestSaveChannel = 1;\n            \}\n/        case KEY_8:\n#ifdef ENABLE_SARSAT\n            APP_RunSarsat();                 \/\/ F+8 : open the SARSAT screen (same as V1)\n            gRequestDisplayScreen = DISPLAY_MAIN;\n#else\n            if (!beep) {\n                ACTION_BackLightOnDemand(); \n            }\n            else {\n                gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;\n                gRequestSaveChannel = 1;\n            }\n#endif\n/' App/app/main.c
 
 # App/CMakeLists.txt : option + sources
-perl -0pi -e 's/enable_feature\(ENABLE_UART_RW_BK_REGS\)\n/$&enable_feature(ENABLE_SARSAT\n    app\/sarsat.c\n    app\/afgain.c\n)\nenable_feature(ENABLE_APRS\n    app\/aprs.c\n    app\/ax25.c\n)\nenable_feature(ENABLE_SONDE\n    app\/sonde.c\n)\nenable_feature(ENABLE_IMGFSK\n    app\/imgfsk_tx.c\n    app\/imgfsk_rx.c\n)\n/' App/CMakeLists.txt
+perl -0pi -e 's/enable_feature\(ENABLE_UART_RW_BK_REGS\)\n/$&enable_feature(ENABLE_SARSAT\n    app\/sarsat.c\n    app\/afgain.c\n)\nenable_feature(ENABLE_APRS\n    app\/aprs.c\n    app\/ax25.c\n)\nenable_feature(ENABLE_SONDE\n    app\/sonde.c\n)\nenable_feature(ENABLE_SSTV\n    app\/sstv_tx.c\n    app\/sstv_rx.c\n)\n/' App/CMakeLists.txt
 
 # CMakePresets.json : defaut (off) dans chaque bloc de presets où ENABLE_UART_RW_BK_REGS
 # apparaît (le fichier en a deux : un pour "configurePresets", un pour "buildPresets"
 # ou similaire -- perl en mode /g pour couvrir les deux occurrences).
-perl -0pi -e 's/( *)"ENABLE_UART_RW_BK_REGS": false,\n/$&$1"ENABLE_SARSAT": false,\n$1"ENABLE_APRS": false,\n$1"ENABLE_SONDE": false,\n$1"ENABLE_IMGFSK": false,\n/g' CMakePresets.json
+perl -0pi -e 's/( *)"ENABLE_UART_RW_BK_REGS": false,\n/$&$1"ENABLE_SARSAT": false,\n$1"ENABLE_APRS": false,\n$1"ENABLE_SONDE": false,\n$1"ENABLE_SSTV": false,\n/g' CMakePresets.json
 
 echo "== controle"
 grep -q 'app/sarsat.h'      App/app/app.c   || { echo "!! app.c : include sarsat"; exit 1; }
@@ -661,6 +675,8 @@ grep -q 'app/aprs.c'        App/CMakeLists.txt || { echo "!! CMakeLists.txt : ap
 grep -q 'app/ax25.c'        App/CMakeLists.txt || { echo "!! CMakeLists.txt : ax25.c"; exit 1; }
 grep -q '0x00A170, 0x00A170, 0x00A178' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping gain AF"; exit 1; }
 grep -q '0x00A178, 0x00A178, 0x00A1B0' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping config APRS"; exit 1; }
+grep -q '0x00A1B0, 0x00A1B0, 0x00A1B8' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping selection image SSTV"; exit 1; }
+grep -q '0x00A1B8, 0x00A1B8, 0x00A1C0' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping trim horloge SSTV"; exit 1; }
 grep -qE '^uint32_t millis10\(void\);' App/scheduler.h || { echo "!! scheduler.h : millis10() declaration"; exit 1; }
 grep -qE '^uint32_t millis10\(void\) \{ return gGlobalSysTickCounter; \}' App/scheduler.c || { echo "!! scheduler.c : millis10() definition"; exit 1; }
 grep -q 'diff >> 2' App/driver/backlight.c || { echo "!! backlight.c : fondu raccourci"; exit 1; }
@@ -679,28 +695,50 @@ grep -q 'app/sonde.h'   App/app/app.c   || { echo "!! app.c : include sonde"; ex
 grep -q 'APP_RunSonde'  App/app/app.c   || { echo "!! app.c : hook tick 10ms sonde"; exit 1; }
 grep -q 'app/sonde.h'   App/app/uart.c  || { echo "!! uart.c : include sonde"; exit 1; }
 grep -q 'SONDE_HandleUART' App/app/uart.c || { echo "!! uart.c : dispatch sonde"; exit 1; }
-grep -q 'ACTION_OPT_IMGFSK1200' App/settings.h || { echo "!! settings.h : enum imgfsk"; exit 1; }
-grep -q 'app/imgfsk_tx.h' App/app/action.c || { echo "!! action.c : include imgfsk"; exit 1; }
-grep -q 'ACTION_OPT_IMGFSK1200.*IMGFSK_Send1200' App/app/action.c || { echo "!! action.c : table imgfsk 1200"; exit 1; }
-grep -q 'ACTION_OPT_IMGFSK2400.*IMGFSK_Send2400' App/app/action.c || { echo "!! action.c : table imgfsk 2400"; exit 1; }
-grep -q 'ImgFSK1200.*ACTION_OPT_IMGFSK1200' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk 1200"; exit 1; }
-grep -q 'ImgFSK2400.*ACTION_OPT_IMGFSK2400' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk 2400"; exit 1; }
-grep -q 'app/imgfsk_rx.h' App/app/action.c || { echo "!! action.c : include imgfsk_rx"; exit 1; }
-grep -q 'ACTION_OPT_IMGFSK_RX1200.*IMGFSK_ToggleRx1200' App/app/action.c || { echo "!! action.c : table imgfsk rx 1200"; exit 1; }
-grep -q 'ACTION_OPT_IMGFSK_RX2400.*IMGFSK_ToggleRx2400' App/app/action.c || { echo "!! action.c : table imgfsk rx 2400"; exit 1; }
-grep -q 'ImgFskRx1200.*ACTION_OPT_IMGFSK_RX1200' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk rx 1200"; exit 1; }
-grep -q 'ImgFskRx2400.*ACTION_OPT_IMGFSK_RX2400' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS imgfsk rx 2400"; exit 1; }
-grep -q 'app/imgfsk_rx.h' App/app/sarsat.c || { echo "!! sarsat.c : include imgfsk_rx"; exit 1; }
-grep -q 'IMGFSK_RxActive' App/app/sarsat.c || { echo "!! sarsat.c : fusion etat screen imgfsk"; exit 1; }
 grep -q 'ACTION_OPT_SONDE' App/settings.h || { echo "!! settings.h : enum sonde"; exit 1; }
 grep -q 'app/sonde.h'   App/app/action.c || { echo "!! action.c : include sonde"; exit 1; }
 grep -q 'ACTION_OPT_SONDE.*APP_RunSonde' App/app/action.c || { echo "!! action.c : table sonde"; exit 1; }
 grep -q 'ACTION_OPT_SONDE' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sonde"; exit 1; }
 grep -q 'ENABLE_SONDE'  App/CMakeLists.txt || { echo "!! CMakeLists.txt : ENABLE_SONDE"; exit 1; }
 grep -q 'ENABLE_SONDE'  CMakePresets.json  || { echo "!! CMakePresets.json : ENABLE_SONDE"; exit 1; }
+grep -q 'ENABLE_SSTV'   App/CMakeLists.txt || { echo "!! CMakeLists.txt : ENABLE_SSTV"; exit 1; }
+grep -q 'ENABLE_SSTV'   CMakePresets.json  || { echo "!! CMakePresets.json : ENABLE_SSTV"; exit 1; }
+grep -q 'BaudRate = 230400' App/driver/uart.c || { echo "!! uart.c : debit 230400"; exit 1; }
+grep -q 'SSTV_UartDmaWritePos' App/driver/uart.c || { echo "!! uart.c : accesseur DMA write pos"; exit 1; }
+grep -q 'SSTV_UartDmaPeek' App/driver/uart.c || { echo "!! uart.c : accesseur DMA peek"; exit 1; }
+grep -q 'ACTION_OPT_SSTV1' App/settings.h  || { echo "!! settings.h : enum sstv"; exit 1; }
+grep -q 'app/sstv_tx.h' App/app/action.c   || { echo "!! action.c : include sstv"; exit 1; }
+grep -q 'ACTION_OPT_SSTV1.*SSTV_SendScottie1' App/app/action.c || { echo "!! action.c : table sstv"; exit 1; }
+grep -q 'SSTV1.*ACTION_OPT_SSTV1' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv"; exit 1; }
+grep -q 'ACTION_OPT_SSTVM1' App/settings.h  || { echo "!! settings.h : enum sstv martin1"; exit 1; }
+grep -q 'ACTION_OPT_SSTVM1.*SSTV_SendMartin1' App/app/action.c || { echo "!! action.c : table sstv martin1"; exit 1; }
+grep -q 'SSTVM1.*ACTION_OPT_SSTVM1' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv martin1"; exit 1; }
+grep -q 'ACTION_OPT_SSTVPD90' App/settings.h  || { echo "!! settings.h : enum sstv pd90"; exit 1; }
+grep -q 'ACTION_OPT_SSTVPD90.*SSTV_SendPD90' App/app/action.c || { echo "!! action.c : table sstv pd90"; exit 1; }
+grep -q 'SSTVPD90.*ACTION_OPT_SSTVPD90' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv pd90"; exit 1; }
+grep -q 'ACTION_OPT_SSTVPD120' App/settings.h  || { echo "!! settings.h : enum sstv pd120"; exit 1; }
+grep -q 'ACTION_OPT_SSTVPD120.*SSTV_SendPD120' App/app/action.c || { echo "!! action.c : table sstv pd120"; exit 1; }
+grep -q 'SSTVPD120.*ACTION_OPT_SSTVPD120' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv pd120"; exit 1; }
+grep -q 'ACTION_OPT_SSTV_RX' App/settings.h  || { echo "!! settings.h : enum sstv rx"; exit 1; }
+grep -q 'app/sstv_rx.h' App/app/action.c     || { echo "!! action.c : include sstv rx"; exit 1; }
+grep -q 'ACTION_OPT_SSTV_RX.*APP_RunSstvRx' App/app/action.c || { echo "!! action.c : table sstv rx"; exit 1; }
+grep -q 'SSTVRx.*ACTION_OPT_SSTV_RX' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv rx"; exit 1; }
+grep -q 'ACTION_OPT_SSTV_IMG' App/settings.h  || { echo "!! settings.h : enum sstv img"; exit 1; }
+grep -q 'ACTION_OPT_SSTV_IMG.*SSTV_ToggleImage' App/app/action.c || { echo "!! action.c : table sstv img"; exit 1; }
+grep -q 'SSTVImg.*ACTION_OPT_SSTV_IMG' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv img"; exit 1; }
+grep -q 'app/sstv_rx.h'    App/app/uart.c || { echo "!! uart.c : include sstv rx"; exit 1; }
+grep -q 'SSTV_HandleUART'  App/app/uart.c || { echo "!! uart.c : dispatch sstv rx"; exit 1; }
+grep -q 'case SSTV_CMD_CLK_RESULT:' App/app/uart.c || { echo "!! uart.c : dispatch resultat horloge"; exit 1; }
+grep -q 'ACTION_OPT_SSTV_CAL' App/settings.h || { echo "!! settings.h : action SSTVCal"; exit 1; }
+grep -q 'APP_RunSstvCal' App/app/action.c || { echo "!! action.c : action SSTVCal"; exit 1; }
+grep -q 'SSTVCal' App/ui/menu.c || { echo "!! menu.c : entree SSTVCal"; exit 1; }
+grep -q 'case SSTV_CMD_CLK_END:' App/app/uart.c || { echo "!! uart.c : dispatch calibration horloge"; exit 1; }
+grep -q 'SSTV_CMD_RX_ROW'  App/app/uart.c || { echo "!! uart.c : dispatch sstv rx row"; exit 1; }
+grep -q 'app/sstv_rx.h' App/app/sarsat.c     || { echo "!! sarsat.c : include sstv rx"; exit 1; }
+grep -q 'SSTV_RxActive' App/app/sarsat.c     || { echo "!! sarsat.c : fusion etat screen sstv"; exit 1; }
 grep -q 'SONDE_ScreenOpen' App/app/sarsat.c || { echo "!! sarsat.c : fusion etat ecran sonde"; exit 1; }
 
-echo "== build (preset=$PRESET, ENABLE_SARSAT=ON, ENABLE_APRS=ON, ENABLE_SONDE=ON, ENABLE_BYP_RAW_DEMODULATORS=ON)"
+echo "== build (preset=$PRESET, ENABLE_SARSAT=ON, ENABLE_APRS=ON, ENABLE_SONDE=ON, ENABLE_SSTV=ON, ENABLE_BYP_RAW_DEMODULATORS=ON)"
 # ENABLE_BYP_RAW_DEMODULATORS : deja dans le code amont (App/driver/bk4829.c
 # BK4819_EnterRaw(), cable dans RADIO_SetModulation() App/radio.c) mais eteint
 # par defaut sur le preset Fusion. C'est le discriminateur FM a plat (REG_2B
@@ -723,7 +761,7 @@ echo "== build (preset=$PRESET, ENABLE_SARSAT=ON, ENABLE_APRS=ON, ENABLE_SONDE=O
 # rendre de la marge flash (le build etait a 99,0 %). D'autres extras
 # coupables au besoin : FMRADIO, AIRCOPY, VOX, FOXHUNT, BEAM, AUDIO_SCOPE,
 # MENU_CAT, PMR/GMRS...
-cmake --preset "$PRESET" -DENABLE_SARSAT=ON -DENABLE_APRS=ON -DENABLE_SONDE=ON -DENABLE_IMGFSK=ON -DENABLE_BYP_RAW_DEMODULATORS=ON \
+cmake --preset "$PRESET" -DENABLE_SARSAT=ON -DENABLE_APRS=ON -DENABLE_SONDE=ON -DENABLE_SSTV=ON -DENABLE_BYP_RAW_DEMODULATORS=ON \
     -DENABLE_SPECTRUM=OFF \
     -DENABLE_FEAT_F4HWN_GAME=OFF \
     -DENABLE_FEAT_F4HWN_QRCODE=OFF \
