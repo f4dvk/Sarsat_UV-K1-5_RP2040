@@ -25,6 +25,9 @@
 #ifdef ENABLE_APRS
 #include "app/aprs.h"   /* APP_RunAprs (entree F+7) */
 #endif
+#ifdef ENABLE_SARSAT
+#include "app/sarsat.h" /* APP_RunSarsat (entree F+7) */
+#endif
 #include "driver/backlight.h"
 #include "driver/st7565.h"
 #include "driver/keyboard.h"
@@ -212,13 +215,21 @@ static void app_show_error(const app_header_t *header, uint8_t rc)
 /* Five visible slots; line 0 holds the separator and line 6 the key hints. */
 #define APP_MENU_ROWS 5u
 #define APP_MENU_SLOT_COUNT APP_SLOT_COUNT
+/* Entrees integrees (notre RP2040) : des lignes apres les emplacements, APRS-RP
+ * puis SARSAT-RP */
 #ifdef ENABLE_APRS
-/* Entree integree APRS-RP (notre APRS RP2040) : une ligne apres les emplacements */
-#define APP_MENU_APRS_IDX   APP_SLOT_COUNT
-#define APP_MENU_ITEM_COUNT (APP_SLOT_COUNT + 1u)
+#define APP_MENU_APRS_IDX    APP_SLOT_COUNT
+#define APP_MENU_EXTRA_APRS  1u
 #else
-#define APP_MENU_ITEM_COUNT APP_SLOT_COUNT
+#define APP_MENU_EXTRA_APRS  0u
 #endif
+#ifdef ENABLE_SARSAT
+#define APP_MENU_SARSAT_IDX  (APP_SLOT_COUNT + APP_MENU_EXTRA_APRS)
+#define APP_MENU_EXTRA_SARSAT 1u
+#else
+#define APP_MENU_EXTRA_SARSAT 0u
+#endif
+#define APP_MENU_ITEM_COUNT  (APP_SLOT_COUNT + APP_MENU_EXTRA_APRS + APP_MENU_EXTRA_SARSAT)
 
 _Static_assert(APP_MENU_SLOT_COUNT <= APP_SLOT_COUNT,
                "APP_MENU_SLOT_COUNT exceeds the physical app slot count");
@@ -303,6 +314,13 @@ void APP_MenuOpen(void)
             }
             else
 #endif
+#ifdef ENABLE_SARSAT
+            if (slot == APP_MENU_SARSAT_IDX)
+            {
+                UI_PrintStringSmallNormal("SARSAT-RP", APP_NAME_TEXT_X, 0, fbLine);
+            }
+            else
+#endif
             if (installed & (uint16_t)((uint16_t)1u << slot))
             {
                 app_header_t hdr;
@@ -349,6 +367,14 @@ void APP_MenuOpen(void)
                 if (sel == APP_MENU_APRS_IDX)
                 {
                     APP_RunAprs();          /* APRS RP2040 : ecran integre */
+                    app_wait_release();
+                    break;
+                }
+#endif
+#ifdef ENABLE_SARSAT
+                if (sel == APP_MENU_SARSAT_IDX)
+                {
+                    APP_RunSarsat();        /* SARSAT RP2040 : ecran integre */
                     app_wait_release();
                     break;
                 }

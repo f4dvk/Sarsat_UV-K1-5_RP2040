@@ -1073,14 +1073,19 @@ static void aprs_refresh_ch_freq(void)
 }
 
 /* Is VFO `v` in "APRS mode"?  Memory mode: only the dedicated APRS channel
- * (MR 170). VFO mode: only tuned exactly to channel 170's frequency -- NOT
- * the whole 144-148 MHz band (so 145.500 simplex etc. is untouched). */
+ * (MR 170). VFO mode: any frequency in 144-148 MHz (meme plage que le
+ * RP2040), ce qui declenche l'ecoute et le popup comme avant. */
+#define APRS_BAND_LO_10HZ  14400000u   /* 144.0 MHz, unites de 10 Hz */
+#define APRS_BAND_HI_10HZ  14800000u   /* 148.0 MHz */
 static bool aprs_vfo_is_aprs(unsigned int v)
 {
     const uint16_t sc = gEeprom.ScreenChannel[v & 1u];
     if (IS_MR_CHANNEL(sc))
         return sc == APRS_TX_CHANNEL;
-    return gEeprom.VfoInfo[v & 1u].freq_config_RX.Frequency == s_aprs_ch_freq;
+    /* VFO : 144-148 MHz comme le RP2040 (CFG_APRS_BAND_LO/HI_10HZ), plus le
+     * canal 170 meme s'il a ete edite hors bande. */
+    const uint32_t f = gEeprom.VfoInfo[v & 1u].freq_config_RX.Frequency;
+    return (f >= APRS_BAND_LO_10HZ && f <= APRS_BAND_HI_10HZ) || f == s_aprs_ch_freq;
 }
 
 static bool aprs_on_band(void)

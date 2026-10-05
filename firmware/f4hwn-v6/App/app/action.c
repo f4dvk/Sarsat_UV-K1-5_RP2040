@@ -20,6 +20,9 @@
 #include "app/action.h"
 #include "app/app.h"
 #include "app/aprs.h"   /* APRS RP2040 */
+#ifdef ENABLE_SARSAT
+    #include "app/sarsat.h" /* SARSAT RP2040 */
+#endif
 #include "app/chFrScanner.h"
 #include "app/common.h"
 #include "app/dtmf.h"
@@ -131,6 +134,9 @@ void (*const action_opt_table[ACTION_OPT_LEN])(void) = {
     [ACTION_OPT_BEACON] = &ACTION_Beacon,
 #endif
     [ACTION_OPT_APRS] = &APP_RunAprs,
+#ifdef ENABLE_SARSAT
+    [ACTION_OPT_SARSAT] = &APP_RunSarsat,
+#endif
 };
 
 static_assert(ARRAY_SIZE(action_opt_table) == ACTION_OPT_LEN);

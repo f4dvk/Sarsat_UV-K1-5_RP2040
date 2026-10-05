@@ -1886,6 +1886,8 @@ void APP_TimeSlice10ms(void)
     }
 #endif
     APRS_TimeSlice();
+    if (gAprsShowRequest)              /* popup RX auto sur trame decodee (aprs.c) */
+        APP_RunAprs();                 /* auto-guarde : se rearme si la radio est occupee */
 
     if (gReducedService)
         return;

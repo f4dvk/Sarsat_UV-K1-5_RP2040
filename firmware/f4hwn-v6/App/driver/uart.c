@@ -37,7 +37,10 @@
 #define UART_TX_TIMEOUT_ITERATIONS 10000
 
 static bool UART_IsLogEnabled;
-uint8_t UART_DMA_Buffer[256];
+/* 1024 o (et non 256) : a 230400 bauds le RP2040 envoie ~23 ko/s, soit un
+ * tampon de 256 o plein en ~11 ms -- des octets etaient ecrases des qu'une
+ * boucle (ecran, popup APRS...) tardait un peu. Puissance de 2 (DMA_INDEX). */
+uint8_t UART_DMA_Buffer[1024];
 
 void UART_Init(void)
 {
@@ -100,7 +103,13 @@ void UART_Init(void)
         LL_USART_InitTypeDef USART_InitStruct;
         LL_USART_StructInit(&USART_InitStruct);
 
+        /* 230400 = debit du lien RP2040 (CFG_RADIO_UART_BAUD). Sans cela la
+         * radio n'entend jamais la poignee de main SARSAT/APRS. */
+#ifdef ENABLE_SARSAT
+        USART_InitStruct.BaudRate = 230400;
+#else
         USART_InitStruct.BaudRate = 38400;
+#endif
         USART_InitStruct.TransferDirection = LL_USART_DIRECTION_TX_RX;
         LL_USART_Init(USARTx, &USART_InitStruct);
 
@@ -182,20 +191,21 @@ void UART_LogSend(const void *pBuffer, uint32_t Size)
 
 #ifdef ENABLE_FEAT_F4HWN_K5VIEWER
     bool UART_IsCableConnected(void) {
-        static uint8_t     read_ptr = 0;
+        static uint16_t    read_ptr = 0;
         static ParseState_t state   = STATE_IDLE;
 
         bool connected = false;
 
-        // DMA write position: NbData counts DOWN from 256
-        uint8_t write_ptr = (uint8_t)(sizeof(UART_DMA_Buffer) - 
-                                       LL_DMA_GetDataLength(DMA1, DMA_CHANNEL));
+        // DMA write position: NbData counts DOWN from the buffer size
+        uint16_t write_ptr = (uint16_t)((sizeof(UART_DMA_Buffer) -
+                                          LL_DMA_GetDataLength(DMA1, DMA_CHANNEL)) &
+                                         (sizeof(UART_DMA_Buffer) - 1u));
 
-        uint8_t processed = 0;
+        uint16_t processed = 0;
         while (read_ptr != write_ptr && processed < sizeof(UART_DMA_Buffer))
         {
-            uint8_t b = UART_DMA_Buffer[read_ptr++];
-            // read_ptr wraps naturally at 256 since it's uint8_t
+            uint8_t b = UART_DMA_Buffer[read_ptr];
+            read_ptr = (uint16_t)((read_ptr + 1u) & (sizeof(UART_DMA_Buffer) - 1u));
             processed++;
 
             if(KEYBOARD_ProcessProtocolByte(&state, b))

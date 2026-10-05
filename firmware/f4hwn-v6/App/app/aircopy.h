@@ -48,7 +48,12 @@
 // #define AIRCOPY_UART_BAUD_RATE       115200u
 // #define AIRCOPY_UART_BAUD_RATE       230400u
 #define AIRCOPY_UART_BAUD_RATE       460800u
+/* Debit a restaurer apres aircopy : 230400 pour le lien RP2040 (voir uart.c) */
+#ifdef ENABLE_SARSAT
+#define AIRCOPY_UART_DEFAULT_BAUD    230400u
+#else
 #define AIRCOPY_UART_DEFAULT_BAUD    38400u
+#endif
 #endif
 
 #if AIRCOPY_DATA_WORDS > 128u
