@@ -22,6 +22,9 @@
 #include "apps/app_menu.h"
 #include "app/app.h"
 #include "app/uart.h"
+#ifdef ENABLE_APRS
+#include "app/aprs.h"   /* APP_RunAprs (entree F+7) */
+#endif
 #include "driver/backlight.h"
 #include "driver/st7565.h"
 #include "driver/keyboard.h"
@@ -209,6 +212,13 @@ static void app_show_error(const app_header_t *header, uint8_t rc)
 /* Five visible slots; line 0 holds the separator and line 6 the key hints. */
 #define APP_MENU_ROWS 5u
 #define APP_MENU_SLOT_COUNT APP_SLOT_COUNT
+#ifdef ENABLE_APRS
+/* Entree integree APRS-RP (notre APRS RP2040) : une ligne apres les emplacements */
+#define APP_MENU_APRS_IDX   APP_SLOT_COUNT
+#define APP_MENU_ITEM_COUNT (APP_SLOT_COUNT + 1u)
+#else
+#define APP_MENU_ITEM_COUNT APP_SLOT_COUNT
+#endif
 
 _Static_assert(APP_MENU_SLOT_COUNT <= APP_SLOT_COUNT,
                "APP_MENU_SLOT_COUNT exceeds the physical app slot count");
@@ -249,7 +259,7 @@ void APP_MenuOpen(void)
     /* Remember the physical slot and scrolling window across menu openings. */
     static uint8_t sel = 0;
     static uint8_t top = 0;             /* first visible row of the scrolling window */
-    if (sel >= APP_MENU_SLOT_COUNT || top > APP_MENU_SLOT_COUNT - APP_MENU_ROWS)
+    if (sel >= APP_MENU_ITEM_COUNT || top > APP_MENU_ITEM_COUNT - APP_MENU_ROWS)
         sel = top = 0u;
     app_wait_release();
 
@@ -272,7 +282,7 @@ void APP_MenuOpen(void)
             top = (uint8_t)(sel - APP_MENU_ROWS + 1u);
 
         for (uint8_t slot = top;
-             slot < APP_MENU_SLOT_COUNT && (uint8_t)(slot - top) < APP_MENU_ROWS;
+             slot < APP_MENU_ITEM_COUNT && (uint8_t)(slot - top) < APP_MENU_ROWS;
              slot++)
         {
             char number[3];
@@ -286,6 +296,13 @@ void APP_MenuOpen(void)
             number[2] = '\0';
 
             UI_PrintStringSmallNormal(number, 2u, 0, fbLine);
+#ifdef ENABLE_APRS
+            if (slot == APP_MENU_APRS_IDX)
+            {
+                UI_PrintStringSmallNormal("APRS-RP", APP_NAME_TEXT_X, 0, fbLine);
+            }
+            else
+#endif
             if (installed & (uint16_t)((uint16_t)1u << slot))
             {
                 app_header_t hdr;
@@ -321,13 +338,21 @@ void APP_MenuOpen(void)
         switch (key)
         {
             case KEY_UP:
-                sel = (sel == 0u) ? (uint8_t)(APP_MENU_SLOT_COUNT - 1u) : (uint8_t)(sel - 1u);
+                sel = (sel == 0u) ? (uint8_t)(APP_MENU_ITEM_COUNT - 1u) : (uint8_t)(sel - 1u);
                 break;
             case KEY_DOWN:
-                sel = (uint8_t)((sel + 1u) % APP_MENU_SLOT_COUNT);
+                sel = (uint8_t)((sel + 1u) % APP_MENU_ITEM_COUNT);
                 break;
             case KEY_MENU:
             {
+#ifdef ENABLE_APRS
+                if (sel == APP_MENU_APRS_IDX)
+                {
+                    APP_RunAprs();          /* APRS RP2040 : ecran integre */
+                    app_wait_release();
+                    break;
+                }
+#endif
                 if (!(installed & (uint16_t)((uint16_t)1u << sel)))
                     break;
 

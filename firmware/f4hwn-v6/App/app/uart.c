@@ -25,6 +25,9 @@
 #endif
 #include "app/uart.h"
 #include "app/aprs.h"   /* APRS RP2040 : commandes 0x06Dx */
+#ifdef ENABLE_SARSAT
+#include "app/sarsat.h"  /* liaison RP2040 : HELLO / LEVEL / TEXT */
+#endif
 #ifdef ENABLE_AIRCOPY_UART
 #include "app/aircopy.h"
 #endif
@@ -1409,6 +1412,17 @@ void UART_HandleCommand(uint32_t Port)
                             pUART_Command->Buffer + sizeof(Header_t),
                             pUART_Command->Header.Size);
             break;
+#ifdef ENABLE_SARSAT
+        case SARSAT_CMD_CLEAR:
+        case SARSAT_CMD_TEXT:
+        case SARSAT_CMD_LEVEL:
+        case SARSAT_CMD_HELLO:
+        case SARSAT_CMD_BEACON:
+            SARSAT_HandleUART(pUART_Command->Header.ID,
+                              pUART_Command->Buffer + sizeof(Header_t),
+                              pUART_Command->Header.Size);
+            break;
+#endif
     } // switch
 
     #ifdef ENABLE_FEAT_F4HWN_K5VIEWER

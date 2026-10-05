@@ -220,6 +220,10 @@ enable_feature(ENABLE_APRS
     app/ax25.c
     app/afgain.c
 )
+# Liaison RP2040 (SARSAT : poignee de main HELLO, LEVEL, TEXT) -- indispensable a l'APRS
+enable_feature(ENABLE_SARSAT
+    app/sarsat.c
+)
 enable_feature(ENABLE_FEAT_F4HWN_OVERLAY_BEAM)
 enable_feature(ENABLE_FEAT_F4HWN_OVERLAY_INFO
     stack_usage.c
