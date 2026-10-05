@@ -45,6 +45,14 @@ add_executable(sarsat_rp2040
 
 target_include_directories(sarsat_rp2040 PRIVATE src)
 
+# main() ne doit pas inliner les helpers (SSTV, SONDE, APRS) : gcc les copiait
+# dans la trame de main() (5656 o avec le streaming SSTV, 840 o sans), et la
+# pile de 8 Ko (RAM haute, voir memmap) debordait sur la bss des le premier
+# paquet APRS -> RP2040 fige sans message. Mesure : cmake -DCMAKE_C_FLAGS=
+# -fstack-usage puis lire les .su (main.c.su).
+set_source_files_properties(src/main.c PROPERTIES
+    COMPILE_OPTIONS "-fno-inline-small-functions;-fno-inline-functions")
+
 target_compile_definitions(sarsat_rp2040 PRIVATE SARSAT_VERBOSE=0)
 # don't let a slow / stalled serial monitor block the ADC sample pump: a
 # console write gives up after 1 ms instead of the 500 ms default.
