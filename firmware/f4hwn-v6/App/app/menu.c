@@ -46,6 +46,7 @@
 #endif
 #include "helper/battery.h"
 #include "misc.h"
+#include "driver/py25q16.h"   /* persistance de dBmCorrTable (menu DbmCal) */
 #include "radio.h"
 #include "settings.h"
 #include "../driver/st7565.h"
@@ -58,6 +59,22 @@
 
 
 uint8_t gUnlockAllTxConfCnt;
+
+/* Menu cache "DbmCal" : ajuste dBmCorrTable[gRxVfo->Band] (correction fixe
+ * par bande du dBm affiche, jusqu'ici une constante compilee en dur). Met a
+ * jour la RAM a chaque pas de defilement ; n'ecrit en flash que sur
+ * confirmation (update_flash), pour ne pas user le secteur a chaque pas. */
+void writeDbmCorr(const int32_t value, const bool update_flash)
+{
+    const uint8_t band = gRxVfo->Band;
+    dBmCorrTable[band] = (int8_t)value;
+
+    if (update_flash)
+    {
+        const int8_t v = (int8_t)value;
+        PY25Q16_WriteBuffer(0x00A0B9 + band, &v, 1, false);
+    }
+}
 bool     gScanMixEditorActive;
 uint8_t  gScanMixEditorCursor;
 uint32_t gScanMixEditorMask;
@@ -479,6 +496,14 @@ int MENU_GetLimits(uint8_t menu_id, int32_t *pMin, int32_t *pMax)
             *pMax = ARRAY_SIZE(gSubMenu_OFF_ON) - 1;
             break;
         #endif
+        case MENU_SET_AFI:
+            //*pMin = 0;
+            *pMax = ARRAY_SIZE(gSubMenu_OFF_ON) - 1;
+            break;
+        case MENU_DBMCAL:
+            *pMin = -64;
+            *pMax = 64;
+            break;
         #ifdef ENABLE_FEAT_F4HWN_AUDIO
         case MENU_SET_AUD:
             //*pMin = 0;
@@ -953,6 +978,13 @@ void MENU_AcceptSetting(void)
         case MENU_SET_INV:
             gSetting_set_inv = gSubMenuSelection;
             break;
+        case MENU_SET_AFI:
+            gSetting_set_af_inv = gSubMenuSelection;
+            RADIO_SetModulation(gTxVfo->Modulation);
+            break;
+        case MENU_DBMCAL:
+            writeDbmCorr(gSubMenuSelection, true);
+            break;
         #ifdef ENABLE_FEAT_F4HWN_AUDIO
         case MENU_SET_AUD:
             if(gTxVfo->Modulation == MODULATION_AM)
@@ -1322,6 +1354,12 @@ void MENU_ShowCurrentSetting(void)
             break;
         case MENU_SET_INV:
             gSubMenuSelection = gSetting_set_inv;
+            break;
+        case MENU_SET_AFI:
+            gSubMenuSelection = gSetting_set_af_inv;
+            break;
+        case MENU_DBMCAL:
+            gSubMenuSelection = dBmCorrTable[gRxVfo->Band];
             break;
         #ifdef ENABLE_FEAT_F4HWN_AUDIO
         case MENU_SET_AUD:

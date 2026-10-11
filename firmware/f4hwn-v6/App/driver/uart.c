@@ -42,6 +42,19 @@ static bool UART_IsLogEnabled;
  * boucle (ecran, popup APRS...) tardait un peu. Puissance de 2 (DMA_INDEX). */
 uint8_t UART_DMA_Buffer[1024];
 
+/* Acces au tampon DMA pour le mode direct SSTV (app/sstv_tx.c) : lecture des
+ * octets pixel bruts sans passer par le parseur de trames. Anneau de 1024 o. */
+uint16_t SSTV_UartDmaWritePos(void)
+{
+    return (uint16_t)((sizeof(UART_DMA_Buffer) - LL_DMA_GetDataLength(DMA1, DMA_CHANNEL))
+                      & (sizeof(UART_DMA_Buffer) - 1u));
+}
+
+uint8_t SSTV_UartDmaPeek(uint16_t idx)
+{
+    return UART_DMA_Buffer[idx & (sizeof(UART_DMA_Buffer) - 1u)];
+}
+
 void UART_Init(void)
 {
     // PA9 TX

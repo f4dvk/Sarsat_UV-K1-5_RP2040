@@ -24,9 +24,15 @@
     #include "app/fm.h"
 #endif
 #include "app/uart.h"
+#ifdef ENABLE_SSTV
+#include "app/sstv_rx.h"
+#endif
 #include "app/aprs.h"   /* APRS RP2040 : commandes 0x06Dx */
 #ifdef ENABLE_SARSAT
 #include "app/sarsat.h"  /* liaison RP2040 : HELLO / LEVEL / TEXT */
+#endif
+#ifdef ENABLE_SONDE
+#include "app/sonde.h"   /* liaison RP2040 : radiosondes RS41/M10 */
 #endif
 #ifdef ENABLE_AIRCOPY_UART
 #include "app/aircopy.h"
@@ -1404,6 +1410,16 @@ void UART_HandleCommand(uint32_t Port)
             CMD_0602_WriteBK4819Reg(pUART_Command->Buffer);
             break;
 #endif
+#ifdef ENABLE_SSTV
+        case SSTV_CMD_RX_CLEAR:
+        case SSTV_CMD_RX_ROW:
+        case SSTV_CMD_RX_INFO:
+            SSTV_HandleUART(pUART_Command->Header.ID,
+                            pUART_Command->Buffer + sizeof(Header_t),
+                            pUART_Command->Header.Size);
+            break;
+#endif
+#ifdef ENABLE_APRS
         case APRS_CMD_RXTEXT:
         case APRS_CMD_RXINFO:
         case APRS_CMD_GPS:
@@ -1412,6 +1428,7 @@ void UART_HandleCommand(uint32_t Port)
                             pUART_Command->Buffer + sizeof(Header_t),
                             pUART_Command->Header.Size);
             break;
+#endif
 #ifdef ENABLE_SARSAT
         case SARSAT_CMD_CLEAR:
         case SARSAT_CMD_TEXT:
@@ -1421,6 +1438,14 @@ void UART_HandleCommand(uint32_t Port)
             SARSAT_HandleUART(pUART_Command->Header.ID,
                               pUART_Command->Buffer + sizeof(Header_t),
                               pUART_Command->Header.Size);
+            break;
+#endif
+#ifdef ENABLE_SONDE
+        case SONDE_CMD_CLEAR:
+        case SONDE_CMD_TEXT:
+            SONDE_HandleUART(pUART_Command->Header.ID,
+                             pUART_Command->Buffer + sizeof(Header_t),
+                             pUART_Command->Header.Size);
             break;
 #endif
     } // switch

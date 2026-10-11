@@ -818,7 +818,7 @@ void RADIO_SetupRegisters(bool switchToForeground)
             case BK4819_FILTER_BW_WIDE:
             case BK4819_FILTER_BW_NARROW:
             case BK4819_FILTER_BW_NARROWER:
-                BK4819_SetFilterBandwidth(Bandwidth, false);
+                BK4819_SetFilterBandwidth(Bandwidth, true);   /* pas de retrecissement faible-signal pour un VFO normal, comme la V1 */
                 break;
         }
     }
@@ -1040,7 +1040,7 @@ void RADIO_SetTxParameters(void)
         case BK4819_FILTER_BW_WIDE:
         case BK4819_FILTER_BW_NARROW:
         case BK4819_FILTER_BW_NARROWER:
-            BK4819_SetFilterBandwidth(Bandwidth, false);
+            BK4819_SetFilterBandwidth(Bandwidth, true);   /* idem */
             break;
     }
 
@@ -1085,19 +1085,19 @@ void RADIO_SetModulation(ModulationMode_t modulation)
 {
     #ifdef ENABLE_BYP_RAW_DEMODULATORS
     if (modulation == MODULATION_BYP || modulation == MODULATION_RAW) {
-        uint16_t reg_3d_val = 0x0000;
+        /* meme valeur pour BYP et RAW, comme la V1 (uv-k1-k5v3) */
+        uint16_t reg_3d_val = 0x2AAB;
 
         if (modulation == MODULATION_BYP) {
             // BYP on BK4829 uses full audio bypass profile.
             BK4819_EnterBypass();
-            reg_3d_val = 0x2AAB;
         } else {
             // RAW on BK4829 uses RX-only filter bypass profile.
             BK4819_EnterRaw();
-            // reg_3d_val = 0x0000;
         }
 
-        BK4819_SetRegValue(afDacGainRegSpec, 0xF);
+        /* honore le gain C-Board (afgain.c), pas force au max */
+        BK4819_SetRegValue(afDacGainRegSpec, gEeprom.DAC_GAIN & 0xF);
         BK4819_WriteRegister(BK4819_REG_3D, reg_3d_val);
         RADIO_SetupAGC(false, false);
         return;
@@ -1176,7 +1176,7 @@ void RADIO_SetModulation(ModulationMode_t modulation)
         }
     }
     
-    BK4819_SetRegValue(afDacGainRegSpec, 0xF);
+    BK4819_SetRegValue(afDacGainRegSpec, gEeprom.DAC_GAIN & 0xF);
     BK4819_WriteRegister(BK4819_REG_3D, modulation == MODULATION_USB ? 0 : 0x2AAB);
     BK4819_SetRegValue(afcDisableRegSpec, modulation != MODULATION_FM);
 
@@ -1185,7 +1185,7 @@ void RADIO_SetModulation(ModulationMode_t modulation)
 
 void RADIO_SetupAGC(bool listeningAM, bool disable)
 {
-    static uint8_t lastSettings = 0xFF;
+    static uint8_t lastSettings = 0;   /* aligne sur le comportement (non explicite) de la V1 -- 0xFF forcait une reecriture AGC au premier appel FM/USB normal apres tout etat different, ralentissant le reaccrochage */
     uint8_t newSettings = (listeningAM << 1) | disable;
     if (lastSettings == newSettings)
         return;

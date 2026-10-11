@@ -122,6 +122,7 @@ enum BacklightOnRxTx_t gSetting_backlight_on_tx_rx;
     uint8_t       gSetting_set_tot = 0;
     uint8_t       gSetting_set_ctr = 10;
     bool          gSetting_set_inv = false;
+    bool          gSetting_set_af_inv = true;   /* comportement actuel (Inverse) tant que l'EEPROM n'a pas ete relue */
     uint8_t       gSetting_set_eot = 0;
     uint8_t       gSetting_set_lck = SET_LCK_KEYS;
     bool          gSetting_set_met = 0;
@@ -150,7 +151,7 @@ enum BacklightOnRxTx_t gSetting_backlight_on_tx_rx;
         bool          gPowerHigh = false;
         bool          gRemoveOffset = false;
     #endif
-    int8_t dBmCorrTable[7] = {-15, -16, -10, -4, -7, -6, -1};
+    int8_t dBmCorrTable[7] = {-15, -16, -10, -4, -7, -16, -1};  /* UHF (BAND6_400MHz, bande SARSAT) : -6 -> -16, ecart ~10 dB mesure au banc */
 #endif
 
 #ifdef ENABLE_AUDIO_BAR

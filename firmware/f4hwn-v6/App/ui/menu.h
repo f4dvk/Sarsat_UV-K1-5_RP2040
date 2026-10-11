@@ -130,6 +130,8 @@ enum
     MENU_SET_LCK,
     MENU_SET_MET,
     MENU_SET_GUI,
+    MENU_SET_AFI,   /* REG_47 bit 13, "AF Output Inverse Mode" */
+    MENU_DBMCAL,    /* correction dBm par bande (dBmCorrTable), menu cache */
     MENU_SET_TMR,
     #ifdef ENABLE_FEAT_F4HWN_SCAN_FASTER
         MENU_SET_SCN,

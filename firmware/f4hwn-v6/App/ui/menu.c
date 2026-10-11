@@ -147,9 +147,10 @@ const t_menu_item MenuList[] =
     {"SetLck",      MENU_SET_LCK       },
     {"SetMet",      MENU_SET_MET       },
     {"SetGUI",      MENU_SET_GUI       },
-#ifdef ENABLE_FEAT_F4HWN_AUDIO    
+#ifdef ENABLE_FEAT_F4HWN_AUDIO
     {"SetRxA",      MENU_SET_AUD       },
 #endif
+    {"AfInv",       MENU_SET_AFI       },
     {"SetTmr",      MENU_SET_TMR       },
 #ifdef ENABLE_FEAT_F4HWN_SLEEP
     {"SetOff",       MENU_SET_OFF      },
@@ -192,6 +193,7 @@ const t_menu_item MenuList[] =
     {"FrCali",      MENU_F_CALI        }, // reference xtal calibration
 #endif
     {"BatCal",      MENU_BATCAL        }, // battery voltage calibration
+    {"DbmCal",      MENU_DBMCAL        }, // menu cache, correction dBm par bande
     {"BatTyp",      MENU_BATTYP        }, // battery type 1600/2200mAh
     {"SetNav",      MENU_SET_NAV       }, // set navigation (LEFT / RIGHT or UP / DOWN)
     {"Reset",       MENU_RESET         }, // might be better to move this to the hidden menu items ?
@@ -626,10 +628,11 @@ static const uint8_t CatAudio[]   = {
 #ifdef ENABLE_FEAT_F4HWN_AUDIO
     MENU_SET_AUD,
 #endif
+    MENU_SET_AFI,
 };
 static const uint8_t CatRadio[]   = { MENU_SQL, MENU_STE, MENU_RP_STE, MENU_ROGER, MENU_VOX, MENU_TDR };
 static const uint8_t CatDtmf[]    = { MENU_UPCODE, MENU_DWCODE, MENU_D_ST, MENU_D_PRE, MENU_D_LIVE_DEC };
-static const uint8_t CatService[] = { MENU_F_LOCK, MENU_350EN, MENU_BATCAL, MENU_BATTYP, MENU_SET_NAV, MENU_RESET };
+static const uint8_t CatService[] = { MENU_F_LOCK, MENU_350EN, MENU_BATCAL, MENU_DBMCAL, MENU_BATTYP, MENU_SET_NAV, MENU_RESET };
 
 typedef struct { const uint8_t *ids; uint8_t len; } cat_list_t;
 
@@ -1630,6 +1633,10 @@ void UI_DisplayMenu(void)
             break;
         }
 
+        case MENU_DBMCAL:
+            sprintf(String, "%d", gSubMenuSelection);
+            break;
+
         case MENU_BATTYP:
             choiceTable = gSubMenu_BATTYP;
             goto copy_menu_choice;
@@ -1707,6 +1714,10 @@ void UI_DisplayMenu(void)
             #else
                 strcpy(String, gSubMenu_NA);
             #endif
+            break;
+
+        case MENU_SET_AFI:
+            strcpy(String, gSubMenu_OFF_ON[gSubMenuSelection]);
             break;
 
         case MENU_TX_LOCK:

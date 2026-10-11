@@ -17,6 +17,9 @@
 #include <string.h>
 
 #include "app/app.h"
+#ifdef ENABLE_APRS
+#include "app/aprs.h"   /* APRS_GpsState() : voyant GPS barre de statut */
+#endif
 #include "app/chFrScanner.h"
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG
 #include "app/rxtx_log.h"
@@ -35,6 +38,7 @@
 #include "functions.h"
 #include "helper/battery.h"
 #include "misc.h"
+#include "scheduler.h"
 #include "settings.h"
 #include "ui/battery.h"
 #include "ui/helper.h"
@@ -317,6 +321,20 @@ void UI_DisplayStatus()
         x1 = x + sizeof(gFontPttClassic) + 1u;
     }
     x += sizeof(gFontPttClassic) + 5u;
+#endif
+
+#ifdef ENABLE_APRS
+    /* GPS indicator (voyant) : losange 5x5, clignote en recherche, fixe
+     * verrouille -- memes conventions que APRS_GpsState() (aprs.h). */
+    {
+        static const uint8_t BITMAP_GPS[5] = { 0x04, 0x0A, 0x15, 0x0A, 0x04 };
+        const uint8_t gps = APRS_GpsState();
+        if (gps == 2 || (gps == 1 && (SCHEDULER_GetTick10ms() % 80u) < 40u)) {
+            memcpy(line + x, BITMAP_GPS, sizeof(BITMAP_GPS));
+            x1 = x + sizeof(BITMAP_GPS) + 1u;
+        }
+        if (gps) x += sizeof(BITMAP_GPS) + 3u;
+    }
 #endif
 
     x = MAX(x1, 69u);

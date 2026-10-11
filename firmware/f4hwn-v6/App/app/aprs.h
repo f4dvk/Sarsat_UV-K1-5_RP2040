@@ -84,8 +84,8 @@ typedef struct {
                             * message (APRS screen -> "Send report"): an APRS
                             * addressee, <= 9 chars, e.g. "F4DVK-7". Empty =
                             * feature unavailable (like the NOCALL beacon guard) */
-    uint8_t  _rsv[6];      /* pad to 56 B (7 x 8-byte EEPROM pages) so
-                            * APRS_Save()'s 8-byte write loop stays exact      */
+    uint8_t  _rsv[6];      /* pad to 56 B -- matches the EEPROM region this
+                            * struct is written to whole (APRS_Save())        */
 } aprs_cfg_t;
 
 #define APRS_OPT_BL_DECODE  0x01u

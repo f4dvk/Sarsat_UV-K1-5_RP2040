@@ -224,6 +224,15 @@ enable_feature(ENABLE_APRS
 enable_feature(ENABLE_SARSAT
     app/sarsat.c
 )
+# SSTV RP2040 (2026-10-05) : emission en mode direct cadence par le RP2040, RX affiche
+enable_feature(ENABLE_SSTV
+    app/sstv_tx.c
+    app/sstv_rx.c
+)
+# Radiosondes RP2040 (RS41/M10) : ecran RX, meme principe que SARSAT/APRS
+enable_feature(ENABLE_SONDE
+    app/sonde.c
+)
 enable_feature(ENABLE_FEAT_F4HWN_OVERLAY_BEAM)
 enable_feature(ENABLE_FEAT_F4HWN_OVERLAY_INFO
     stack_usage.c

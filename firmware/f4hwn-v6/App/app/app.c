@@ -28,6 +28,12 @@
 #endif
 #include "app/app.h"
 #include "app/aprs.h"   /* APRS RP2040 */
+#ifdef ENABLE_SARSAT
+#include "app/sarsat.h" /* APP_RunSarsat (popup auto, gSarsatShowRequest) */
+#endif
+#ifdef ENABLE_SONDE
+#include "app/sonde.h"  /* APP_RunSonde (popup auto, gSondeShowRequest) */
+#endif
 #include "app/chFrScanner.h"
 #include "app/dtmf.h"
 #ifdef ENABLE_FLASHLIGHT
@@ -807,7 +813,11 @@ void APP_StartListening(FUNCTION_Type_t function)
     AUDIO_AudioPathOn();
     gEnableSpeaker = true;
 
-    if (gSetting_backlight_on_tx_rx & BACKLIGHT_ON_TR_RX) {
+    if ((gSetting_backlight_on_tx_rx & BACKLIGHT_ON_TR_RX)
+#ifdef ENABLE_APRS
+        && !APRS_QuietBacklight()   // 144-148 MHz APRS : lumiere seulement sur trame decodee
+#endif
+       ) {
         BACKLIGHT_TurnOn();
     }
 
@@ -1608,6 +1618,9 @@ void APP_Update(void)
 #ifdef ENABLE_NOAA
             || (gIsNoaaMode && (IS_NOAA_CHANNEL(gEeprom.ScreenChannel[0]) || IS_NOAA_CHANNEL(gEeprom.ScreenChannel[1])))
 #endif
+#ifdef ENABLE_APRS
+            || APRS_KeepAwake()         // 144-148 MHz : garder le RX actif pour la C-Board
+#endif
         ) {
             gBatterySaveCountdown_10ms = battery_save_count_10ms;
         } else {
@@ -1885,9 +1898,23 @@ void APP_TimeSlice10ms(void)
         // SCHEDULER_Enable();
     }
 #endif
+#ifdef ENABLE_APRS
     APRS_TimeSlice();
     if (gAprsShowRequest)              /* popup RX auto sur trame decodee (aprs.c) */
         APP_RunAprs();                 /* auto-guarde : se rearme si la radio est occupee */
+#endif
+#ifdef ENABLE_SARSAT
+    if (gSarsatShowRequest) {          /* ouverture auto sur trame decodee (sarsat.c) */
+        gSarsatShowRequest = false;
+        APP_RunSarsat();                /* auto-guarde : se rearme si la radio est occupee */
+    }
+#endif
+#ifdef ENABLE_SONDE
+    if (gSondeShowRequest) {           /* ouverture auto sur trame decodee (sonde.c) */
+        gSondeShowRequest = false;
+        APP_RunSonde();                 /* auto-guarde : se rearme si la radio est occupee */
+    }
+#endif
 
     if (gReducedService)
         return;

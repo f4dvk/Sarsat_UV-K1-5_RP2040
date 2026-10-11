@@ -514,6 +514,13 @@ gEeprom.FreqChannel[1]   = IS_FREQ_CHANNEL(Data16[5]) ? Data16[5] : (FREQ_CHANNE
         gSetting_set_lck = (Data[2] < SET_LCK_LEN) ? Data[2] : SET_LCK_KEYS;
         gSetting_set_met = (tmp >> 2) & 0x01;
         gSetting_set_gui = (tmp >> 3) & 0x01;
+        /* bit 1 de ce nibble, jamais utilise par aucun reglage existant.
+         * Polarite INVERSEE au stockage (bit=1 => AF NON inversee) expres :
+         * une EEPROM deja ecrite par un firmware d'avant ce correctif a
+         * forcement ce bit a 0, donc relit gSetting_set_af_inv = true au
+         * premier demarrage apres mise a jour -- le comportement fige
+         * qu'elle avait avant, aucun changement audio surprise. */
+        gSetting_set_af_inv = !((tmp >> 1) & 0x01);
 
 #ifdef ENABLE_FEAT_F4HWN_CTR
         int ctr_value = Data[5] & 0x0F;
@@ -1190,6 +1197,7 @@ void SETTINGS_SaveSettings(void)
 #endif
 
     tmp =   (gSetting_set_inv << 0) |
+            ((gSetting_set_af_inv ? 0 : 1) << 1) |
             (gSetting_set_met << 2) |
             (gSetting_set_gui << 3);
 

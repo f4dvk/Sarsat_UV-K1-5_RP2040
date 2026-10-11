@@ -87,6 +87,7 @@ static const AddrMapping_t ADDR_MAPPINGS[] = {
     //                       by app/rxtx_log.c, not through this layer)
     _MK_MAPPING(0x00A178, 0x00A178, 0x00A1B0),  /* RP2040: config APRS (56 o) */
     _MK_MAPPING(0x00A1C0, 0x00A1C0, 0x00A1C8),  /* RP2040: gain AF C-Board (8 o) */
+    _MK_MAPPING(0x00A1B0, 0x00A1B0, 0x00A1B8),  /* RP2040: selection image SSTV (8 o) */
 };
 
 static void AddrTranslate(uint16_t EEPROM_Addr, uint16_t Size, uint32_t *PY25Q16_Addr_out, uint16_t *Size_out, bool *End_out);

@@ -52,6 +52,19 @@ static struct {
 	uint8_t  clip, verdict;
 } s_lvl;
 
+/* RSSI (BK4819 chip reading, dBm) : affiche en continu dans la ligne de
+ * statut (gStatusLine, 8 px du haut) -- jamais utilisee par cet ecran par
+ * ailleurs, donc n'empiete pas sur les SARSAT_VIS_ROWS lignes decodees. */
+static void SARSAT_DrawRssi(void)
+{
+	const int16_t rssi_now = BK4819_GetRSSI_dBm() + dBmCorrTable[gRxVfo->Band];
+	char s[16];   /* "RSSI -127dBm" = 13 + NUL, marge gardee */
+	sprintf(s, "RSSI %ddBm", rssi_now);
+	UI_StatusClear();
+	GUI_DisplaySmallest(s, 2, 0, true, true);
+	ST7565_BlitStatusLine();
+}
+
 bool gSarsatShowRequest;
 
 /* made non-static by patch/app_uart.c.diff */
@@ -375,11 +388,38 @@ void APP_RunSarsat(void)
 		return;
 	}
 
+	RADIO_SelectVfos();
+
+	/* UHF only (2026-10-10, explicit request, all three radio firmwares):
+	 * a beacon lives at 406 MHz -- opening this screen on a VHF/HF channel
+	 * would just force FM on the wrong frequency and show nothing but
+	 * noise, with no indication why. Checked on gTxVfo (the VFO this
+	 * screen is about to take over). No retry/auto-popup suppression here
+	 * -- a real decode never fires this screen from off-band in the first
+	 * place (the RP2040 only hears something when the radio is actually
+	 * tuned to it), so this only ever catches a manual open on the wrong
+	 * channel, which the user has to fix themselves, not wait out. */
+	if (gTxVfo->Band != BAND6_400MHz) {
+		UI_DisplayClear();
+		UI_PrintStringSmallBold("SARSAT", 2, 0, 0);
+		UI_PrintStringSmallNormal("UHF only (406MHz)", 2, 0, 2);
+		UI_PrintStringSmallNormal("Tune the VFO first", 2, 0, 3);
+		UI_PrintStringSmallNormal("Press any key", 2, 0, 5);
+		ST7565_BlitFullScreen();
+		KEY_Code_t k;
+		do { k = KEYBOARD_Poll(); SYSTEM_DelayMs(20); } while (k != KEY_INVALID);
+		do { k = KEYBOARD_Poll(); SYSTEM_DelayMs(20); } while (k == KEY_INVALID);
+		gSarsatShowRequest = false;
+		GUI_SelectNextDisplay(DISPLAY_MAIN);
+		gUpdateStatus  = true;
+		gUpdateDisplay = true;
+		return;
+	}
+
 	/* Receive on the VFO the user has selected (gEeprom.TX_VFO), whatever the
 	 * dual-watch / cross-band state, and force the audio path open (the C-Board
 	 * tap must always hear the RF, squelch or not). */
 	const uint8_t s_saved_rx_vfo = gEeprom.RX_VFO;
-	RADIO_SelectVfos();
 	gRxVfo         = gTxVfo;
 	gEeprom.RX_VFO = gEeprom.TX_VFO;
 	RADIO_SetupRegisters(true);                 // tune BK4819 to that VFO
@@ -607,6 +647,7 @@ void APP_RunSarsat(void)
 			s_dirty = false;
 			SARSAT_Draw();
 		}
+		SARSAT_DrawRssi();          /* ligne de statut : RSSI en continu + a la decode */
 
 		/* a calibration reload elsewhere (VOX/MIC/cal menus, reachable from
 		 * this screen only via KEY_EXIT so not normally an issue here, but
@@ -648,7 +689,8 @@ void APP_RunSarsat(void)
 						s_dirty = true;
 						break;
 					}
-					SARSAT_Scroll(-d);
+					SARSAT_Scroll(d);   /* pas de -d : confirme sur l'air (2026-10-10), un -d
+					                     * en plus ici inversait le sens pour le gain juste au-dessus */
 					break;
 				}
 				case KEY_5:

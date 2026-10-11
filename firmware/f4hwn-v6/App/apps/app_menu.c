@@ -25,8 +25,14 @@
 #ifdef ENABLE_APRS
 #include "app/aprs.h"   /* APP_RunAprs (entree F+7) */
 #endif
+#ifdef ENABLE_SSTV
+#include "app/sstv_rx.h"  /* APP_RunSstvRx (entree F+7) */
+#endif
 #ifdef ENABLE_SARSAT
 #include "app/sarsat.h" /* APP_RunSarsat (entree F+7) */
+#endif
+#ifdef ENABLE_SONDE
+#include "app/sonde.h"  /* APP_RunSonde (entree F+7) */
 #endif
 #include "driver/backlight.h"
 #include "driver/st7565.h"
@@ -215,21 +221,36 @@ static void app_show_error(const app_header_t *header, uint8_t rc)
 /* Five visible slots; line 0 holds the separator and line 6 the key hints. */
 #define APP_MENU_ROWS 5u
 #define APP_MENU_SLOT_COUNT APP_SLOT_COUNT
-/* Entrees integrees (notre RP2040) : des lignes apres les emplacements, APRS-RP
- * puis SARSAT-RP */
+/* Entrees integrees (notre RP2040) en TETE de liste : A APRS-RP, B SARSAT-RP,
+ * C SSTV-RP, D SONDE-RP. Les emplacements d'overlay suivent (leur numero
+ * physique 1..N ne change pas, donc le telechargement des applications ne
+ * deplace rien). */
 #ifdef ENABLE_APRS
-#define APP_MENU_APRS_IDX    APP_SLOT_COUNT
+#define APP_MENU_APRS_IDX    0u
 #define APP_MENU_EXTRA_APRS  1u
 #else
 #define APP_MENU_EXTRA_APRS  0u
 #endif
 #ifdef ENABLE_SARSAT
-#define APP_MENU_SARSAT_IDX  (APP_SLOT_COUNT + APP_MENU_EXTRA_APRS)
+#define APP_MENU_SARSAT_IDX  APP_MENU_EXTRA_APRS
 #define APP_MENU_EXTRA_SARSAT 1u
 #else
 #define APP_MENU_EXTRA_SARSAT 0u
 #endif
-#define APP_MENU_ITEM_COUNT  (APP_SLOT_COUNT + APP_MENU_EXTRA_APRS + APP_MENU_EXTRA_SARSAT)
+#ifdef ENABLE_SSTV
+#define APP_MENU_SSTV_IDX    (APP_MENU_EXTRA_APRS + APP_MENU_EXTRA_SARSAT)
+#define APP_MENU_EXTRA_SSTV  1u
+#else
+#define APP_MENU_EXTRA_SSTV  0u
+#endif
+#ifdef ENABLE_SONDE
+#define APP_MENU_SONDE_IDX   (APP_MENU_EXTRA_APRS + APP_MENU_EXTRA_SARSAT + APP_MENU_EXTRA_SSTV)
+#define APP_MENU_EXTRA_SONDE 1u
+#else
+#define APP_MENU_EXTRA_SONDE 0u
+#endif
+#define APP_MENU_RP_COUNT    (APP_MENU_EXTRA_APRS + APP_MENU_EXTRA_SARSAT + APP_MENU_EXTRA_SSTV + APP_MENU_EXTRA_SONDE)
+#define APP_MENU_ITEM_COUNT  (APP_MENU_RP_COUNT + APP_SLOT_COUNT)
 
 _Static_assert(APP_MENU_SLOT_COUNT <= APP_SLOT_COUNT,
                "APP_MENU_SLOT_COUNT exceeds the physical app slot count");
@@ -299,13 +320,21 @@ void APP_MenuOpen(void)
             char number[3];
             char name[14];
             char size[6];
-            const uint8_t visible_number = (uint8_t)(slot + 1u);
             const uint8_t fbLine = (uint8_t)(slot - top + 1u);
+            const uint8_t phys = (uint8_t)(slot - APP_MENU_RP_COUNT);  /* emplacement overlay */
 
-            number[0] = (char)('0' + visible_number / 10u);
-            number[1] = (char)('0' + visible_number % 10u);
-            number[2] = '\0';
-
+            if (slot < APP_MENU_RP_COUNT)
+            {
+                number[0] = (char)('A' + slot);            /* A APRS-RP, B SARSAT-RP */
+                number[1] = '\0';
+            }
+            else
+            {
+                const uint8_t visible_number = (uint8_t)(phys + 1u);
+                number[0] = (char)('0' + visible_number / 10u);
+                number[1] = (char)('0' + visible_number % 10u);
+                number[2] = '\0';
+            }
             UI_PrintStringSmallNormal(number, 2u, 0, fbLine);
 #ifdef ENABLE_APRS
             if (slot == APP_MENU_APRS_IDX)
@@ -321,10 +350,24 @@ void APP_MenuOpen(void)
             }
             else
 #endif
-            if (installed & (uint16_t)((uint16_t)1u << slot))
+#ifdef ENABLE_SSTV
+            if (slot == APP_MENU_SSTV_IDX)
+            {
+                UI_PrintStringSmallNormal("SSTV-RP", APP_NAME_TEXT_X, 0, fbLine);
+            }
+            else
+#endif
+#ifdef ENABLE_SONDE
+            if (slot == APP_MENU_SONDE_IDX)
+            {
+                UI_PrintStringSmallNormal("SONDE-RP", APP_NAME_TEXT_X, 0, fbLine);
+            }
+            else
+#endif
+            if (slot >= APP_MENU_RP_COUNT && (installed & (uint16_t)((uint16_t)1u << phys)))
             {
                 app_header_t hdr;
-                APP_SlotInfo(slot, &hdr);
+                APP_SlotInfo(phys, &hdr);
                 app_copy(name, sizeof(name), hdr.name, APP_NAME_LEN);
                 app_format_size(size, hdr.code_size);
                 UI_PrintStringSmallNormal(name, APP_NAME_TEXT_X, 0, fbLine);
@@ -379,12 +422,31 @@ void APP_MenuOpen(void)
                     break;
                 }
 #endif
-                if (!(installed & (uint16_t)((uint16_t)1u << sel)))
+#ifdef ENABLE_SSTV
+                if (sel == APP_MENU_SSTV_IDX)
+                {
+                    APP_RunSstvRx();        /* SSTV RP2040 : RX arme, MENU = emettre */
+                    app_wait_release();
+                    break;
+                }
+#endif
+#ifdef ENABLE_SONDE
+                if (sel == APP_MENU_SONDE_IDX)
+                {
+                    APP_RunSonde();         /* SONDE RP2040 : ecran integre */
+                    app_wait_release();
+                    break;
+                }
+#endif
+                if (sel < APP_MENU_RP_COUNT)
+                    break;
+                const uint8_t phys = (uint8_t)(sel - APP_MENU_RP_COUNT);
+                if (!(installed & (uint16_t)((uint16_t)1u << phys)))
                     break;
 
                 app_header_t hdr;
-                APP_SlotInfo(sel, &hdr);
-                const uint8_t rc = APP_LaunchOverlay(sel);  /* runs until the app exits */
+                APP_SlotInfo(phys, &hdr);
+                const uint8_t rc = APP_LaunchOverlay(phys);  /* runs until the app exits */
                 if (rc != APP_OK)
                     app_show_error(&hdr, rc);               /* no longer silent */
                 app_wait_release();

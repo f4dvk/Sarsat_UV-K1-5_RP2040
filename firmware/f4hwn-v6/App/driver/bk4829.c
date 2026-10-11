@@ -633,8 +633,6 @@ void BK4819_EnableVox(uint16_t VoxEnableThreshold, uint16_t VoxDisableThreshold)
 
 void BK4819_SetFilterBandwidth(const BK4819_FilterBandwidth_t Bandwidth, const bool weak_no_different)
 {
-    (void)weak_no_different;
-
     // REG_43 on BK4829, per BK4829 Registers Table.
     //
     // <14:12> RF filter bandwidth (Apass = 0.1dB)
@@ -690,6 +688,7 @@ void BK4819_SetFilterBandwidth(const BK4819_FilterBandwidth_t Bandwidth, const b
             //          bit<5> is set in 25k/20k mode => RF 7.0 kHz, weak-RF
             //          4.0 kHz, AF Tx LPF2 3.0 kHz, FM gain 0 dB.
             val = 0x3028;
+            if (weak_no_different) val = 0x3628;   /* champ RF faible-signal <11:9> elargi a 0b011 (= champ principal), pas de retrecissement automatique */
             break;
 
         case BK4819_FILTER_BW_NARROW:   // 12.5kHz
@@ -698,6 +697,7 @@ void BK4819_SetFilterBandwidth(const BK4819_FilterBandwidth_t Bandwidth, const b
             //        = RF 4.0 kHz, weak-RF 2.0 kHz, AF Tx LPF2 2.5 kHz,
             //          12.5k mode, FM gain 0 dB.
             val = 0x4048;
+            if (weak_no_different) val = 0x4848;   /* idem, champ faible-signal <11:9> elargi a 0b100 */
             break;
 
         case BK4819_FILTER_BW_NARROWER: // 6.25kHz
@@ -706,6 +706,7 @@ void BK4819_SetFilterBandwidth(const BK4819_FilterBandwidth_t Bandwidth, const b
             //        = RF 3.0 kHz, weak-RF 2.0 kHz, AF Tx LPF2 2.5 kHz,
             //          6.25k mode, FM gain 0 dB.
             val = 0x2058;
+            if (weak_no_different) val = 0x2458;   /* idem, champ faible-signal <11:9> elargi a 0b010 */
             break;
 
         case BK4819_FILTER_BW_AM:   // Stock AM preset
@@ -839,11 +840,13 @@ void BK4819_SetupSquelch(
 
 void BK4819_SetAF(BK4819_AF_Type_t AF)
 {
-    // AF Output Inverse Mode = Inverse
-    // Undocumented bits 0x2040
-    //
-    BK4819_WriteRegister(BK4819_REG_47, 0x6042 | (AF << 8));
-    // BK4819_WriteRegister(BK4819_REG_47, (6u << 12) | (AF << 8) | (1u << 6));
+    // Valeur de reset d'usine BK4829 (datasheet "BK4829 Registers Table")
+    // pour AF=Normal : 0x6140 = (1u<<14) | (1u<<13 "AF Output Inverse Mode") |
+    // (1u<<6). Bit 13 est le seul bit DOCUMENTE qui differe de l'ancien
+    // 0x6042 -- desormais reglable depuis le menu "AfInv" au lieu d'etre
+    // fige. Les bits 14 et 6 restent fixes (non documentes par ailleurs).
+    BK4819_WriteRegister(BK4819_REG_47,
+        ((1u << 14) | (gSetting_set_af_inv ? (1u << 13) : 0u) | (1u << 6)) | (AF << 8));
 }
 
 void BK4819_SetRegValue(RegisterSpec s, uint16_t v) {
@@ -1207,8 +1210,18 @@ void BK4819_EnterRaw(void)
     reg2b &= ~((1u << 2) | (1u << 1) | (1u << 0));
     BK4819_WriteRegister(BK4819_REG_2B, reg2b);
 
-    // RAW profile keeps AFC disabled to preserve discriminator-like behavior.
-    BK4819_SetRegValue(afcDisableRegSpec, true);
+    // AFC reste active (alignee sur la V1, qui ne la desactive jamais pour
+    // son equivalent DSC ; confirme en vol sur l'ecran Sonde que la couper
+    // degrade le decodage M10) mais sa plage d'exursion est restreinte au
+    // minimum (REG_73<13:11> = 111) : elle peut toujours centrer une vraie
+    // derive de porteuse, mais ne part plus loin a la poursuite d'une
+    // rafale/bruit transitoire -- meme traitement que SARSAT (sarsat.c).
+    BK4819_SetRegValue(afcDisableRegSpec, false);
+    {
+        uint16_t r73 = BK4819_ReadRegister(0x73);
+        r73 = (uint16_t)((r73 & ~(0x7u << 11)) | (0x7u << 11));
+        BK4819_WriteRegister(0x73, r73);
+    }
 }
 #endif
 

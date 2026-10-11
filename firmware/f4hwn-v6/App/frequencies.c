@@ -20,12 +20,15 @@
 #include <assert.h>
 
 // the BK4819 has 2 bands it covers, 18MHz ~ 630MHz and 760MHz ~ 1300MHz
+// BK4829 (ce boitier) : fiche technique "18 MHz ~ 580 MHz, 760 MHz ~ 1160 MHz"
+// -- plafonds corriges en consequence (retour terrain : souffle sans RX utile
+// au-dela de ~1160 MHz sur le BK4829, jamais remonte sur le BK4819/V1).
 
 #define BX4819_band1_lower 1800000
-#define BX4819_band2_upper 130000000
+#define BX4819_band2_upper 116000000  /* BK4829: 760-1160 MHz, pas 1300 comme le BK4819 */
 
-const freq_band_table_t BX4819_band1 = {BX4819_band1_lower,  63000000};
-const freq_band_table_t BX4819_band2 = {84000000, BX4819_band2_upper};
+const freq_band_table_t BX4819_band1 = {BX4819_band1_lower,  58000000};  /* BK4829: 18-580 MHz */
+const freq_band_table_t BX4819_band2 = {76000000, BX4819_band2_upper};  /* BK4829: reouvre a 760 MHz */
 
 const freq_band_table_t frequencyBandTable[] =
 {

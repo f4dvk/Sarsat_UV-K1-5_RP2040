@@ -133,7 +133,9 @@ void (*const action_opt_table[ACTION_OPT_LEN])(void) = {
 #if defined(ENABLE_FEAT_F4HWN_BEACON) || defined(ENABLE_FEAT_F4HWN_OVERLAY_APPS)
     [ACTION_OPT_BEACON] = &ACTION_Beacon,
 #endif
+#ifdef ENABLE_APRS
     [ACTION_OPT_APRS] = &APP_RunAprs,
+#endif
 #ifdef ENABLE_SARSAT
     [ACTION_OPT_SARSAT] = &APP_RunSarsat,
 #endif

@@ -45,6 +45,9 @@
 #include "ui/helper.h"
 #include "ui/inputbox.h"
 #include "ui/main.h"
+#ifdef ENABLE_APRS
+#include "app/aprs.h"   /* APRS_TX_CHANNEL (icom header) */
+#endif
 #include "ui/ui.h"
 #include "audio.h"
 #include "menu.h"
@@ -978,6 +981,10 @@ void UI_DisplayAudioScope(void)
 #endif
 #endif  // ENABLE_FEAT_F4HWN_AUDIO_SCOPE || ENABLE_FEAT_F4HWN_OVERLAY_APPS
 
+// icomMode courant (UI_DisplayMain) : la barre RSSI se recentre et ne
+// clignote pas sur la ligne du VFO
+static bool s_icomMode;
+
 void DisplayRSSIBar(const bool now)
 {
 #if defined(ENABLE_RSSI_BAR)
@@ -1001,7 +1008,12 @@ void DisplayRSSIBar(const bool now)
     */
 
     unsigned int line;
-    if (isMainOnly())
+    if (s_icomMode)
+    {
+        // icomMode : rangees 3-5 libres entre la frequence et le VFO inactif
+        line = 4;
+    }
+    else if (isMainOnly())
     {
         line = 5;
     }
@@ -1014,7 +1026,7 @@ void DisplayRSSIBar(const bool now)
     //sprintf(String, "%d", RxBlink);
     //UI_PrintStringSmallBold(String, 80, 0, RxLine);
 
-    if(RxLine >= 0 && center_line != CENTER_LINE_IN_USE)
+    if(RxLine >= 0 && center_line != CENTER_LINE_IN_USE && !s_icomMode)
     {
         static bool clean = false;
         uint8_t *p_line0 = gFrameBuffer[RxLine + 0];
@@ -1443,6 +1455,190 @@ static void UI_PrintActionPickerLabel(uint8_t index, uint8_t line, bool big)
 }
 #endif
 
+#ifdef ENABLE_FEAT_F4HWN
+// 6 px header font (digits 0-9 then A-Z, + -), 1 byte/column, bit0 = top.
+// Same table as the V1 port's HDR6 (tools/gen_bigdigits.py::build_hdr).
+#define HDR6_MAXW  8
+static const uint8_t HDR6_W[38] = { 5, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 5, 4, 6, 6, 1, 1, 6, 4, 7, 6, 6, 4, 6, 6, 5, 6, 6, 6, 8, 6, 5, 6, 7, 2 };
+static const uint8_t HDR6[38][8] = {
+  { 0x1E, 0x33, 0x21, 0x33, 0x1E, 0x00, 0x00, 0x00 },  // 0
+  { 0x21, 0x3F, 0x3F, 0x20, 0x00, 0x00, 0x00, 0x00 },  // 1 (top-right pixel of the flag was missing)
+  { 0x31, 0x31, 0x39, 0x2F, 0x26, 0x00, 0x00, 0x00 },  // 2
+  { 0x21, 0x21, 0x25, 0x3F, 0x1E, 0x00, 0x00, 0x00 },  // 3
+  { 0x18, 0x1C, 0x1B, 0x3F, 0x1E, 0x00, 0x00, 0x00 },  // 4
+  { 0x27, 0x27, 0x25, 0x3D, 0x19, 0x00, 0x00, 0x00 },  // 5
+  { 0x1E, 0x3F, 0x25, 0x25, 0x3D, 0x00, 0x00, 0x00 },  // 6
+  { 0x01, 0x21, 0x39, 0x0F, 0x03, 0x00, 0x00, 0x00 },  // 7
+  { 0x1A, 0x3F, 0x2D, 0x2F, 0x3F, 0x00, 0x00, 0x00 },  // 8
+  { 0x26, 0x2F, 0x29, 0x3F, 0x1E, 0x00, 0x00, 0x00 },  // 9
+  { 0x30, 0x1C, 0x1F, 0x1B, 0x1E, 0x38, 0x00, 0x00 },  // A
+  { 0x3F, 0x3F, 0x25, 0x25, 0x3F, 0x1E, 0x00, 0x00 },  // B
+  { 0x1E, 0x3F, 0x21, 0x21, 0x21, 0x21, 0x00, 0x00 },  // C
+  { 0x3F, 0x3F, 0x21, 0x21, 0x33, 0x1E, 0x00, 0x00 },  // D
+  { 0x3F, 0x3F, 0x25, 0x25, 0x25, 0x00, 0x00, 0x00 },  // E
+  { 0x3F, 0x3F, 0x05, 0x05, 0x00, 0x00, 0x00, 0x00 },  // F
+  { 0x1E, 0x33, 0x21, 0x21, 0x29, 0x39, 0x00, 0x00 },  // G
+  { 0x3F, 0x3F, 0x04, 0x04, 0x0C, 0x3F, 0x00, 0x00 },  // H
+  { 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },  // I
+  { 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },  // J
+  { 0x3F, 0x3F, 0x0C, 0x1E, 0x13, 0x31, 0x00, 0x00 },  // K
+  { 0x3F, 0x3F, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00 },  // L
+  { 0x3F, 0x3F, 0x0E, 0x18, 0x1C, 0x07, 0x3F, 0x00 },  // M
+  { 0x3F, 0x3F, 0x06, 0x1C, 0x38, 0x3F, 0x00, 0x00 },  // N
+  { 0x1E, 0x33, 0x21, 0x21, 0x33, 0x1E, 0x00, 0x00 },  // O
+  { 0x3F, 0x0F, 0x09, 0x0F, 0x00, 0x00, 0x00, 0x00 },  // P
+  { 0x1E, 0x33, 0x21, 0x21, 0x33, 0x1E, 0x00, 0x00 },  // Q
+  { 0x3F, 0x3F, 0x09, 0x0D, 0x1F, 0x36, 0x00, 0x00 },  // R
+  { 0x26, 0x27, 0x2D, 0x2D, 0x39, 0x00, 0x00, 0x00 },  // S
+  { 0x01, 0x01, 0x01, 0x3F, 0x01, 0x01, 0x00, 0x00 },  // T
+  { 0x1F, 0x3F, 0x20, 0x20, 0x20, 0x3F, 0x00, 0x00 },  // U
+  { 0x03, 0x0E, 0x38, 0x30, 0x1C, 0x07, 0x00, 0x00 },  // V
+  { 0x0F, 0x3C, 0x38, 0x0F, 0x07, 0x3C, 0x38, 0x0F },  // W
+  { 0x21, 0x33, 0x1E, 0x0C, 0x1E, 0x33, 0x00, 0x00 },  // X
+  { 0x03, 0x06, 0x3C, 0x06, 0x03, 0x00, 0x00, 0x00 },  // Y
+  { 0x31, 0x31, 0x39, 0x2D, 0x27, 0x23, 0x00, 0x00 },  // Z
+  { 0x08, 0x08, 0x08, 0x3E, 0x08, 0x08, 0x08, 0x00 },  // +
+  { 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },  // -
+};
+
+// header text in the HDR6 font, shifted 1 px down so the inverted bar keeps
+// a clean 1 px edge top AND bottom of the 8 px row
+static void HdrPut(const char *s, int x)
+{
+    for (const char *p = s; *p && x < LCD_WIDTH; p++) {
+        int i = (*p >= '0' && *p <= '9') ? *p - '0'
+              : (*p >= 'A' && *p <= 'Z') ? *p - 'A' + 10
+              : (*p == '+') ? 36 : (*p == '-') ? 37 : -1;
+        if (i < 0) { x += 3; continue; }
+        for (int c = 0; c < HDR6_W[i] && x < LCD_WIDTH; c++, x++)
+            gFrameBuffer[0][x] |= (uint8_t)(HDR6[i][c] << 1);
+        x++;
+    }
+}
+static int HdrW(const char *s)
+{
+    int w = 0;
+    for (const char *p = s; *p; p++) {
+        int i = (*p >= '0' && *p <= '9') ? *p - '0'
+              : (*p >= 'A' && *p <= 'Z') ? *p - 'A' + 10
+              : (*p == '+') ? 36 : (*p == '-') ? 37 : -1;
+        w += (i < 0) ? 3 : HDR6_W[i] + 1;
+    }
+    return w;
+}
+
+// inverted round-cornered header on row 0 -- VFO/channel id, TX/RX, power,
+// offset dir, CTCSS, reverse, modulation+bandwidth, all at fixed x so
+// nothing shifts when a flag appears/disappears.
+static void MainHeaderIcom(unsigned int actVFO, const VFO_Info_t *v, uint16_t sc,
+                            bool tx, bool rx)
+{
+    char s[12];
+    if (gScanStateDir != SCAN_OFF) strcpy(s, "SCAN");   // balayage (icom)
+    else
+#ifdef ENABLE_APRS
+    if (sc == APRS_TX_CHANNEL) strcpy(s, "APRS");
+    else
+#endif
+    if (IS_MR_CHANNEL(sc)) sprintf(s, "MR %u", sc + 1);   // channel number; the
+                                                         // name (if any) goes
+                                                         // on row 3 below
+    else                   sprintf(s, "VFO %c", (char)('A' + actVFO));
+    HdrPut(s, 3);
+
+    HdrPut(tx ? "TX" : rx ? "RX" : "", 43);
+
+    // `floor_x` tracks where the last *actually drawn* fixed-position field
+    // ends, so the modulation text (right-anchored, can run to ~30 px for
+    // "RAW N"/"BYP N") only gets pushed right as far as genuinely needed --
+    // a flat worst-case constant here previously pushed it right even with
+    // nothing else on screen, and "RAW" alone then overflowed past the
+    // right edge (LCD_WIDTH).
+    int floor_x;
+    {
+        // Same OUTPUT_POWER -> code mapping as the detail line below
+        // (L1..L5/M/H, OUTPUT_POWER_USER resolved through gSetting_set_pwr)
+        // -- a naive "0/1/2 -> L/M/H" guess here didn't match this
+        // firmware's 8-level scale (OUTPUT_POWER_USER=0, LOW1..LOW5=1..5,
+        // MID=6, HIGH=7) and showed a different reading than the line below.
+        static const char *const pwr_short[] = { "L1","L2","L3","L4","L5","M","H" };
+        uint8_t p = v->OUTPUT_POWER % 8;
+        p = (p == OUTPUT_POWER_USER) ? gSetting_set_pwr : p - 1;
+        const char *pw = pwr_short[p < 7 ? p : 0];
+        HdrPut(pw, 60);
+        floor_x = 60 + HdrW(pw);
+    }
+
+    if (v->freq_config_RX.Frequency != v->freq_config_TX.Frequency) {
+        int d = v->TX_OFFSET_FREQUENCY_DIRECTION % 3;
+        const char *dstr = d == 1 ? "+" : d == 2 ? "-" : "";
+        if (dstr[0]) {
+            int x = floor_x + 4;
+            HdrPut(dstr, x);
+            floor_x = x + HdrW(dstr);
+        }
+    }
+    {
+        const bool tc = v->freq_config_TX.CodeType != CODE_TYPE_OFF;
+        const bool rc = v->freq_config_RX.CodeType != CODE_TYPE_OFF;
+        const char *ct = tc && rc ? "CT" : tc ? "T" : "";
+        if (ct[0]) {
+            int x = floor_x + 4;
+            HdrPut(ct, x);
+            floor_x = x + HdrW(ct);
+        }
+    }
+    if (v->FrequencyReverse) {
+        int x = floor_x + 4;
+        HdrPut("R", x);
+        floor_x = x + HdrW("R");
+    }
+
+    {
+        char hr[8];
+        sprintf(hr, "%s%s",
+            v->Modulation < MODULATION_UKNOWN ? gModulationStr[v->Modulation] : "",
+            v->CHANNEL_BANDWIDTH == BANDWIDTH_NARROW ? " N" : "");
+        int hx = LCD_WIDTH - 3 - HdrW(hr);
+        if (hx < floor_x + 4) hx = floor_x + 4;
+        HdrPut(hr, hx);
+    }
+    for (unsigned int x = 0; x < LCD_WIDTH; x++)
+        gFrameBuffer[0][x] ^= 0xFF;
+    gFrameBuffer[0][0]         &= 0x7E;
+    gFrameBuffer[0][LCD_WIDTH - 1] &= 0x7E;
+}
+
+// idle (non-active) VFO on row 6, one small line -- "A  145.52500  FM", or
+// "A  APRS"/"A  M12 name" for the dedicated APRS channel / a memory channel.
+static void MainIdleVfoIcom(unsigned int idleVFO)
+{
+    char s[24], nm[16];
+    const VFO_Info_t *v2 = &gEeprom.VfoInfo[idleVFO];
+    const uint16_t   sc2 = gEeprom.ScreenChannel[idleVFO];
+    const uint32_t   f2  = v2->pRX->Frequency;
+#ifdef ENABLE_APRS
+    if (sc2 == APRS_TX_CHANNEL) {
+        sprintf(s, "%c  APRS", (char)('A' + idleVFO));
+    } else
+#endif
+    if (IS_MR_CHANNEL(sc2)) {
+        SETTINGS_FetchChannelName(nm, sc2);
+        if (nm[0])
+            sprintf(s, "%c  M%u %s", (char)('A' + idleVFO), sc2 + 1, nm);
+        else
+            sprintf(s, "%c  M%u %u.%03u", (char)('A' + idleVFO), sc2 + 1,
+                (unsigned int)(f2 / 100000), (unsigned int)((f2 / 100) % 1000));
+    } else {
+        sprintf(s, "%c  %u.%05u  %s", (char)('A' + idleVFO),
+            (unsigned int)(f2 / 100000), (unsigned int)(f2 % 100000),
+            v2->Modulation < MODULATION_UKNOWN ? gModulationStr[v2->Modulation] : "");
+    }
+    s[20] = 0;
+    UI_PrintStringSmallNormal(s, 2, 0, 6);
+}
+#endif  // ENABLE_FEAT_F4HWN
+
 void UI_DisplayMain(void)
 {
     char               String[22];
@@ -1501,6 +1697,26 @@ void UI_DisplayMain(void)
 
     unsigned int activeTxVFO = gRxVfoIsActive ? gEeprom.RX_VFO : gEeprom.TX_VFO;
 
+#ifdef ENABLE_FEAT_F4HWN
+    // "Icom" look (port de la 5.9, MainHeaderIcom()) : VFO normal seulement --
+    // pas de MR/NOAA hors frequence, DTMF, scan ou VFO non normal. Le reste
+    // garde l'affichage v6.
+    const bool icomMode = !gDTMF_InputMode
+#ifdef ENABLE_DTMF_CALLING
+        && gDTMF_CallState == DTMF_CALL_STATE_NONE
+#endif
+        && (IS_FREQ_CHANNEL(gEeprom.ScreenChannel[activeTxVFO])
+            || (IS_MR_CHANNEL(gEeprom.ScreenChannel[activeTxVFO]) && gInputBoxIndex == 0))
+        && VfoState[activeTxVFO] == VFO_STATE_NORMAL;
+    if (icomMode)
+        MainHeaderIcom(activeTxVFO, &gEeprom.VfoInfo[activeTxVFO],
+                        gEeprom.ScreenChannel[activeTxVFO],
+                        gCurrentFunction == FUNCTION_TRANSMIT, FUNCTION_IsRx());
+#else
+    const bool icomMode = false;
+#endif
+    s_icomMode = icomMode;
+
     for (unsigned int vfo_num = 0; vfo_num < 2; vfo_num++)
     {
 #ifdef ENABLE_FEAT_F4HWN_FULL_WATCH
@@ -1519,7 +1735,7 @@ void UI_DisplayMain(void)
         const unsigned int line0 = 0;  // text screen line
         const unsigned int line1 = 4;
         unsigned int line;
-        if (isMainOnly())
+        if (isMainOnly() || icomMode)
         {
             line       = 0;
         }
@@ -1542,7 +1758,7 @@ void UI_DisplayMain(void)
 #endif
 
 #ifdef ENABLE_FEAT_F4HWN
-    if (isMainOnly())
+    if (isMainOnly() || icomMode)
     {
         if (activeTxVFO != vfo_num)
         {
@@ -1552,7 +1768,7 @@ void UI_DisplayMain(void)
 #endif
 
 #ifdef ENABLE_FEAT_F4HWN
-        if (activeTxVFO != vfo_num || isMainOnly())
+        if (activeTxVFO != vfo_num || isMainOnly() || icomMode)
 #else
         if (activeTxVFO != vfo_num) // this is not active TX VFO
 #endif
@@ -1668,12 +1884,13 @@ void UI_DisplayMain(void)
             }
 
             // highlight the selected/used VFO with a marker
-            if (isMainVFO)
+            if (isMainVFO && !icomMode)
                 memcpy(p_line0 + 0, BITMAP_VFO_Default, sizeof(BITMAP_VFO_Default));
         }
         else // active TX VFO
-        {   // highlight the selected/used VFO with a marker
-            if (isMainVFO)
+        {   // highlight the selected/used VFO with a marker (l'en-tete icom le remplace)
+            if (icomMode) { /* rien : l'en-tete couvre la ligne 0 */ }
+            else if (isMainVFO)
                 memcpy(p_line0 + 0, BITMAP_VFO_Default, sizeof(BITMAP_VFO_Default));
             else
                 memcpy(p_line0 + 0, BITMAP_VFO_NotDefault, sizeof(BITMAP_VFO_NotDefault));
@@ -1689,7 +1906,8 @@ void UI_DisplayMain(void)
                 {   // show the TX symbol
                     mode = VFO_MODE_TX;
                     //UI_PrintStringSmallBold("TX", 8, 0, line);
-                    GUI_DisplaySmallest("TX", 10, line == 0 ? 1 : 33, false, true);
+                    if (!icomMode)   // icom : TX/RX dans l'en-tete
+                        GUI_DisplaySmallest("TX", 10, line == 0 ? 1 : 33, false, true);
 
                 }
             }
@@ -1733,7 +1951,8 @@ void UI_DisplayMain(void)
                             #endif
                         }
 
-                        GUI_DisplaySmallest(String, 10, RxLine == 0 ? 1 : 33, false, true);
+                        if (!icomMode)   // icom : TX/RX dans l'en-tete
+                            GUI_DisplaySmallest(String, 10, RxLine == 0 ? 1 : 33, false, true);
                         //UI_PrintStringSmallBold("RX", 8, 0, RxLine);
                     // }
 #else
@@ -1766,11 +1985,12 @@ void UI_DisplayMain(void)
         if((gScanStateDir == SCAN_OFF || vfo_num != gEeprom.RX_VFO) && TX_freq_check(frequency) != 0 && displayVfo->TX_LOCK == true)
         {
             if (!FUNCTION_IsRx() || RxOnVfofrequency != frequency)
-                memcpy(p_line0 + 24, BITMAP_VFO_Lock, sizeof(BITMAP_VFO_Lock));
+                if (!icomMode)
+                    memcpy(p_line0 + 24, BITMAP_VFO_Lock, sizeof(BITMAP_VFO_Lock));
         }
 
-        if (IS_MR_CHANNEL(displayChannel))
-        {   // channel mode
+        if (IS_MR_CHANNEL(displayChannel) && !icomMode)
+        {   // channel mode (icom : numero dans l'en-tete, frequence centree)
             const unsigned int x = 1;
             const bool inputting = gInputBoxIndex != 0 && gEeprom.TX_VFO == vfo_num;
             if (!inputting || gScanStateDir != SCAN_OFF)
@@ -1796,8 +2016,8 @@ void UI_DisplayMain(void)
             }
             */
         }
-        else if (IS_FREQ_CHANNEL(displayChannel))
-        {   // frequency mode
+        else if (IS_FREQ_CHANNEL(displayChannel) && !icomMode)
+        {   // frequency mode -- badge "F3" (icom : pas de badge, la frequence est centree)
             // show the frequency band number
             const unsigned int x = 2;
             const uint8_t f = 1 + displayChannel - FREQ_CHANNEL_FIRST;
@@ -1855,19 +2075,30 @@ void UI_DisplayMain(void)
             const char * ascii = INPUTBOX_GetAscii();
             bool isGigaF = frequency>=_1GHz_in_KHz;
             sprintf(String, "%.*s.%.3s", 3 + isGigaF, ascii, ascii + 3 + isGigaF);
+            // icomMode : meme decalage de rangee que la frequence active
+            const unsigned int freqRow = icomMode ? line + 1 : line;
 #ifdef ENABLE_BIG_FREQ
             if(!isGigaF) {
-                // show the remaining 2 small frequency digits
-                UI_PrintStringSmallNormal(String + 7, 113, 0, line + 1);
-                String[7] = 0;
-                // show the main large frequency digits
-                UI_DisplayFrequency(String, 32, line, false);
+                if (icomMode) {
+                    // "DDD.DDD" pendant la saisie -- bloc gros chiffres centre
+                    const int el = (int)strlen(String);        // ex. 7
+                    const int bw = (el - 1) * 13 + 3;          // (el-1) chiffres * 13 px + 3 px point
+                    int fx = (LCD_WIDTH - bw) / 2;
+                    if (fx < 2) fx = 2;
+                    UI_DisplayFrequency(String, fx, freqRow, false);
+                } else {
+                    // show the remaining 2 small frequency digits
+                    UI_PrintStringSmallNormal(String + 7, 113, 0, freqRow + 1);
+                    String[7] = 0;
+                    // show the main large frequency digits
+                    UI_DisplayFrequency(String, 32, freqRow, false);
+                }
             }
             else
 #endif
             {
                 // show the frequency in the main font
-                UI_PrintString(String, 32, 0, line, 8);
+                UI_PrintString(String, icomMode ? 0 : 32, icomMode ? LCD_WIDTH : 0, freqRow, 8);
             }
 
             continue;
@@ -1880,7 +2111,7 @@ void UI_DisplayMain(void)
                     frequency = displayVfo->pTX->Frequency;
             }
 
-            if (IS_MR_CHANNEL(displayChannel))
+            if (IS_MR_CHANNEL(displayChannel) && !icomMode)
             {   // it's a channel
 
                 #ifdef ENABLE_FEAT_F4HWN_RESCUE_OPS
@@ -2046,20 +2277,51 @@ void UI_DisplayMain(void)
             {   // frequency mode
                 UI_FormatFrequency(frequency, String);
 
+                // icomMode : la ligne 0 porte l'en-tete, les chiffres passent
+                // d'une rangee plus bas (comme la 5.9)
+                const unsigned int freqRow = icomMode ? line + 1 : line;
+
 #ifdef ENABLE_BIG_FREQ
-                if(frequency < _1GHz_in_KHz) {
+                if(frequency < _1GHz_in_KHz && icomMode) {
+                    // centre le bloc entier (gros chiffres + 2 petits) en icom
+                    char e[12];
+                    sprintf(e, "%u.%05u",
+                        (unsigned)(frequency / 100000), (unsigned)(frequency % 100000));
+                    const int el = (int)strlen(e);
+                    const int bw = (el - 3) * 13 + 3;      // 13 px/chiffre, 3 px point
+                    int fx = (LCD_WIDTH - bw - 14) / 2;    // 14 px = 2 petits glyphes
+                    if (fx < 2) fx = 2;
+                    UI_PrintStringSmallNormal(e + el - 2, fx + bw, 0, freqRow + 1);
+                    e[el - 2] = 0;
+                    UI_DisplayFrequency(e, fx, freqRow, false);
+                }
+                else if(frequency < _1GHz_in_KHz) {
                     // show the remaining 2 small frequency digits
-                    UI_PrintStringSmallNormal(String + 7, 113, 0, line + 1);
+                    UI_PrintStringSmallNormal(String + 7, 113, 0, freqRow + 1);
                     String[7] = 0;
                     // show the main large frequency digits
-                    UI_DisplayFrequency(String, 32, line, false);
+                    UI_DisplayFrequency(String, 32, freqRow, false);
                 }
                 else
 #endif
                 {
                     // show the frequency in the main font
-                    UI_PrintString(String, 32, 0, line, 8);
+                    UI_PrintString(String, icomMode ? 0 : 32, icomMode ? LCD_WIDTH : 0, freqRow, 8);
                 }
+
+#ifdef ENABLE_FEAT_F4HWN
+                // icom canal memoire : le numero est dans l'en-tete, le nom du
+                // canal (s'il existe) occupe la rangee libre sous la frequence
+                if (icomMode && IS_MR_CHANNEL(displayChannel))
+                {
+                    SETTINGS_FetchChannelName(String, displayChannel);
+                    if (String[0])
+                    {
+                        String[16] = 0;
+                        UI_PrintStringSmallNormal(String, 2, 0, line + 3);
+                    }
+                }
+#endif
 
                 // show the channel symbols
                 const ChannelAttributes_t* att = MR_GetChannelAttributes(displayChannel);
@@ -2116,7 +2378,7 @@ void UI_DisplayMain(void)
                         Level = gVFO_RSSI_bar_level[vfo_num];
                 #endif
             }
-            if(Level >= 0)
+            if(Level >= 0 && !icomMode)   // icom : pas de barres sur la frequence
                 DrawSmallPowerBars(p_line1 + LCD_WIDTH, Level);
         }
 
@@ -2159,6 +2421,8 @@ void UI_DisplayMain(void)
         }
 
 #if ENABLE_FEAT_F4HWN
+        if (!icomMode)
+        {
         const FREQ_Config_t *pConfig = (mode == VFO_MODE_TX) ? vfoInfo->pTX : vfoInfo->pRX;
         int8_t shift = 0;
 
@@ -2213,11 +2477,12 @@ void UI_DisplayMain(void)
 
             GUI_DisplaySmallest(String, 68 + shift, line == 0 ? 17 : 49, false, true);
         }
+        }
 #else
         UI_PrintStringSmallNormal(s, LCD_WIDTH + 24, 0, line + 1);
 #endif
 
-        if (state == VFO_STATE_NORMAL)
+        if (state == VFO_STATE_NORMAL && !icomMode)
         {   // show the TX power
             uint8_t currentPower = vfoInfo->OUTPUT_POWER % 8;
             uint8_t arrowPos = 19;
@@ -2255,7 +2520,7 @@ void UI_DisplayMain(void)
             }
         }
 
-        if (vfoInfo->freq_config_RX.Frequency != vfoInfo->freq_config_TX.Frequency)
+        if (vfoInfo->freq_config_RX.Frequency != vfoInfo->freq_config_TX.Frequency && !icomMode)
         {   // show the TX offset symbol
             int i = vfoInfo->TX_OFFSET_FREQUENCY_DIRECTION % 3;
 
@@ -2275,6 +2540,8 @@ void UI_DisplayMain(void)
             #endif
 
 #if ENABLE_FEAT_F4HWN
+        if (!icomMode)
+        {
         if (gSetting_set_gui)
         {
             UI_PrintStringSmallNormal(dir_list[i], LCD_WIDTH + 60, 0, line + 1);
@@ -2292,6 +2559,7 @@ void UI_DisplayMain(void)
             }
             #endif
         }
+        }
 #else
             UI_PrintStringSmallNormal(dir_list[i], LCD_WIDTH + 54, 0, line + 1);
 #endif
@@ -2300,6 +2568,8 @@ void UI_DisplayMain(void)
         // show the TX/RX reverse symbol
         if (vfoInfo->FrequencyReverse)
 #if ENABLE_FEAT_F4HWN
+        if (!icomMode)
+        {
         {
             if (gSetting_set_gui)
             {
@@ -2310,11 +2580,14 @@ void UI_DisplayMain(void)
                 GUI_DisplaySmallest("R", 51, line == 0 ? 17 : 49, false, true);
             }
         }
+        }
 #else
             UI_PrintStringSmallNormal("R", LCD_WIDTH + 62, 0, line + 1);
 #endif
 
 #if ENABLE_FEAT_F4HWN
+        if (!icomMode)
+        {
         const uint8_t displayBandwidth = vfoInfo->CHANNEL_BANDWIDTH;
 
         #ifdef ENABLE_FEAT_F4HWN_NARROWER
@@ -2347,15 +2620,19 @@ void UI_DisplayMain(void)
                 GUI_DisplaySmallest(bandWidthNames[displayBandwidth], 91, line == 0 ? 17 : 49, false, true);
             }
         #endif
+        }
 #else
         if (vfoInfo->CHANNEL_BANDWIDTH == BANDWIDTH_NARROW)
             UI_PrintStringSmallNormal("N", LCD_WIDTH + 70, 0, line + 1);
 #endif
 
 #ifdef ENABLE_DTMF_CALLING
+        if (!icomMode)
+        {
         // show the DTMF decoding symbol
         if (vfoInfo->DTMF_DECODING_ENABLE || gSetting_KILLED)
             UI_PrintStringSmallNormal("DTMF", LCD_WIDTH + 78, 0, line + 1);
+        }
 #endif
 
 #ifndef ENABLE_FEAT_F4HWN
@@ -2365,6 +2642,8 @@ void UI_DisplayMain(void)
 #endif
 
 #ifdef ENABLE_FEAT_F4HWN
+        if (!icomMode)
+        {
         /*
         if(isMainVFO)   
         {
@@ -2403,6 +2682,7 @@ void UI_DisplayMain(void)
            } else {
                 GUI_DisplaySmallest(String, 110, line == 0 ? 17 : 49, false, true);
            }
+        }
         }
 #endif
     }
@@ -2544,7 +2824,23 @@ void UI_DisplayMain(void)
     //if(gEeprom.MENU_LOCK == false)
     //{
     //#endif
-    if (isMainOnly() && !gDTMF_InputMode)
+    if (icomMode)
+    {
+        // en-tete icom : ligne 6 = resume du VFO inactif, ou la plage balayee
+#ifdef ENABLE_SCAN_RANGES
+        if (gScanStateDir != SCAN_OFF && gScanRangeStart)
+        {
+            char r[24];
+            sprintf(r, "%u.%05u-%u.%05u",
+                (unsigned int)(gScanRangeStart / 100000), (unsigned int)(gScanRangeStart % 100000),
+                (unsigned int)(gScanRangeStop / 100000), (unsigned int)(gScanRangeStop % 100000));
+            UI_PrintStringSmallNormal(r, 2, 0, 6);
+        }
+        else
+#endif
+        MainIdleVfoIcom(activeTxVFO ^ 1u);
+    }
+    else if (isMainOnly() && !gDTMF_InputMode)
     {
         sprintf(String, "VFO %s", activeTxVFO ? "B" : "A");
 

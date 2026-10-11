@@ -287,8 +287,12 @@ static void APRS_Ensure(void)
 static void APRS_Save(void)
 {
     gAprsCfg.magic = APRS_EE_MAGIC;
-    for (unsigned i = 0; i < sizeof(gAprsCfg); i += 8)
-        EEPROM_WriteBuffer(APRS_EE_ADDR + i, (const uint8_t *)&gAprsCfg + i, 1);
+    /* BUG (corrige 2026-10-10) : la boucle precedente avancait i de 8 en 8
+     * mais ecrivait Size=1 a chaque appel -- 7 octets sur 8 de gAprsCfg
+     * n'etaient donc jamais ecrits en EEPROM (symptome remonte : les
+     * coordonnees GPS manuelles ne survivaient pas a la sortie du menu).
+     * Un seul appel pleine taille, meme motif que sstv_tx.c/afgain.c. */
+    EEPROM_WriteBuffer(APRS_EE_ADDR, &gAprsCfg, sizeof(gAprsCfg));
 }
 
 void APRS_SaveConfig(void) { APRS_Save(); }   /* public wrapper */
@@ -1193,6 +1197,19 @@ void APRS_ApplyAfc(void)
         BK4819_WriteRegister(0x73, want);
 }
 
+/* RSSI (BK4819 chip reading, dBm) : affiche en continu dans la ligne de
+ * statut -- voir sarsat.c's note identique. Appelee chaque tour de boucle
+ * de APP_RunAprs(), quelle que soit la sous-vue (menu config/RX/ADRASEC). */
+static void APRS_DrawRssi(void)
+{
+    const int16_t rssi_now = BK4819_GetRSSI_dBm() + dBmCorrTable[gRxVfo->Band];
+    char s[16];   /* "RSSI -127dBm" = 13 + NUL, marge gardee */
+    sprintf(s, "RSSI %ddBm", rssi_now);
+    UI_StatusClear();
+    GUI_DisplaySmallest(s, 2, 0, true, true);
+    ST7565_BlitStatusLine();
+}
+
 /* Intentionally INERT (2026-09-09).
  *
  * This used to force a batch of RX-chain registers (0x54/0x55, 0x43, 0x7B,
@@ -1316,15 +1333,17 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
     }
 }
 
-/* SetNav (menu Service) : sur l'UV-K1 les touches physiques UP/DOWN sont
- * etiquetees LEFT/RIGHT et le firmware inverse deja partout ailleurs
- * (App/app/menu.c, main.c, scanner.c, spectrum.c...) le sens de UP/DOWN
- * quand gEeprom.SET_NAV est faux (defaut sur UV-K1, cf. App/settings.c) --
- * on suit la meme convention ici pour que l'ecran config APRS navigue dans
- * le meme sens que le reste du firmware sur ce boitier. */
+/* SetNav (menu Service) : confirme sur l'air (2026-10-10) que cet ecran,
+ * contrairement au menu principal/scanner/spectrum (qui lisent les touches
+ * via un chemin deja compense pour l'UV-K1), lit KEYBOARD_Poll() a travers
+ * la boucle bloquante de APP_RunAprs() -- deja compensee en amont pour ce
+ * boitier. Inverser ICI EN PLUS, quand SET_NAV est faux (defaut UV-K1),
+ * annulait la compensation au lieu de l'appliquer -- d'ou le sens de
+ * defilement inverse remonte par l'utilisateur. N'inverser que lorsque
+ * SET_NAV est VRAI (K5, qui n'a pas besoin de cette compensation amont). */
 static KEY_Code_t nav_key(KEY_Code_t k)
 {
-    if (gEeprom.SET_NAV || (k != KEY_UP && k != KEY_DOWN))
+    if (!gEeprom.SET_NAV || (k != KEY_UP && k != KEY_DOWN))
         return k;
     return (k == KEY_UP) ? KEY_DOWN : KEY_UP;
 }
@@ -1992,6 +2011,7 @@ void APP_RunAprs(void)
                                   * screen is open are not chopped (1 reg read) */
         APRS_ApplyRxAudio();     /* keep the RX audio profile FLAT for the C-Board */
         APRS_ApplyAfc();         /* keep the AFC excursion range restricted          */
+        APRS_DrawRssi();         /* ligne de statut : RSSI en continu + a la decode  */
         /* mini squelch: the main loop (which normally does this) is blocked.
          * carrier present -> speaker path + RX LED on (the C-Board hears it).
          * carrier gone    -> mute the speaker, but only a bit LATER: APRS
