@@ -10,14 +10,25 @@
  
  #include "audio.h"
  #include "board.h"
-@@ -236,12 +239,15 @@
+@@ -236,12 +239,26 @@
  			ACTION_Power();
  			break;
- 
+
  		case KEY_7:
 +#if defined(ENABLE_SARSAT) || defined(ENABLE_APRS) || defined(ENABLE_SONDE)
-+			APP_RunRpMenu();                 // F+7 : SARSAT-RP/APRS-RP/SONDE-RP picker
-+			gRequestDisplayScreen = DISPLAY_MAIN;
++			if (beep) {                       // appui court (processFKeyFunction) : ecran de lancement
++				APP_RunRpMenu();               // F+7 : SARSAT-RP/APRS-RP/SONDE-RP picker
++				gRequestDisplayScreen = DISPLAY_MAIN;
++			}
++#ifdef ENABLE_VOX
++			else {
++				ACTION_Vox();                   // F+7 maintenu (2 s) : VOX, comme f4hwn-v6/V3
++			}
++#else
++			else {
++				toggle_chan_scanlist();
++			}
++#endif
 +#elif defined(ENABLE_VOX)
 -#ifdef ENABLE_VOX
  			ACTION_Vox();
@@ -25,5 +36,5 @@
  			toggle_chan_scanlist();
  #endif
  			break;
- 
+
  		case KEY_8:

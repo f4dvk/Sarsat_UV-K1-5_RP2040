@@ -100,6 +100,17 @@ void APP_RunRpMenu(void)
                 case KEY_MENU:
                     RP_ITEMS[sel].run();   /* blocking: runs until its own EXIT */
                     dirty = true;          /* redraw the list on return        */
+                    /* The EXIT press that closed that screen is often still
+                     * physically held when this loop resumes (its own cleanup
+                     * takes a few ms, well under a normal key-up time).
+                     * Without this, that same press reads as a fresh
+                     * KEY_EXIT edge right here (armed was never cleared,
+                     * prev_key is stale from before the launch) and closes
+                     * this menu too -- one EXIT, two screens down, landing
+                     * on the main VFO instead of back on this list. Require
+                     * a release first, same as the launch key itself at
+                     * entry. */
+                    armed = false;
                     break;
                 case KEY_EXIT:
                     run = false;
