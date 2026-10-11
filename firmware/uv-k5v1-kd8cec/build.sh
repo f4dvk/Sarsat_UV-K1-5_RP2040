@@ -4,8 +4,13 @@
 # Base : KD8CEC "uvk5cec-0.3q" source (egzumer lineage, DP32G030 / BK4819).
 # Adds : ENABLE_SARSAT (app/sarsat.c + a handful of small hooks) and turns on
 #        ENABLE_BYP_RAW_DEMODULATORS so MODULATION_RAW exists.
-# Radio UART stays at the DualTachyon divisor (Frequency/39053 ≈ 38400 8N1) —
-# no change needed, it already matches the RP2040 side.
+# Radio UART (2026-10-10, corrige) : le RP2040 est passe a 230400 bauds le
+# 2026-09-26 (branche SSTV, streaming temps reel -- CFG_RADIO_UART_BAUD,
+# rp2040/src/decoder_config.h), une image unique partagee par toutes les
+# radios -- ce firmware V1 n'avait pas suivi et restait sur le diviseur
+# DualTachyon d'origine (Frequency/39053 ≈ 38400 8N1), rompant la liaison
+# SARSAT/APRS/Sonde. Voir patch/driver_uart.c.diff (meme constante x6,
+# 230400/38400 = 6 exactement).
 #
 # Usage:  ./build.sh /path/to/uvk5cec-0.3q
 set -euo pipefail
@@ -30,6 +35,11 @@ cp "$HERE/patch/ax25.c"   app/ax25.c
 cp "$HERE/patch/ax25.h"   app/ax25.h
 cp "$HERE/patch/sonde.c"  app/sonde.c
 cp "$HERE/patch/sonde.h"  app/sonde.h
+# F+7 : ecran de lancement (A/B/C) -- remplace les combos fixes F+0/F+5/F+8
+# et les entrees F1/F2 assignables, un seul point d'entree desormais. Pas de
+# loader d'overlay-app a porter (cette base n'en a pas) : juste une liste.
+cp "$HERE/patch/rp_menu.c" app/rp_menu.c
+cp "$HERE/patch/rp_menu.h" app/rp_menu.h
 
 #    Replace the CTCSS/DCS + frequency scanner (DISPLAY_SCANNER) with stubs:
 #    ~1.5 KB of flash for a feature unrelated to SARSAT/APRS. The normal
@@ -46,23 +56,17 @@ cp "$HERE/patch/ui_scanner.c" ui/scanner.c
 #    APRS SmartBeaconing work. The 3 helpers in ceccommon.c are gutted (kept as
 #    empty stubs so their call sites need no edit); the menu entry + submenu
 #    strings + handlers are dropped (MENU_LIVESEEK enum slot kept, now unused).
-#    settings.h / app_action.c / ui_menu.c (this last one already patched
-#    above for Live Seek, second hunk added here) : register SARSAT/APRS/
-#    SONDE as ACTION_OPT_* options in the existing, stock "Side1/Side2/M key
-#    -- short or long (2 s) press -- runs an assignable action" mechanism
-#    (Fonctions > SIDE1/SIDE2/M, already present on this firmware exactly as
-#    on V3 -- KEY_1/2/M_LONG_PRESS_ACTION, gSubMenu_SIDEFUNCTIONS,
-#    action_opt_table[]). On explicit user request ("un appui 2 secondes sur
-#    une touche fait la fonction associee [sur V3], peut-on faire de meme sur
-#    la v1 ?") -- this project's own screens were only reachable via the
-#    fixed F+8/F+5/F+0 combos on V1 until now (see app_main.c.diff below),
-#    never through this assignable mechanism, unlike V3 (see
-#    firmware/uv-k1-k5v3/build.sh's own ACTION_OPT_SARSAT/APRS/SONDE
-#    patches). F+8/F+5/F+0 are left untouched -- this is purely additive, a
-#    second way in for whoever prefers a long-press on SIDE1/SIDE2/M to
-#    opening the menu to pick which screen.
-for d in app_uart.c app_app.c app_main.c settings.c settings.h radio.h radio.c ui_main.c ui_main.h ui_status.c misc.h Makefile \
-         ceccommon.c ui_menu.c ui_menu.h app_menu.c app_action.c; do
+#    SARSAT/APRS/Sonde (F+8/F+5/F+0 fixed combos, then also the F1/F2
+#    assignable "Side1/Side2/M -- short or long press" mechanism) had two
+#    entry points on this port, unlike V3's single ACTION_OPT_* one. Revu
+#    sur demande explicite (2026-10-10) : un seul point d'entree desormais,
+#    l'ecran F+7 (apps/rp_menu.c, A/B/C). F+0/F+5/F+8 retrouvent leur
+#    fonction d'origine (ACTION_FM ou rien, NOAA, FrequencyReverse) --
+#    voir app/rp_menu.c/.h et app_main.c.diff. Pas de patch sur
+#    settings.h/app_action.c : plus rien a y changer, les deux fichiers
+#    restent stock.
+for d in app_uart.c driver_uart.c app_app.c app_main.c settings.c radio.h radio.c ui_main.c ui_main.h ui_status.c misc.h Makefile \
+         ceccommon.c ui_menu.c ui_menu.h app_menu.c; do
     f="${d/_//}"
     patch -p0 --forward "$f" < "$HERE/patch/${d}.diff"
 done

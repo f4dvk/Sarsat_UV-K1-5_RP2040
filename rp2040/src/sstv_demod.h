@@ -78,6 +78,20 @@
 typedef struct {
     /* DC-centring (adaptive hi/lo envelope, same shape as sonde_demod_t) */
     int32_t lp, lp_hi, lp_lo;
+    int32_t lp2;        /* deuxieme etage passe-bas (repli si pas de passe-bande) */
+    const struct sstv_bpcoef *cf;   /* passe-bande 900..2400 Hz, NULL = repli */
+    int64_t  bqs[2][4];             /* etats biquad : x1, x2, y1, y2 (HP puis LP) */
+    bool    zc_armed;
+    /* Detecteur de synchro spectral (Goertzel 1200 Hz, par blocs de 5 ms) :
+     * independant de l'amplitude, comme les autres decodeurs. */
+    bool     gz_on;       /* actif seulement a 48 kHz / 32 kHz (coefficients fixes) */
+    int32_t  gz_c;        /* 2cos(2*pi*1200/fs), Q14 */
+    uint32_t gz_blk;      /* taille du bloc, echantillons */
+    uint32_t gz_n;
+    int64_t  gz_s1, gz_s2;
+    uint64_t gz_e;
+    uint32_t blk_run;     /* blocs de synchro consecutifs (tolerance 1 manquant) */
+    uint32_t blk_miss;   /* hysteresis : le signal est passe franchement sous zero */
     int32_t prev_centered;
 
     /* Zero-crossing frequency estimator */
@@ -125,9 +139,30 @@ typedef struct {
     uint32_t n_leader2;   /* ST_IN_BREAK -> ST_LEADER2 (front montant valide) */
     uint32_t n_vis_done;  /* ST_VIS_WINDOW termine (9 fenetres), bon ou mauvais */
     uint32_t n_vis_ok;    /* VIS accepte : parite bonne ET code Scottie 1 (60) */
+
+    /* Mesure de l'horloge de l'emetteur (2026-10-04) : une synchro de ligne
+     * = 1200 Hz tenu au moins 6 ms. L'intervalle entre deux synchros est la
+     * duree reelle d'une ligne (base de temps = quartz du RP2040). */
+    uint32_t sample_idx;  /* index absolu de l'echantillon courant */
+    uint32_t sync_run;    /* compteur tolerant a ~1200 Hz (monte vite, descend lentement) */
+    bool     sync_armed;  /* une synchro est en cours (un seul evenement par impulsion) */
+    uint32_t sync_last;   /* debut de la derniere synchro */
+    bool     sync_have;
+    uint32_t n_sync_iv;   /* intervalles retenus (400..460 ms) */
+    uint64_t sum_sync_iv; /* somme de ces intervalles, en echantillons */
+    uint32_t n_freq;      /* diagnostic : echantillons avec une estimation de frequence */
+    uint32_t n_band;      /* diagnostic : echantillons dans la bande 1140..1260 Hz */
+    uint32_t n_band_run;  /* diagnostic : plus longue serie consecutive dans la bande */
+    uint32_t band_run;    /* diagnostic : serie courante */
+    uint32_t fhist[8];    /* diagnostic : histogramme des frequences estimees */
 } sstv_demod_t;
 
 void sstv_demod_init(sstv_demod_t *d, uint32_t sample_rate_hz);
+
+/* Ecart d'horloge de l'emetteur, en ppm (+ = emetteur plus lent que le
+ * nominal Scottie 1 de 428,22 ms par ligne). Retourne false tant qu'il n'y a
+ * pas au moins min_iv intervalles de synchro retenus. */
+bool sstv_demod_clock_error_ppm(const sstv_demod_t *d, uint32_t min_iv, int32_t *ppm);
 
 /* Feed one discriminator sample (same |x| <= ~32768 convention as
  * sonde_demod.h/audio_slicer.h). Returns true once a full line (Green+Blue+

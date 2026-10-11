@@ -436,14 +436,14 @@ perl -0pi -e 's/static void SendReply\(uint32_t Port, void \*pReply, uint16_t Si
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SARSAT\n        case SARSAT_CMD_CLEAR:\n        case SARSAT_CMD_TEXT:\n        case SARSAT_CMD_LEVEL:\n        case SARSAT_CMD_HELLO:\n        case SARSAT_CMD_BEACON:\n            SARSAT_HandleUART(pUART_Command->Header.ID,\n                              pUART_Command->Buffer + sizeof(Header_t),\n                              pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_APRS\n        case APRS_CMD_RXTEXT:\n        case APRS_CMD_RXINFO:\n        case APRS_CMD_GPS:\n        case APRS_CMD_DIGI:\n            APRS_HandleUART(pUART_Command->Header.ID,\n                            pUART_Command->Buffer + sizeof(Header_t),\n                            pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SONDE\n        case SONDE_CMD_CLEAR:\n        case SONDE_CMD_TEXT:\n            SONDE_HandleUART(pUART_Command->Header.ID,\n                             pUART_Command->Buffer + sizeof(Header_t),\n                             pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
-perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SSTV\n        case SSTV_CMD_RX_CLEAR:\n        case SSTV_CMD_RX_ROW:\n        case SSTV_CMD_CLK_START:\n        case SSTV_CMD_CLK_END:\n        case SSTV_CMD_TRIM:\n        case SSTV_CMD_CLK_RESULT:\n            SSTV_HandleUART(pUART_Command->Header.ID,\n                            pUART_Command->Buffer + sizeof(Header_t),\n                            pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
+perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SSTV\n        case SSTV_CMD_RX_CLEAR:\n        case SSTV_CMD_RX_ROW:\n            SSTV_HandleUART(pUART_Command->Header.ID,\n                            pUART_Command->Buffer + sizeof(Header_t),\n                            pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 
 # App/settings.h : nouvelles entrées ACTION_OPT_SARSAT / ACTION_OPT_APRS /
 # ACTION_OPT_SONDE (juste avant le sentinel LEN)
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SARSAT\n    ACTION_OPT_SARSAT,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_APRS\n    ACTION_OPT_APRS,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SONDE\n    ACTION_OPT_SONDE,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
-perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SSTV\n    ACTION_OPT_SSTV1,\n    ACTION_OPT_SSTVM1,\n    ACTION_OPT_SSTVPD90,\n    ACTION_OPT_SSTVPD120,\n    ACTION_OPT_SSTV_RX,\n    ACTION_OPT_SSTV_IMG,\n    ACTION_OPT_SSTV_CAL,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
+perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SSTV\n    ACTION_OPT_SSTV1,\n    ACTION_OPT_SSTVM1,\n    ACTION_OPT_SSTVPD90,\n    ACTION_OPT_SSTVPD120,\n    ACTION_OPT_SSTV_RX,\n    ACTION_OPT_SSTV_IMG,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
 
 # App/app/action.c : ouvrir l'écran SARSAT / APRS / Sonde depuis une touche
 # assignable (F1/F2 court/long via le menu F4HWN standard "F1Shrt"/"F1Long"/
@@ -457,14 +457,14 @@ perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/son
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SARSAT\n    [ACTION_OPT_SARSAT] = &APP_RunSarsat,\n#endif\n$&/' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_APRS\n    [ACTION_OPT_APRS] = &APP_RunAprs,\n#endif\n$&/' App/app/action.c
 perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SONDE\n    [ACTION_OPT_SONDE] = &APP_RunSonde,\n#endif\n$&/' App/app/action.c
-perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SSTV\n    [ACTION_OPT_SSTV1] = &SSTV_SendScottie1,\n    [ACTION_OPT_SSTVM1] = &SSTV_SendMartin1,\n    [ACTION_OPT_SSTVPD90] = &SSTV_SendPD90,\n    [ACTION_OPT_SSTVPD120] = &SSTV_SendPD120,\n    [ACTION_OPT_SSTV_RX] = &APP_RunSstvRx,\n    [ACTION_OPT_SSTV_IMG] = &SSTV_ToggleImage,\n    [ACTION_OPT_SSTV_CAL] = &APP_RunSstvCal,\n#endif\n$&/' App/app/action.c
+perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SSTV\n    [ACTION_OPT_SSTV1] = &SSTV_SendScottie1,\n    [ACTION_OPT_SSTVM1] = &SSTV_SendMartin1,\n    [ACTION_OPT_SSTVPD90] = &SSTV_SendPD90,\n    [ACTION_OPT_SSTVPD120] = &SSTV_SendPD120,\n    [ACTION_OPT_SSTV_RX] = &APP_RunSstvRx,\n    [ACTION_OPT_SSTV_IMG] = &SSTV_ToggleImage,\n#endif\n$&/' App/app/action.c
 
 # App/ui/menu.c : entrées "SARSAT" / "APRS" / "SONDE" dans la liste des
 # fonctions assignables
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SARSAT\n    {"SARSAT",          ACTION_OPT_SARSAT},\n#endif\n$&/' App/ui/menu.c
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_APRS\n    {"APRS",            ACTION_OPT_APRS},\n#endif\n$&/' App/ui/menu.c
 perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SONDE\n    {"SONDE",           ACTION_OPT_SONDE},\n#endif\n$&/' App/ui/menu.c
-perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SSTV\n    {"SSTV1",           ACTION_OPT_SSTV1},\n    {"SSTVM1",          ACTION_OPT_SSTVM1},\n    {"SSTVPD90",         ACTION_OPT_SSTVPD90},\n    {"SSTVPD120",        ACTION_OPT_SSTVPD120},\n    {"SSTVRx",          ACTION_OPT_SSTV_RX},\n    {"SSTVImg",         ACTION_OPT_SSTV_IMG},\n    {"SSTVCal",         ACTION_OPT_SSTV_CAL},\n#endif\n$&/' App/ui/menu.c
+perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SSTV\n    {"SSTV1",           ACTION_OPT_SSTV1},\n    {"SSTVM1",          ACTION_OPT_SSTVM1},\n    {"SSTVPD90",         ACTION_OPT_SSTVPD90},\n    {"SSTVPD120",        ACTION_OPT_SSTVPD120},\n    {"SSTVRx",          ACTION_OPT_SSTV_RX},\n    {"SSTVImg",         ACTION_OPT_SSTV_IMG},\n#endif\n$&/' App/ui/menu.c
 
 # App/driver/eeprom_compat.c : reserver de la place dans la queue non revendiquee
 # du secteur "Settings" (0x00A170.. , juste apres "Settings Version" qui
@@ -479,7 +479,6 @@ perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_S
 perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A170, 0x00A170, 0x00A178),  \/\/ Sarsat_UV-K1-5_RP2040: gain AF C-Board (8 o)\n\};\n/' App/driver/eeprom_compat.c
 perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A178, 0x00A178, 0x00A1B0),  \/\/ Sarsat_UV-K1-5_RP2040: config APRS (56 o)\n\};\n/' App/driver/eeprom_compat.c
 perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A1B0, 0x00A1B0, 0x00A1B8),  \/\/ Sarsat_UV-K1-5_RP2040: selection image SSTV (8 o)\n\};\n/' App/driver/eeprom_compat.c
-perl -0pi -e 's/\n\};\n/\n    _MK_MAPPING(0x00A1B8, 0x00A1B8, 0x00A1C0),  \/\/ Sarsat_UV-K1-5_RP2040: correction horloge SSTV (trim, 8 o)\n\};\n/' App/driver/eeprom_compat.c
 
 # App/scheduler.h + .c : exposer millis10() (compteur 10 ms deja tenu par
 # SysTick_Handler() dans gGlobalSysTickCounter, jusqu'ici prive a ce fichier) --
@@ -676,7 +675,6 @@ grep -q 'app/ax25.c'        App/CMakeLists.txt || { echo "!! CMakeLists.txt : ax
 grep -q '0x00A170, 0x00A170, 0x00A178' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping gain AF"; exit 1; }
 grep -q '0x00A178, 0x00A178, 0x00A1B0' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping config APRS"; exit 1; }
 grep -q '0x00A1B0, 0x00A1B0, 0x00A1B8' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping selection image SSTV"; exit 1; }
-grep -q '0x00A1B8, 0x00A1B8, 0x00A1C0' App/driver/eeprom_compat.c || { echo "!! eeprom_compat.c : mapping trim horloge SSTV"; exit 1; }
 grep -qE '^uint32_t millis10\(void\);' App/scheduler.h || { echo "!! scheduler.h : millis10() declaration"; exit 1; }
 grep -qE '^uint32_t millis10\(void\) \{ return gGlobalSysTickCounter; \}' App/scheduler.c || { echo "!! scheduler.c : millis10() definition"; exit 1; }
 grep -q 'diff >> 2' App/driver/backlight.c || { echo "!! backlight.c : fondu raccourci"; exit 1; }
@@ -728,11 +726,6 @@ grep -q 'ACTION_OPT_SSTV_IMG.*SSTV_ToggleImage' App/app/action.c || { echo "!! a
 grep -q 'SSTVImg.*ACTION_OPT_SSTV_IMG' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv img"; exit 1; }
 grep -q 'app/sstv_rx.h'    App/app/uart.c || { echo "!! uart.c : include sstv rx"; exit 1; }
 grep -q 'SSTV_HandleUART'  App/app/uart.c || { echo "!! uart.c : dispatch sstv rx"; exit 1; }
-grep -q 'case SSTV_CMD_CLK_RESULT:' App/app/uart.c || { echo "!! uart.c : dispatch resultat horloge"; exit 1; }
-grep -q 'ACTION_OPT_SSTV_CAL' App/settings.h || { echo "!! settings.h : action SSTVCal"; exit 1; }
-grep -q 'APP_RunSstvCal' App/app/action.c || { echo "!! action.c : action SSTVCal"; exit 1; }
-grep -q 'SSTVCal' App/ui/menu.c || { echo "!! menu.c : entree SSTVCal"; exit 1; }
-grep -q 'case SSTV_CMD_CLK_END:' App/app/uart.c || { echo "!! uart.c : dispatch calibration horloge"; exit 1; }
 grep -q 'SSTV_CMD_RX_ROW'  App/app/uart.c || { echo "!! uart.c : dispatch sstv rx row"; exit 1; }
 grep -q 'app/sstv_rx.h' App/app/sarsat.c     || { echo "!! sarsat.c : include sstv rx"; exit 1; }
 grep -q 'SSTV_RxActive' App/app/sarsat.c     || { echo "!! sarsat.c : fusion etat screen sstv"; exit 1; }

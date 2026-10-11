@@ -1,0 +1,606 @@
+/* Copyright 2025 muzkr
+ * https://github.com/muzkr
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *     Unless required by applicable law or agreed to in writing, software
+ *     distributed under the License is distributed on an "AS IS" BASIS,
+ *     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *     See the License for the specific language governing permissions and
+ *     limitations under the License.
+ */
+
+#include <string.h>
+
+#include "driver/py25q16.h"
+#include "driver/gpio.h"
+#include "py32f071_ll_bus.h"
+#include "py32f071_ll_system.h"
+#include "py32f071_ll_spi.h"
+#include "py32f071_ll_dma.h"
+#include "driver/system.h"
+#include "driver/systick.h"
+#include "external/printf/printf.h"
+#include "misc.h"
+
+/* MBMARK was an on-screen SPI trace used while bringing up multiboot (M1/M2).
+ * The tracer is gone; keep the call sites as no-ops. */
+#define MBMARK(s)
+
+// #define DEBUG
+
+#define SPIx SPI2
+#define CHANNEL_RD LL_DMA_CHANNEL_4
+#define CHANNEL_WR LL_DMA_CHANNEL_5
+
+#define CS_PIN GPIO_MAKE_PIN(GPIOA, LL_GPIO_PIN_3)
+
+#define SECTOR_SIZE 0x1000
+#define PAGE_SIZE 0x100
+
+static uint32_t SectorCacheAddr = 0x1000000;
+#ifdef ENABLE_FEAT_F4HWN_MULTIBOOT_OVERLAY
+/* The restore-only RAM stub is copied over this cache immediately before it
+ * erases internal flash. A reset always follows, so the cache is never needed
+ * again after the overlay becomes active. */
+static uint8_t SectorCache[SECTOR_SIZE]
+    __attribute__((section(".bss.mb_workspace"), aligned(4), used));
+#else
+static uint8_t SectorCache[SECTOR_SIZE];
+#endif
+static uint8_t BlackHole[4] __attribute__((aligned(4)));
+static volatile bool TC_Flag;
+
+#ifdef ENABLE_FEAT_F4HWN_MULTIBOOT
+/* Active settings-bank base (see py25q16.h). 0 = bank 0 / historical
+ * config region, i.e. an identity mapping. */
+static uint32_t BankBase = 0;
+
+void PY25Q16_SetBankBase(uint32_t Base)
+{
+    BankBase = Base;
+}
+
+/* Redirect config-region accesses (addr < boundary) into the active bank.
+ * Calibration/logo/slots/marker (addr >= boundary) are returned unchanged.
+ * BankBase is sector-aligned, so alignment done by callers is preserved. */
+static inline uint32_t BankMap(uint32_t Address)
+{
+    return (Address < PY25Q16_BANK_SHARED_FROM) ? (Address + BankBase) : Address;
+}
+#else
+static inline uint32_t BankMap(uint32_t Address)
+{
+    return Address;
+}
+#endif
+
+static inline void CS_Assert()
+{
+    GPIO_ResetOutputPin(CS_PIN);
+}
+
+static inline void CS_Release()
+{
+    GPIO_SetOutputPin(CS_PIN);
+}
+
+static void SPI_Init()
+{
+    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_SPI2);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA1);
+    LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
+
+    do
+    {
+        // SCK: PA0
+        // MOSI: PA1
+        // MISO: PA2
+
+        LL_GPIO_InitTypeDef InitStruct;
+        LL_GPIO_StructInit(&InitStruct);
+        InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
+        InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+        InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+        InitStruct.Pull = LL_GPIO_PULL_UP;
+
+        InitStruct.Pin = LL_GPIO_PIN_0;
+        InitStruct.Alternate = LL_GPIO_AF8_SPI2;
+        LL_GPIO_Init(GPIOA, &InitStruct);
+
+        InitStruct.Pin = LL_GPIO_PIN_1 | LL_GPIO_PIN_2;
+        InitStruct.Alternate = LL_GPIO_AF9_SPI2;
+        LL_GPIO_Init(GPIOA, &InitStruct);
+
+    } while (0);
+
+    LL_SYSCFG_SetDMARemap(DMA1, CHANNEL_RD, LL_SYSCFG_DMA_MAP_SPI2_RD);
+    LL_SYSCFG_SetDMARemap(DMA1, CHANNEL_WR, LL_SYSCFG_DMA_MAP_SPI2_WR);
+
+    NVIC_SetPriority(DMA1_Channel4_5_6_7_IRQn, 1);
+    NVIC_EnableIRQ(DMA1_Channel4_5_6_7_IRQn);
+
+    LL_SPI_InitTypeDef InitStruct;
+    LL_SPI_StructInit(&InitStruct);
+    InitStruct.Mode = LL_SPI_MODE_MASTER;
+    InitStruct.TransferDirection = LL_SPI_FULL_DUPLEX;
+    InitStruct.ClockPhase = LL_SPI_PHASE_2EDGE;
+    InitStruct.ClockPolarity = LL_SPI_POLARITY_HIGH;
+    InitStruct.BaudRate = LL_SPI_BAUDRATEPRESCALER_DIV2;
+    InitStruct.BitOrder = LL_SPI_MSB_FIRST;
+    InitStruct.NSS = LL_SPI_NSS_SOFT;
+    InitStruct.CRCCalculation = LL_SPI_CRCCALCULATION_DISABLE;
+    LL_SPI_Init(SPIx, &InitStruct);
+
+    LL_SPI_Enable(SPIx);
+}
+
+static void SPI_ReadBuf(uint8_t *Buf, uint32_t Size)
+{
+    LL_SPI_Disable(SPIx);
+    LL_DMA_DisableChannel(DMA1, CHANNEL_RD);
+    LL_DMA_DisableChannel(DMA1, CHANNEL_WR);
+
+    LL_DMA_ClearFlag_GI4(DMA1);
+
+    LL_DMA_ConfigTransfer(DMA1, CHANNEL_RD,                 //
+                          LL_DMA_DIRECTION_PERIPH_TO_MEMORY //
+                              | LL_DMA_MODE_NORMAL          //
+                              | LL_DMA_PERIPH_NOINCREMENT   //
+                              | LL_DMA_MEMORY_INCREMENT     //
+                              | LL_DMA_PDATAALIGN_BYTE      //
+                              | LL_DMA_MDATAALIGN_BYTE      //
+                              | LL_DMA_PRIORITY_MEDIUM      //
+    );
+
+    LL_DMA_ConfigTransfer(DMA1, CHANNEL_WR,                 //
+                          LL_DMA_DIRECTION_MEMORY_TO_PERIPH //
+                              | LL_DMA_MODE_NORMAL          //
+                              | LL_DMA_PERIPH_NOINCREMENT   //
+                              | LL_DMA_MEMORY_NOINCREMENT   //
+                              | LL_DMA_PDATAALIGN_BYTE      //
+                              | LL_DMA_MDATAALIGN_BYTE      //
+                              | LL_DMA_PRIORITY_MEDIUM      //
+    );
+
+    LL_DMA_SetMemoryAddress(DMA1, CHANNEL_RD, (uint32_t)Buf);
+    LL_DMA_SetPeriphAddress(DMA1, CHANNEL_RD, LL_SPI_DMA_GetRegAddr(SPIx));
+    LL_DMA_SetDataLength(DMA1, CHANNEL_RD, Size);
+
+    LL_DMA_SetMemoryAddress(DMA1, CHANNEL_WR, (uint32_t)BlackHole);
+    LL_DMA_SetPeriphAddress(DMA1, CHANNEL_WR, LL_SPI_DMA_GetRegAddr(SPIx));
+    LL_DMA_SetDataLength(DMA1, CHANNEL_WR, Size);
+
+    TC_Flag = false;
+    LL_DMA_EnableIT_TC(DMA1, CHANNEL_RD);
+    LL_DMA_EnableChannel(DMA1, CHANNEL_RD);
+    LL_DMA_EnableChannel(DMA1, CHANNEL_WR);
+
+    LL_SPI_EnableDMAReq_RX(SPIx);
+    LL_SPI_Enable(SPIx);
+    LL_SPI_EnableDMAReq_TX(SPIx);
+
+    while (!TC_Flag)
+        ;
+}
+
+static void SPI_WriteBuf(const uint8_t *Buf, uint32_t Size)
+{
+    LL_SPI_Disable(SPIx);
+    LL_DMA_DisableChannel(DMA1, CHANNEL_RD);
+    LL_DMA_DisableChannel(DMA1, CHANNEL_WR);
+
+    LL_DMA_ClearFlag_GI4(DMA1);
+
+    LL_DMA_ConfigTransfer(DMA1, CHANNEL_RD,                 //
+                          LL_DMA_DIRECTION_PERIPH_TO_MEMORY //
+                              | LL_DMA_MODE_NORMAL          //
+                              | LL_DMA_PERIPH_NOINCREMENT   //
+                              | LL_DMA_MEMORY_NOINCREMENT   //
+                              | LL_DMA_PDATAALIGN_BYTE      //
+                              | LL_DMA_MDATAALIGN_BYTE      //
+                              | LL_DMA_PRIORITY_LOW         //
+    );
+
+    LL_DMA_ConfigTransfer(DMA1, CHANNEL_WR,                 //
+                          LL_DMA_DIRECTION_MEMORY_TO_PERIPH //
+                              | LL_DMA_MODE_NORMAL          //
+                              | LL_DMA_PERIPH_NOINCREMENT   //
+                              | LL_DMA_MEMORY_INCREMENT     //
+                              | LL_DMA_PDATAALIGN_BYTE      //
+                              | LL_DMA_MDATAALIGN_BYTE      //
+                              | LL_DMA_PRIORITY_LOW         //
+    );
+
+    LL_DMA_SetMemoryAddress(DMA1, CHANNEL_RD, (uint32_t)BlackHole);
+    LL_DMA_SetPeriphAddress(DMA1, CHANNEL_RD, LL_SPI_DMA_GetRegAddr(SPIx));
+    LL_DMA_SetDataLength(DMA1, CHANNEL_RD, Size);
+
+    LL_DMA_SetMemoryAddress(DMA1, CHANNEL_WR, (uint32_t)Buf);
+    LL_DMA_SetPeriphAddress(DMA1, CHANNEL_WR, LL_SPI_DMA_GetRegAddr(SPIx));
+    LL_DMA_SetDataLength(DMA1, CHANNEL_WR, Size);
+
+    TC_Flag = false;
+    LL_DMA_EnableIT_TC(DMA1, CHANNEL_RD);
+    LL_DMA_EnableChannel(DMA1, CHANNEL_RD);
+    LL_DMA_EnableChannel(DMA1, CHANNEL_WR);
+
+    LL_SPI_EnableDMAReq_RX(SPIx);
+    LL_SPI_Enable(SPIx);
+    LL_SPI_EnableDMAReq_TX(SPIx);
+
+    while (!TC_Flag)
+        ;
+}
+
+static uint8_t SPI_WriteByte(uint8_t Value)
+{
+    while (!LL_SPI_IsActiveFlag_TXE(SPIx))
+        ;
+    LL_SPI_TransmitData8(SPIx, Value);
+    while (!LL_SPI_IsActiveFlag_RXNE(SPIx))
+        ;
+    return LL_SPI_ReceiveData8(SPIx);
+}
+
+static void WriteAddr(uint32_t Addr);
+static uint8_t ReadStatusReg(uint32_t Which);
+static void WaitWIP();
+static void WriteEnable();
+static void SectorErase(uint32_t Addr);
+static void SectorProgram(uint32_t Addr, const uint8_t *Buf, uint32_t Size);
+static void PageProgram(uint32_t Addr, const uint8_t *Buf, uint32_t Size);
+static void ReadBufferRaw(uint32_t Address, void *pBuffer, uint32_t Size);
+
+void PY25Q16_Init()
+{
+    CS_Release();
+    SPI_Init();
+}
+
+static void ReadBufferRaw(uint32_t Address, void *pBuffer, uint32_t Size)
+{
+    MBMARK("RD cmd");          // about to assert CS + send read command
+    CS_Assert();
+
+    SPI_WriteByte(0x03);      // Send read command
+    MBMARK("RD addr");         // command sent, about to send address
+    WriteAddr(Address);        // Send address (3 bytes)
+
+    MBMARK("RD flush");        // address sent, about to flush RX FIFO
+    // CRITICAL: Flush RX FIFO before DMA to remove residual data
+    while (LL_SPI_RX_FIFO_EMPTY != LL_SPI_GetRxFIFOLevel(SPIx))
+    {
+        LL_SPI_ReceiveData8(SPIx);  // Read and discard
+    }
+
+    MBMARK("RD data");         // FIFO flushed, about to read the data
+    if (Size >= 16) {
+        SPI_ReadBuf((uint8_t *)pBuffer, Size);
+    } else {
+        for (uint32_t i = 0; i < Size; i++)
+        {
+            ((uint8_t *)(pBuffer))[i] = SPI_WriteByte(0xff);
+        }
+    }
+
+    MBMARK("RD end");          // data read, about to release CS
+    CS_Release();
+}
+
+void PY25Q16_ReadBuffer(uint32_t Address, void *pBuffer, uint32_t Size)
+{
+    ReadBufferRaw(BankMap(Address), pBuffer, Size);
+}
+
+#if defined(ENABLE_FEAT_F4HWN_EXT_FLASH_RW) || defined(ENABLE_FEAT_F4HWN_MULTIBOOT)
+// Raw physical read bypassing the active config-bank mapping (BankMap).
+void PY25Q16_ReadBufferPhysical(uint32_t Address, void *pBuffer, uint32_t Size)
+{
+    WaitWIP();
+    ReadBufferRaw(Address, pBuffer, Size);
+}
+#endif
+
+#if defined(ENABLE_FEAT_F4HWN_EXT_FLASH_RW) || defined(ENABLE_AIRCOPY_FLASH)
+// Raw physical erase/program backing the host dump/restore UART commands.
+// Every mutation drops the sector cache so the normal logical write path can
+// never trust stale data afterwards.
+void PY25Q16_SectorErasePhysical(uint32_t Address)
+{
+    SectorErase(Address);                 // caller supplies a 4 KiB-aligned address
+    PY25Q16_InvalidateCache();
+}
+
+void PY25Q16_WriteBufferPhysical(uint32_t Address, const void *pBuffer, uint32_t Size)
+{
+    // Program across page boundaries; the caller must have erased the sector(s).
+    SectorProgram(Address, (const uint8_t *)pBuffer, Size);
+    PY25Q16_InvalidateCache();
+}
+#endif
+
+// Like PY25Q16_ReadBuffer, but waits for the flash to be idle first (WIP=0),
+// exactly as PY25Q16_WriteBuffer does before its internal reads. A standalone
+// read issued while the chip is still busy from a prior program/erase never
+// returns the expected data.
+void PY25Q16_ReadBufferSafe(uint32_t Address, void *pBuffer, uint32_t Size)
+{
+    MBMARK("SAFE wip");        // about to WaitWIP()
+    WaitWIP();
+    MBMARK("SAFE rb");         // WaitWIP done, about to ReadBuffer
+    PY25Q16_ReadBuffer(Address, pBuffer, Size);
+}
+
+void PY25Q16_WriteBuffer(uint32_t Address, const void *pBuffer, uint32_t Size, bool Append)
+{
+    Address = BankMap(Address);   /* map once; internal reads use *Raw below */
+
+#ifdef DEBUG
+    printf("spi flash write: %06x %ld %d\n", Address, Size, Append);
+#endif
+
+    //#ifdef ENABLE_FEAT_F4HWN_DEBUG
+    //    gDebug++;
+    //#endif
+
+    uint32_t SecIndex = Address / SECTOR_SIZE;
+    uint32_t SecAddr = SecIndex * SECTOR_SIZE;
+    uint32_t SecOffset = Address % SECTOR_SIZE;
+    uint32_t SecSize = SECTOR_SIZE - SecOffset;
+
+    while (Size)
+    {
+        // CRITICAL FIX #1: Wait for flash ready before processing each sector
+        WaitWIP();
+
+        if (Size < SecSize)
+        {
+            SecSize = Size;
+        }
+
+        if (SecAddr != SectorCacheAddr)
+        {
+            /* SecAddr is already in mapped space (Address was mapped above), so
+             * read raw to avoid mapping a second time. */
+            ReadBufferRaw(SecAddr, SectorCache, SECTOR_SIZE);
+            SectorCacheAddr = SecAddr;
+        }
+
+        if (0 != memcmp(pBuffer, (char *)SectorCache + SecOffset, SecSize))
+        {
+            bool Erase = false;
+            const uint8_t *oldData = SectorCache + SecOffset;
+            const uint8_t *newData = (const uint8_t *)pBuffer;
+
+            for (uint32_t i = 0; i < SecSize; i++)
+            {
+                // NOR flash programming can only change bits from 1 to 0.
+                if ((oldData[i] & newData[i]) != newData[i])
+                {
+                    Erase = true;
+                    break;
+                }
+            }
+
+            memcpy(SectorCache + SecOffset, pBuffer, SecSize);
+
+            if (Erase)
+            {
+                SectorErase(SecAddr);
+
+                // CRITICAL FIX #2: Erase takes ~300ms, must complete before program starts
+                WaitWIP();
+
+                if (Append)
+                {
+                    SectorProgram(SecAddr, SectorCache, SecOffset + SecSize);
+                    memset(SectorCache + SecOffset + SecSize, 0xff, SECTOR_SIZE - SecOffset - SecSize);
+                }
+                else
+                {
+                    SectorProgram(SecAddr, SectorCache, SECTOR_SIZE);
+                }
+            }
+            else
+            {
+                SectorProgram(Address, pBuffer, SecSize);
+            }
+        }
+
+        Address += SecSize;
+        pBuffer += SecSize;
+        Size -= SecSize;
+
+        SecAddr += SECTOR_SIZE;
+        SecOffset = 0;
+        SecSize = SECTOR_SIZE;
+    } // while
+
+    // CRITICAL FIX #3: Ensure all writes complete before function returns
+    WaitWIP();
+}
+
+void PY25Q16_SectorErase(uint32_t Address)
+{
+    Address = BankMap(Address);
+    Address -= (Address % SECTOR_SIZE);
+    SectorErase(Address);
+    if (SectorCacheAddr == Address)
+    {
+        memset(SectorCache, 0xff, SECTOR_SIZE);
+    }
+}
+
+void PY25Q16_InvalidateCache(void)
+{
+    /* Same "no sector cached" sentinel as the initial value: the next write
+     * re-reads its sector from flash instead of trusting SectorCache. */
+    SectorCacheAddr = 0x1000000;
+}
+
+#ifdef ENABLE_FEAT_F4HWN_OVERLAY_APPS
+/* Expose the 4 KiB sector cache as the overlay-app workspace. It lives in
+ * .bss.mb_workspace (the overlay VMA), so an app blob linked there runs in
+ * place once copied in. The caller InvalidateCache()s around its use. */
+uint8_t *PY25Q16_OverlayBuffer(void)
+{
+    return SectorCache;
+}
+#endif
+
+static inline void WriteAddr(uint32_t Addr)
+{
+    SPI_WriteByte(0xff & (Addr >> 16));
+    SPI_WriteByte(0xff & (Addr >> 8));
+    SPI_WriteByte(0xff & Addr);
+}
+
+static uint8_t ReadStatusReg(uint32_t Which)
+{
+    uint8_t Cmd;
+    switch (Which)
+    {
+    case 0:
+        Cmd = 0x5;
+        break;
+    case 1:
+        Cmd = 0x35;
+        break;
+    case 2:
+        Cmd = 0x15;
+        break;
+    default:
+        return 0;
+    }
+
+    CS_Assert();
+    SPI_WriteByte(Cmd);
+    uint8_t Value = SPI_WriteByte(0xff);
+    CS_Release();
+
+    return Value;
+}
+
+static void WaitWIP()
+{
+    for (int i = 0; i < 1000000; i++)
+    {
+        uint8_t Status = ReadStatusReg(0);
+        if (1 & Status) // WIP
+        {
+            SYSTICK_DelayUs(10);
+            continue;
+        }
+        break;
+    }
+}
+
+static void WriteEnable()
+{
+    CS_Assert();
+    SPI_WriteByte(0x6);
+    CS_Release();
+}
+
+static void SectorErase(uint32_t Addr)
+{
+#ifdef DEBUG
+    printf("spi flash sector erase: %06x\n", Addr);
+#endif
+    WriteEnable();
+    WaitWIP();
+
+    CS_Assert();
+    SPI_WriteByte(0x20);
+    WriteAddr(Addr);
+    CS_Release();
+
+    WaitWIP();
+}
+
+static void SectorProgram(uint32_t Addr, const uint8_t *Buf, uint32_t Size)
+{
+    uint32_t Size1 = PAGE_SIZE - (Addr % PAGE_SIZE);
+
+    while (Size)
+    {
+        if (Size < Size1)
+        {
+            Size1 = Size;
+        }
+
+        PageProgram(Addr, Buf, Size1);
+
+        Addr += Size1;
+        Buf += Size1;
+        Size -= Size1;
+
+        Size1 = PAGE_SIZE;
+    }
+}
+
+static void PageProgram(uint32_t Addr, const uint8_t *Buf, uint32_t Size)
+{
+#ifdef DEBUG
+    printf("spi flash page program: %06x %ld\n", Addr, Size);
+#endif
+
+    WriteEnable();
+    // WaitWIP();
+
+    CS_Assert();
+
+    SPI_WriteByte(0x2);
+    WriteAddr(Addr);
+
+    if (Size >= 16)
+    {
+        SPI_WriteBuf(Buf, Size);
+    }
+    else
+    {
+        for (uint32_t i = 0; i < Size; i++)
+        {
+            SPI_WriteByte(Buf[i]);
+        }
+    }
+
+    CS_Release();
+
+    WaitWIP();
+}
+
+void DMA1_Channel4_5_6_7_IRQHandler()
+{
+    if (LL_DMA_IsActiveFlag_TC4(DMA1) && LL_DMA_IsEnabledIT_TC(DMA1, CHANNEL_RD))
+    {
+        LL_DMA_DisableIT_TC(DMA1, CHANNEL_RD);
+        LL_DMA_ClearFlag_TC4(DMA1);
+
+        // Wait a tiny bit for SPI to finish
+        SYSTICK_DelayUs(10);  // ← ADD THIS
+
+        uint32_t timeout = 10000;
+        
+        while ((LL_SPI_TX_FIFO_EMPTY != LL_SPI_GetTxFIFOLevel(SPIx)) && timeout--)
+            ;
+        
+        timeout = 10000;
+        while (LL_SPI_IsActiveFlag_BSY(SPIx) && timeout--)
+            ;
+        
+        timeout = 10000;
+        while ((LL_SPI_RX_FIFO_EMPTY != LL_SPI_GetRxFIFOLevel(SPIx)) && timeout--)
+            ;
+
+        LL_SPI_DisableDMAReq_TX(SPIx);
+        LL_SPI_DisableDMAReq_RX(SPIx);
+
+        TC_Flag = true;
+    }
+}

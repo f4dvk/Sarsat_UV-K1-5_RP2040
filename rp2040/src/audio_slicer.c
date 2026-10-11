@@ -48,21 +48,31 @@ int slicer_run_fixed(const int32_t *samples, int n, int rate, uint8_t *bits_out)
 
     int k = 0;
 
+    /* Sommes glissantes (2026-10-08) -- meme resultat AU BIT PRES que le
+     * calcul complet d'origine, en O(1) par echantillon au lieu de O(M) :
+     *   Ysum = somme des M derniers echantillons
+     *   P    = somme des Nb produits y(n-t) * y(n-t-Nb), t = 0..Nb-1
+     * Les paires (a, b) de la boucle d'origine sont exactement ces Nb couples
+     * a un bit d'ecart, et chaque case de l'anneau y figure une fois, d'ou
+     * l'identite exacte sur les entiers :
+     *   sum (M*Ya - S)(M*Yb - S) = M*M*P - M*S*S + Nb*S*S = M*M*P - Nb*S*S
+     * L'ancienne version refaisait ~3*Nb multiplications 64 bits par
+     * echantillon, tres lentes sur le Cortex-M0+ (pas de multiplieur 64 bits) :
+     * plusieurs centaines de ms par fenetre, pendant lesquelles rien n'etait
+     * capture. Debordement : |P| <= Nb*2^30, M*M*P < 8e15 pour Nb = 120. */
+    int64_t Ysum = 0;
+    int64_t P    = 0;
+
     for (int idx = 0; idx < n && numBit < longueur_trame; idx++) {
         k = (k + 1) % M;
-        Y[k] = samples[idx];
+        const int32_t old = Y[k];                 /* y(n-M), sort de l'anneau */
+        const int32_t mid = Y[(k + Nb) % M];      /* y(n-Nb)                  */
+        const int32_t nw  = samples[idx];
+        P    += (int64_t)nw * mid - (int64_t)mid * old;
+        Ysum += (int64_t)nw - old;
+        Y[k]  = nw;
 
-        int64_t Ysum = 0;
-        for (int i = 0; i < M; i++) Ysum += Y[i];
-
-        int64_t Y1s = 0;
-        for (int i = 0; i < Nb; i++) {
-            int a = (k + i) % M;
-            int b = (k + i + Nb) % M;
-            int64_t da = (int64_t)M * Y[a] - Ysum;
-            int64_t db = (int64_t)M * Y[b] - Ysum;
-            Y1s += da * db;
-        }
+        const int64_t Y1s = MM * P - (int64_t)Nb * Ysum * Ysum;
 
         if (Y1s > max_s) { max_s = Y1s; seuil1 = max_s / coeff; }
         if (Y1s < min_s) { min_s = Y1s; seuil0 = min_s / coeff; }

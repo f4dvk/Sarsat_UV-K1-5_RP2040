@@ -14,14 +14,13 @@
  * more flash/RAM headroom than this MCU -- this screen only draws the
  * already-reduced 1bpp bytes it is handed. */
 #include "app/sstv_rx.h"
-#include "app/sstv_tx.h"   /* SSTV_ClockStart / SSTV_ClockEnd */
 
 #include <string.h>
 
 #include "app/app.h"
-#include "scheduler.h"       /* millis10() -- delai de l'ecran SSTVCal */
 #include "app/uart.h"
 #include "driver/keyboard.h"
+#include "driver/bk4819.h"     /* BK4819_REG_2B : filtres audio RX (ecran SSTVRx) */
 #include "driver/st7565.h"
 #include "driver/system.h"
 #include "functions.h"
@@ -29,6 +28,9 @@
 #include "ui/helper.h"
 
 static bool s_active;
+
+/* made non-static by patch/app_uart.c.diff */
+extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
 
 void SSTV_ToggleRx(void) { s_active = !s_active; }
 bool SSTV_RxActive(void) { return s_active; }
@@ -41,15 +43,10 @@ static bool s_got_row;   /* at least one row received this picture -- shows
 _Static_assert(SSTV_RX_SCREEN_HEIGHT <= FRAME_LINES * 8u,
                "SSTV_RX_SCREEN_HEIGHT must fit in gFrameBuffer");
 
-/* ---- Ecran de calibration de l'horloge (menu SSTVCal, 2026-10-04) ----
- * MENU : demande une mesure au RP2040 (30 s, sans emission) puis propose la
- * valeur ; MENU a nouveau = appliquer, EXIT = annuler. UP/DOWN = +-250 ppm
- * directement sur le trim courant (enregistre tout de suite). */
-static volatile bool s_cal_res_ok;      /* resultat RP2040 recu */
-static int16_t       s_cal_res;         /* proposition RP2040, ppm */
+static uint16_t      s_saved_2b;        /* registre 0x2B d'origine (filtres audio) */
 
 /* Petit formateur "libelle valeur ppm" : pas de sprintf (newlib sans _sbrk ici). */
-static void sstv_cal_line(char *dst, const char *label, int v)
+static void sstv_cal_line(char *dst, const char *label, int v, const char *suffix)
 {
     char digits[8];
     int  n = 0;
@@ -59,121 +56,55 @@ static void sstv_cal_line(char *dst, const char *label, int v)
     while (label[k]) { dst[k] = label[k]; k++; }
     if (v < 0) dst[k++] = '-';
     while (n) dst[k++] = digits[--n];
-    dst[k++] = ' ';
-    dst[k++] = 'p'; dst[k++] = 'p'; dst[k++] = 'm';
+    while (*suffix) dst[k++] = *suffix++;
     dst[k] = 0;
 }
 
-static void sstv_cal_draw(int state, int16_t trim, int16_t prop)
+/* ---- Page "5" de l'ecran SSTVRx : informations de reception ---- */
+static bool     s_info_view;     /* page informations affichee */
+static bool     s_info_ok;       /* au moins une mesure recue du RP2040 */
+static uint8_t  s_info_mode;     /* 1 = Scottie 1 */
+static uint8_t  s_info_flags;    /* bit0 valide, bit1 final */
+static uint16_t s_info_lines;    /* lignes recues */
+static uint16_t s_info_iv;       /* synchros retenues */
+static int32_t  s_info_ppm;      /* ecart emetteur distant */
+
+static void sstv_info_draw(void)
 {
     char line[24];
     UI_DisplayClear();
-    UI_PrintStringSmallNormal("Calibr. horloge", 2, 0, 0);
-    sstv_cal_line(line, "Trim: ", (int)trim);
+    UI_PrintStringSmallNormal("RX  [5]=retour", 2, 0, 0);
+    UI_PrintStringSmallNormal(s_info_mode == 1 ? "Mode: Scottie 1" : "Mode: inconnu", 2, 0, 1);
+    sstv_cal_line(line, "Lignes: ", (int)s_info_lines, "/256");
     UI_PrintStringSmallNormal(line, 2, 0, 2);
-    if (state == 0) {
-        UI_PrintStringSmallNormal("MENU = mesurer", 2, 0, 4);
-        UI_PrintStringSmallNormal("UP/DN = +-250", 2, 0, 5);
-        UI_PrintStringSmallNormal("EXIT = quitter", 2, 0, 6);
-    } else if (state == 1) {
-        UI_PrintStringSmallNormal("mesure 30 s...", 2, 0, 4);
-        UI_PrintStringSmallNormal("ne pas emettre", 2, 0, 5);
+    sstv_cal_line(line, "Synchros: ", (int)s_info_iv, "");
+    UI_PrintStringSmallNormal(line, 2, 0, 3);
+    if (!s_info_ok) {
+        UI_PrintStringSmallNormal("Horloge: attente", 2, 0, 4);
     } else {
-        sstv_cal_line(line, "Propose: ", (int)prop);
-        UI_PrintStringSmallNormal(line, 2, 0, 4);
-        UI_PrintStringSmallNormal("MENU = appliquer", 2, 0, 5);
-        UI_PrintStringSmallNormal("EXIT = annuler", 2, 0, 6);
+        UI_PrintStringSmallNormal((s_info_flags & 2u) ? "Horloge: FINAL" : "Horloge: provis.", 2, 0, 4);
+        sstv_cal_line(line, "Ecart: ", (int)s_info_ppm, " ppm");
+        UI_PrintStringSmallNormal(line, 2, 0, 5);
+        sstv_cal_line(line, "TX distant: ", -(int)s_info_ppm, " ppm");
+        UI_PrintStringSmallNormal(line, 2, 0, 6);
     }
     ST7565_BlitFullScreen();
-}
-
-void APP_RunSstvCal(void)
-{
-    enum { ST_IDLE, ST_WAIT, ST_RESULT };
-    int     state = ST_IDLE;
-    SSTV_LoadTrim();                     /* valeur reelle de l'EEPROM, pas le defaut RAM */
-    int16_t trim  = SSTV_GetTrim();
-    uint32_t t_req = 0;
-    s_cal_res_ok = false;
-    sstv_cal_draw(state, trim, 0);
-    /* La touche qui a ouvert l'ecran est encore enfoncee : on ne la compte pas.
-     * Une touche maintenue ne doit declencher qu'une fois (front montant). */
-    int prev_key = KEYBOARD_Poll();
-    /* Anti-rebond : une pression peut etre lue deux fois de suite par le clavier.
-     * Apres chaque changement d'etat, les touches sont ignorees 500 ms. */
-    int      prev_state = state;
-    uint32_t t_change   = millis10();
-
-    bool run = true;
-    while (run) {
-#ifdef ENABLE_UART
-        while (UART_IsCommandAvailable(UART_PORT_UART))
-            UART_HandleCommand(UART_PORT_UART);
-#endif
-        if (state == ST_WAIT && s_cal_res_ok) {
-            s_cal_res_ok = false;
-            state = ST_RESULT;
-            sstv_cal_draw(state, trim, s_cal_res);
-        } else if (state == ST_WAIT && (millis10() - t_req) > 6000u) {   /* 60 s */
-            state = ST_IDLE;     /* pas de reponse du RP2040 : on abandonne */
-            sstv_cal_draw(state, trim, 0);
-        }
-
-        if (state != prev_state) {
-            prev_state = state;
-            t_change   = millis10();
-        }
-        int key = KEYBOARD_Poll();
-        int ev  = (key == prev_key) ? 0 : key;   /* front, pas niveau */
-        prev_key = key;
-        if ((millis10() - t_change) < 50u)       /* anti-rebond, 500 ms */
-            ev = 0;
-        if (ev == KEY_EXIT) {
-            run = false;
-        } else if (state == ST_IDLE && ev == KEY_MENU) {
-            uint8_t req[4] = { (uint8_t)(SSTV_CMD_CLK_REQ & 0xFFu), (uint8_t)(SSTV_CMD_CLK_REQ >> 8), 0, 0 };
-            SendReply(UART_PORT_UART, req, sizeof req);
-            t_req = millis10();
-            state = ST_WAIT;
-            sstv_cal_draw(state, trim, 0);
-        } else if (state == ST_RESULT && ev == KEY_MENU) {
-            trim = s_cal_res;
-            SSTV_SetTrim(trim);
-            state = ST_IDLE;
-            sstv_cal_draw(state, trim, 0);
-        } else if (state == ST_RESULT && ev == KEY_EXIT) {
-            state = ST_IDLE;
-            sstv_cal_draw(state, trim, 0);
-        } else if (state == ST_IDLE && (ev == KEY_UP || ev == KEY_DOWN)) {
-            trim = (int16_t)(trim + (ev == KEY_UP ? 250 : -250));
-            SSTV_SetTrim(trim);
-            sstv_cal_draw(state, trim, 0);
-        }
-        SYSTEM_DelayMs(20);
-    }
 }
 
 void SSTV_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 {
     switch (id) {
-    case SSTV_CMD_CLK_RESULT:
-        if (size >= 2u) {
-            s_cal_res    = (int16_t)(data[0] | ((uint16_t)data[1] << 8));
-            s_cal_res_ok = true;
+    case SSTV_CMD_RX_INFO:
+        if (size >= 10u) {
+            s_info_mode  = data[0];
+            s_info_flags = data[1];
+            s_info_lines = (uint16_t)(data[2] | ((uint16_t)data[3] << 8));
+            s_info_iv    = (uint16_t)(data[4] | ((uint16_t)data[5] << 8));
+            s_info_ppm   = (int32_t)((uint32_t)data[6] | ((uint32_t)data[7] << 8) |
+                                     ((uint32_t)data[8] << 16) | ((uint32_t)data[9] << 24));
+            s_info_ok    = (s_info_flags & 1u) != 0u;
+            s_dirty      = true;
         }
-        break;
-
-    case SSTV_CMD_CLK_START:
-        SSTV_ClockStart();
-        break;
-
-    case SSTV_CMD_CLK_END:
-        SSTV_ClockEnd();
-        break;
-
-    case SSTV_CMD_TRIM:
-        if (size >= 2u)
-            SSTV_SetTrim((int16_t)(data[0] | ((uint16_t)data[1] << 8)));
         break;
 
     case SSTV_CMD_RX_CLEAR:
@@ -234,13 +165,23 @@ void APP_RunSstvRx(void)
     UI_DisplayClear();
     s_dirty = true;
 
+    /* Filtres audio RX desactives pendant la reception SSTV : le passe-haut
+     * 300 Hz et le passe-bas 3 kHz de la radio attenuent la synchro 1200 Hz
+     * et l'enveloppe des pixels. Restaures a la sortie de l'ecran. */
+    s_saved_2b = BK4819_ReadRegister(BK4819_REG_2B);
+    BK4819_WriteRegister(BK4819_REG_2B, s_saved_2b | (1u << 10) | (1u << 9));
+
+    int prev_key = KEYBOARD_Poll();          /* la touche qui a ouvert l'ecran ne compte pas */
     bool run = true;
     while (run) {
 #ifdef ENABLE_UART
         while (UART_IsCommandAvailable(UART_PORT_UART))
             UART_HandleCommand(UART_PORT_UART);
 #endif
-        if (s_dirty) {
+        if (s_dirty && s_info_view) {
+            s_dirty = false;
+            sstv_info_draw();
+        } else if (s_dirty) {
             s_dirty = false;
             if (!s_got_row)
                 /* row 0 (not the middle): the first real image row overwrites
@@ -249,18 +190,33 @@ void APP_RunSstvRx(void)
                 UI_PrintStringSmallNormal("waiting for a picture...", 2, 0, 0);
             ST7565_BlitFullScreen();
         }
-        if (KEYBOARD_Poll() == KEY_EXIT)
+        int key = KEYBOARD_Poll();
+        int ev  = (key == prev_key) ? 0 : key;   /* front, pas niveau */
+        prev_key = key;
+        if (ev == KEY_EXIT) {
             run = false;
-        else
+        } else if (ev == KEY_5) {
+            s_info_view = !s_info_view;          /* page informations */
+            if (!s_info_view) {
+                /* retour sur l'image : le RP2040 la renvoie (son tampon l'a gardee) */
+                uint8_t rq[4] = { (uint8_t)(SSTV_CMD_RX_REDRAW & 0xFFu), (uint8_t)(SSTV_CMD_RX_REDRAW >> 8), 0, 0 };
+                SendReply(UART_PORT_UART, rq, sizeof rq);
+            }
+            UI_DisplayClear();
+            s_dirty = true;
+            SYSTEM_DelayMs(20);
+        } else {
             SYSTEM_DelayMs(20);   /* no PA4/ADC capture happens on this side
                                    * (the RP2040 does it) -- no reason to
                                    * throttle key polling here, unlike
                                    * aprs.c's own internal-decode screen */
+        }
     }
 
     if (s_active)
         SSTV_ToggleRx();   /* disarm on close -- see the note above */
 
+    BK4819_WriteRegister(BK4819_REG_2B, s_saved_2b);   /* filtres audio d'origine */
     FUNCTION_Select(FUNCTION_FOREGROUND);
     RADIO_SetupRegisters(true);
 }

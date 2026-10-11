@@ -150,9 +150,14 @@ int main(int argc, char **argv)
                par ? "PARITY OK" : "PARITY MISMATCH");
 
         sarsat_result_t r;
-        if (sarsat_decode_window(buf, n, rate, &r)) {
+        /* 1 = trame CRC valide, 0 = rien trouve, -1 = trame tranchee mais BCH
+         * non corrigible : -1 est "vrai" en C, d'ou le test explicite == 1 */
+        int rc = sarsat_decode_window(buf, n, rate, &r);
+        if (rc == 1) {
             printf("DECODED (%d bits), hex ID %s\n", r.frame_bits, r.hex_id);
             for (int i = 0; i < r.n_lines; i++) printf("  | %s\n", r.lines[i]);
+        } else if (rc < 0) {
+            printf("frame sliced (%d bits) but BCH uncorrectable\n", r.frame_bits);
         } else {
             printf("no CRC-clean 1G frame in this window\n");
         }

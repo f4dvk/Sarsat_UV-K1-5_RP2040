@@ -49,10 +49,48 @@ static uint32_t us_to_samples(const sstv_demod_t *d, uint32_t us)
     return (uint32_t)(((uint64_t)d->sample_rate_hz * us) / 1000000u);
 }
 
+/* Passe-bande 900..2400 Hz = passe-haut 900 Hz + passe-bas 2400 Hz, chacun
+ * du 2e ordre (Butterworth, Q 0.707, RBJ). Coefficients en Q28 :
+ * { b0, b1, b2, a1, a2 } pour chaque etage. Calcules pour 48 kHz (RP2040)
+ * et 32 kHz (enregistrements PC de test). */
+typedef struct sstv_bpcoef {
+    int32_t hp[5];
+    int32_t lp[5];
+} sstv_bpcoef_t;
+
+static const sstv_bpcoef_t SSTV_BP_48K = {
+    { 246978379, -493956758, 246978379, -492238862, 227239197 },
+    {   5391087,   10782175,   5391087, -419032599, 172161492 },
+};
+static const sstv_bpcoef_t SSTV_BP_32K = {
+    { 236897295, -473794589, 236897295, -470076332, 209077390 },
+    {  11073912,   22147824,  11073912, -362110772, 137970964 },
+};
+
+/* Un pas de biquad (forme directe I), Q28. */
+static int32_t sstv_bq_step(int64_t *s, const int32_t *c, int32_t x)
+{
+    int64_t y = ((int64_t)c[0] * x + (int64_t)c[1] * s[0] + (int64_t)c[2] * s[1]
+                 - (int64_t)c[3] * s[2] - (int64_t)c[4] * s[3]) >> 28;
+    s[1] = s[0];
+    s[0] = x;
+    s[3] = s[2];
+    s[2] = y;
+    return (int32_t)y;
+}
+
 void sstv_demod_init(sstv_demod_t *d, uint32_t sample_rate_hz)
 {
     memset(d, 0, sizeof *d);
     d->sample_rate_hz = sample_rate_hz;
+    if (sample_rate_hz == 48000u)      d->cf = &SSTV_BP_48K;
+    else if (sample_rate_hz == 32000u) d->cf = &SSTV_BP_32K;
+    /* Goertzel 1200 Hz : 2cos(2*pi*1200/fs) en Q14, bloc de 5 ms */
+    if (sample_rate_hz == 48000u) {
+        d->gz_on = true; d->gz_c = 32362; d->gz_blk = 240u;
+    } else if (sample_rate_hz == 32000u) {
+        d->gz_on = true; d->gz_c = 31864; d->gz_blk = 160u;
+    }
     d->pixel = -1;
     d->state = ST_HUNT;
 }
@@ -61,20 +99,98 @@ void sstv_demod_init(sstv_demod_t *d, uint32_t sample_rate_hz)
  * trick as sonde_demod.c, but reporting a continuous instantaneous
  * frequency (linearly-interpolated fractional-sample crossing time)
  * instead of slicing a bit. */
+/* Synchro de ligne par Goertzel 1200 Hz sur blocs de 5 ms. Un bloc est
+ * "synchro" si la puissance a 1200 Hz est une part notable de l'energie du
+ * bloc (un sinus pur donne 0,5). Evenement = debut d'une serie de blocs. */
+static void sstv_sync_block_end(sstv_demod_t *d)
+{
+    int64_t  N = d->gz_blk;
+    int64_t  c = d->gz_c;
+    int64_t  p = d->gz_s1 * d->gz_s1 + d->gz_s2 * d->gz_s2
+               - (((c * d->gz_s1) >> 14) * d->gz_s2);
+    int64_t  e = (int64_t)(d->gz_e > 0x7FFFFFFFFFFFu ? 0x7FFFFFFFFFFFu : d->gz_e);
+    bool sync = (e > N * 100) && (p > 0) && (p * 10 > e * N * 3);   /* part >= 30 % (sinus pur = 50 %) */
+
+    if (sync) {
+        if (d->blk_run == 0) {
+            /* debut de la synchro : meme convention qu'avant (instant du 1er bloc) */
+            uint32_t start = d->sample_idx - (uint32_t)N;
+            if (d->sync_have) {
+                uint32_t iv = start - d->sync_last;
+                uint32_t lo = d->sample_rate_hz * 400u / 1000u;
+                uint32_t hi = d->sample_rate_hz * 460u / 1000u;
+                if (iv >= lo && iv <= hi) {
+                    d->n_sync_iv++;
+                    d->sum_sync_iv += iv;
+                    d->sync_last = start;
+                } else if (iv > hi) {
+                    d->sync_last = start;
+                }
+            } else {
+                d->sync_last = start;
+                d->sync_have = true;
+            }
+        }
+        d->blk_run++;
+        d->blk_miss = 0;
+    } else if (d->blk_run) {
+        if (++d->blk_miss > 1u) {
+            d->blk_run = 0;
+            d->blk_miss = 0;
+        }
+    }
+
+    d->gz_s1 = d->gz_s2 = 0;
+    d->gz_e  = 0;
+    d->gz_n  = 0;
+}
+
+static void sstv_goertzel_step(sstv_demod_t *d, int32_t x)
+{
+    if (!d->gz_on)
+        return;
+    int64_t s0 = (int64_t)x + (((int64_t)d->gz_c * d->gz_s1) >> 14) - d->gz_s2;
+    d->gz_s2 = d->gz_s1;
+    d->gz_s1 = s0;
+    d->gz_e += (uint64_t)((int64_t)x * x);
+    if (++d->gz_n >= d->gz_blk)
+        sstv_sync_block_end(d);
+}
+
 static void sstv_update_freq(sstv_demod_t *d, int32_t sample)
 {
-    d->lp += (sample - d->lp) >> 2;
+    int32_t sig;
+    if (d->cf) {
+        /* passe-bande : coupe le bruit hors 900..2400 Hz, DC compris */
+        int32_t h = sstv_bq_step(d->bqs[0], d->cf->hp, sample);
+        sig = sstv_bq_step(d->bqs[1], d->cf->lp, h);
+        d->lp  += (sig - d->lp) >> 2;      /* garde lp pour la compatibilite des tests */
+        sstv_goertzel_step(d, sig);
+    } else {
+        d->lp  += (sample - d->lp) >> 2;
+        d->lp2 += (d->lp - d->lp2) >> 2;   /* repli : 2 passes-bas */
+        sig = d->lp2;
+    }
 
-    if (d->lp > d->lp_hi) d->lp_hi += (d->lp - d->lp_hi) >> 2;
-    else                  d->lp_hi -= (d->lp_hi - d->lp_lo) >> 10;
-    if (d->lp < d->lp_lo) d->lp_lo += (d->lp - d->lp_lo) >> 2;
-    else                  d->lp_lo += (d->lp_hi - d->lp_lo) >> 10;
+    if (sig > d->lp_hi) d->lp_hi += (sig - d->lp_hi) >> 2;
+    else                d->lp_hi -= (d->lp_hi - d->lp_lo) >> 10;
+    if (sig < d->lp_lo) d->lp_lo += (sig - d->lp_lo) >> 2;
+    else                d->lp_lo += (d->lp_hi - d->lp_lo) >> 10;
 
-    int32_t centered = d->lp - ((d->lp_hi + d->lp_lo) >> 1);
+    int32_t centered = sig - ((d->lp_hi + d->lp_lo) >> 1);
 
     d->samples_since_cross++;
 
-    if (d->prev_centered < 0 && centered >= 0) {
+    /* Hysteresis (declencheur de Schmitt) : un passage a zero n'est accepte
+     * que si le signal est descendu franchement sous -H avant. Le bruit qui
+     * oscille autour de zero ne peut plus compter comme passages. */
+    int32_t span = d->lp_hi - d->lp_lo;
+    int32_t hyst = (span > 0) ? span / 4 : 0;
+    if (centered < -hyst)
+        d->zc_armed = true;
+
+    if (d->prev_centered < 0 && centered >= 0 && d->zc_armed) {
+        d->zc_armed = false;
         int32_t denom = centered - d->prev_centered;
         int32_t frac_q10 = 0;
         if (denom != 0) {
@@ -141,10 +257,36 @@ static bool sstv_vis_window_done(sstv_demod_t *d)
     return true;
 }
 
+#define SSTV_SCOTTIE1_LINE_US  428220u   /* 1 ligne Scottie 1, nominal */
+
+bool sstv_demod_clock_error_ppm(const sstv_demod_t *d, uint32_t min_iv, int32_t *ppm)
+{
+    if (d->n_sync_iv < min_iv || d->sum_sync_iv == 0u)
+        return false;
+    /* moyenne mesuree / nominal, en ppm (entiers, 64 bits) */
+    uint64_t nominal = (uint64_t)d->sample_rate_hz * SSTV_SCOTTIE1_LINE_US / 1000000u;
+    uint64_t mean_x1e6 = d->sum_sync_iv * 1000000u / d->n_sync_iv;    /* moyenne * 1e6 */
+    int64_t  ratio_ppm = (int64_t)(mean_x1e6 / nominal) - 1000000;      /* (moyenne/nominal - 1) * 1e6 */
+    *ppm = (int32_t)ratio_ppm;
+    return true;
+}
+
 bool sstv_demod_sample(sstv_demod_t *d, int32_t sample)
 {
     sstv_update_freq(d, sample);
     d->state_samples++;
+
+    /* Synchros de ligne : 1200 Hz tenu >= 6 ms. Intervalle entre deux synchros
+     * retenu seulement s'il est proche d'une ligne (400..460 ms). */
+    d->sample_idx++;
+    if (d->have_freq) {
+        d->n_freq++;
+        uint32_t f = d->freq_mhz / 1000u;          /* Hz */
+        uint32_t b = (f < 900u) ? 0u : (f < 1100u) ? 1u : (f < 1300u) ? 2u : (f < 1450u) ? 3u
+                   : (f < 1650u) ? 4u : (f < 1900u) ? 5u : (f < 2150u) ? 6u : 7u;
+        d->fhist[b]++;
+    }
+
     if (d->have_freq) {
         d->hz_accum += d->freq_mhz;
         d->hz_accum_n++;

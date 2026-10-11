@@ -378,6 +378,33 @@ void APP_RunSarsat(void)
 	 * tap must always hear the RF, squelch or not). */
 	const uint8_t s_saved_rx_vfo = gEeprom.RX_VFO;
 	RADIO_SelectVfos();
+
+	/* UHF only (2026-10-10, explicit request, all three radio firmwares):
+	 * a beacon lives at 406 MHz -- opening this screen on a VHF/HF channel
+	 * would just force FM on the wrong frequency and show nothing but
+	 * noise, with no indication why. Checked on gTxVfo (the VFO this
+	 * screen is about to take over). No retry/auto-popup suppression here
+	 * -- a real decode never fires this screen from off-band in the first
+	 * place (the RP2040 only hears something when the radio is actually
+	 * tuned to it), so this only ever catches a manual open on the wrong
+	 * channel, which the user has to fix themselves, not wait out. */
+	if (gTxVfo->Band != BAND6_400MHz) {
+		UI_DisplayClear();
+		UI_PrintStringSmallBold("SARSAT", 2, 0, 0);
+		UI_PrintStringSmallNormal("UHF only (406MHz)", 2, 0, 2);
+		UI_PrintStringSmallNormal("Tune the VFO first", 2, 0, 3);
+		UI_PrintStringSmallNormal("Press any key", 2, 0, 5);
+		ST7565_BlitFullScreen();
+		KEY_Code_t k;
+		do { k = KEYBOARD_Poll(); SYSTEM_DelayMs(20); } while (k != KEY_INVALID);
+		do { k = KEYBOARD_Poll(); SYSTEM_DelayMs(20); } while (k == KEY_INVALID);
+		gSarsatShowRequest = false;
+		GUI_SelectNextDisplay(DISPLAY_MAIN);
+		gUpdateStatus  = true;
+		gUpdateDisplay = true;
+		return;
+	}
+
 	gRxVfo         = gTxVfo;
 	gEeprom.RX_VFO = gEeprom.TX_VFO;
 	RADIO_SetupRegisters(true);                 // tune BK4819 to that VFO

@@ -1,56 +1,29 @@
 --- a/app/main.c	2024-01-19 14:43:30.000000000 +0100
-+++ app/main.c	2026-09-02 19:46:07.519502679 +0200
-@@ -30,6 +30,15 @@
++++ app/main.c	2026-10-10 00:00:00.000000000 +0200
+@@ -30,6 +30,9 @@
  #ifdef ENABLE_SPECTRUM
  #include "app/spectrum.h"
  #endif
-+#ifdef ENABLE_SARSAT
-+#include "app/sarsat.h"
-+#endif
-+#ifdef ENABLE_APRS
-+#include "app/aprs.h"
-+#endif
-+#ifdef ENABLE_SONDE
-+#include "app/sonde.h"
++#if defined(ENABLE_SARSAT) || defined(ENABLE_APRS) || defined(ENABLE_SONDE)
++#include "app/rp_menu.h"
 +#endif
  
  #include "audio.h"
  #include "board.h"
-@@ -91,7 +100,10 @@
- 		case KEY_0:
- 			#ifdef ENABLE_FMRADIO
- 				ACTION_FM();
--			#else
-+			#elif defined(ENABLE_SONDE)
-+				APP_RunSonde();                 // F+0 : open the Sonde screen
-+				gRequestDisplayScreen = DISPLAY_MAIN;
-+			#else
+@@ -236,12 +239,15 @@
+ 			ACTION_Power();
+ 			break;
  
- 
- 				// TODO: make use of this function key
-@@ -204,7 +216,10 @@
- 
- 		case KEY_5:
- 			if(beep) {
--#ifdef ENABLE_NOAA
-+#ifdef ENABLE_APRS
-+				APP_RunAprs();
-+				gRequestDisplayScreen = DISPLAY_MAIN;
-+#elif defined(ENABLE_NOAA)
- 
- 				if (!IS_NOAA_CHANNEL(gTxVfo->CHANNEL_SAVE))
- 				{
-@@ -245,8 +260,13 @@
+ 		case KEY_7:
++#if defined(ENABLE_SARSAT) || defined(ENABLE_APRS) || defined(ENABLE_SONDE)
++			APP_RunRpMenu();                 // F+7 : SARSAT-RP/APRS-RP/SONDE-RP picker
++			gRequestDisplayScreen = DISPLAY_MAIN;
++#elif defined(ENABLE_VOX)
+-#ifdef ENABLE_VOX
+ 			ACTION_Vox();
+ #else
+ 			toggle_chan_scanlist();
+ #endif
  			break;
  
  		case KEY_8:
-+#ifdef ENABLE_SARSAT
-+			APP_RunSarsat();                 // F+8 : open the SARSAT screen
-+			gRequestDisplayScreen = DISPLAY_MAIN;
-+#else
- 			gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;
- 			gRequestSaveChannel = 1;
-+#endif
- 			break;
- 
- 		case KEY_9:

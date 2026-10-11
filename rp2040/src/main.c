@@ -42,6 +42,13 @@
 #include "sstv_master_image_pd120.h"
 #include "sstv_master_image_adrasec.h"
 
+/* Mode direct : 0xFF est reserve aux jetons, un pixel 255 est envoye en 254. */
+#if CFG_SSTV_DIRECT
+#  define SSTV_PIX(v)  (((v) == 0xFFu) ? 0xFEu : (v))
+#else
+#  define SSTV_PIX(v)  (v)
+#endif
+
 /* ⚠️ (2026-10-03) see decoder_config.h's CMD_SSTV_IMAGE_SELECT comment.
  * 0 = the photo (g_sstv_master_image*), 1 = the ADRASEC logo, pure black/
  * white -- a much easier test pattern to judge decode quality against at a
@@ -96,19 +103,6 @@ typedef struct { int peak; int rms; int raw_min; int raw_max; long dc; int clipp
 static qframe_rx_t    g_rx;
 static absolute_time_t g_last_reply;
 static int            g_link_up = -1;             /* -1 unknown, 0 down, 1 up */
-static bool           g_clk_auto_pending;         /* calibration horloge a lancer (1re connexion) */
-static bool           g_clk_auto_done;            /* deja faite depuis le demarrage */
-static volatile bool g_clk_request;              /* la radio demande une mesure (menu SSTVCal) */
-/* Calibration automatique a la connexion : DESACTIVEE. La mesure par timer
- * donne 29,8 s puis 30,9 s pour 30 s reelles -- pas assez fiable pour ecrire
- * une valeur toute seule dans la radio. Tant que ce n'est pas corrige, on
- * regle le trim a la main (touches + - r). */
-#define SSTV_CLK_AUTO 0
-/* Trim horloge radio, ppm. Valeur de depart : celle qui donne une image droite. */
-#define SSTV_TRIM_DEFAULT_PPM (-6000)
-static int32_t        g_trim_ppm = SSTV_TRIM_DEFAULT_PPM;
-static int32_t        g_trim_suggest;             /* proposition de 'k', en attente de 'y' */
-static bool           g_trim_suggest_ok;          /* une proposition est en attente */
 static uint32_t       g_acks;
 
 /* ---- SARSAT / APRS / SONDE mode ---------------------------------------- */
@@ -204,7 +198,28 @@ static bool         g_sstv_requested;   /* set by CMD_SARSAT_HELLO screen_state
  * terrain), acceptable sur un apercu 128x56 1 bpp deja fortement tasse. */
 #define SSTV_ROWGROUP_A  (SSTV_RX_SCREEN_HEIGHT / 8u)
 #define SSTV_ROWGROUP_B  (SSTV_SCOTTIE1_HEIGHT / 8u)
+/* Image affichee sur la radio, gardee ici pour la renvoyer apres la page 5
+ * (2026-10-04) : 56 lignes x 16 octets, meme format que CMD_SSTV_RX_ROW. */
+#if CFG_SSTV_RX_KEEP
+static uint8_t g_sstv_bits[SSTV_RX_SCREEN_HEIGHT][SSTV_RX_ROW_BYTES];
+#endif
+static volatile bool g_sstv_redraw;     /* la radio demande un renvoi de l'image */
+static bool g_sstv_linedump;            /* dump hexa des lignes SSTV (touche 'l') */
 static uint16_t g_sstv_col_accum[SSTV_RX_SCREEN_WIDTH];  /* darkest luma seen
+                                                           * so far this group,
+                                                           * per output column
+                                                           * -- 0xFFFF = none
+                                                           * yet (whiter than
+                                                           * any real pixel)  /* somme de la luminance par colonne
+                                                           * d'ecran sur le groupe (moyenne, pas minimum :
+                                                           * le minimum epaississait les traits noirs
+                                                           * vers la gauche). Divisee par le nombre de
+                                                           * pixels (sx) x lignes du groupe au moment de
+                                                           * l'emission. */
+static uint8_t  g_sstv_gl;                               /* lignes deja accumulees dans le groupe */
+
+/* Nombre de pixels 320 px source regroupes dans la colonne d'ecran x. */
+  /* darkest luma seen
                                                            * so far this group,
                                                            * per output column
                                                            * -- 0xFFFF = none
@@ -416,12 +431,68 @@ static void sstv_stream_send_channel_martin1(uint64_t *next, const uint8_t *row,
         uint32_t extra = 0;
         if (carry >= 10u) { carry -= 10u; extra = 1u; }
         sstv_stream_wait(next, MARTIN1_PIXEL_BASE_US + extra);
-        uart_putc_raw(CFG_RADIO_UART, row[x * 3 + off]);
+        uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(row[x * 3 + off]));
     }
+}
+
+/* Essai "cadence RP2040" (2026-10-04) : Scottie 1 cadence par le quartz du
+ * RP2040. Jetons 0xFF <code> : 0x01 = gap 1500 Hz, 0x02 = synchro 1200 Hz,
+ * 0x03 = fin. Les pixels sont des octets directs (255 -> 254, 0xFF reserve). */
+static void sstv_direct_token(uint8_t code)
+{
+    uart_putc_raw(CFG_RADIO_UART, 0xFFu);
+    uart_putc_raw(CFG_RADIO_UART, code);
+}
+
+static void sstv_direct_channel(uint64_t *next, const uint8_t *row, int off)
+{
+    for (int x = 0; x < SSTV_STREAM_SCOTTIE1_WIDTH; x++) {
+        sstv_stream_wait(next, SSTV_SCOTTIE1_PIXEL_US);
+        uint8_t v = row[x * 3 + off];
+        uart_putc_raw(CFG_RADIO_UART, (v == 0xFFu) ? 0xFEu : v);
+    }
+}
+
+static bool sstv_wait_frame(uint16_t want, uint64_t timeout_us, uint32_t *val, uint64_t *t_rx);
+
+static void sstv_stream_scottie1_direct(void)
+{
+    LOG("[sstv]   streaming Scottie 1 (direct, RP2040 clock) -- waiting for the radio...\n");
+    uint32_t dummy = 0;
+    uint64_t t_rdy = 0;
+    if (!sstv_wait_frame(CMD_SSTV_IMG_READY, 8000000ull, &dummy, &t_rdy)) {
+        LOG("[sstv]   no ready signal from the radio -- abort\n");
+        return;
+    }
+    uint64_t next = time_us_64();
+    for (int y = 0; y < SSTV_STREAM_SCOTTIE1_HEIGHT; y++) {
+        if (sstv_stream_check_stop()) {
+            LOG("[sstv]   stream stopped (radio aborted)\n");
+            return;
+        }
+        const uint8_t *row = &sstv_image320()[(size_t)y * SSTV_STREAM_SCOTTIE1_WIDTH * 3];
+        sstv_direct_token(0x01u);                                /* gap */
+        sstv_stream_wait(&next, SSTV_SCOTTIE1_GAP_US);
+        sstv_direct_channel(&next, row, 1);                      /* Green */
+        sstv_direct_token(0x01u);                                /* gap */
+        sstv_stream_wait(&next, SSTV_SCOTTIE1_GAP_US);
+        sstv_direct_channel(&next, row, 2);                      /* Blue */
+        sstv_direct_token(0x02u);                                /* synchro */
+        sstv_stream_wait(&next, SSTV_SCOTTIE1_SYNC_US);
+        sstv_direct_token(0x01u);                                /* gap */
+        sstv_stream_wait(&next, SSTV_SCOTTIE1_GAP_US);
+        sstv_direct_channel(&next, row, 0);                      /* Red */
+    }
+    sstv_direct_token(0x03u);
+    LOG("[sstv]   stream done (direct)\n");
 }
 
 static void sstv_stream_scottie1(void)
 {
+#if CFG_SSTV_DIRECT
+    sstv_stream_scottie1_direct();
+    return;
+#endif
     LOG("[sstv]   streaming Scottie 1 (%u bytes) to the radio...\n",
         (unsigned)sizeof(g_sstv_master_image));
 
@@ -452,12 +523,37 @@ static void sstv_stream_scottie1(void)
 #define SSTV_MARTIN1_SYNC_US   4862u   /* == sstv_tx.c's MARTIN1_SYNC_US */
 #define SSTV_MARTIN1_PORCH_US   572u   /* == sstv_tx.c's MARTIN1_PORCH_US */
 
+/* Mode "cadence RP2040" (2026-10-04) : jetons 1200/1500 Hz aux debuts de
+ * synchro et de porche (voir sstv_stream_scottie1_direct). En mode direct la
+ * radio attend le premier octet apres son signal READY, pas un delai fixe. */
+#if CFG_SSTV_DIRECT
+#  define SSTV_TOK(c)  sstv_direct_token(c)
+#else
+#  define SSTV_TOK(c)  ((void)0)
+#endif
+
+static bool sstv_direct_ready(void)
+{
+    uint32_t dummy = 0;
+    uint64_t t_rdy = 0;
+    if (!sstv_wait_frame(CMD_SSTV_IMG_READY, 8000000ull, &dummy, &t_rdy)) {
+        LOG("[sstv]   no ready signal from the radio -- abort\n");
+        return false;
+    }
+    return true;
+}
+
 static void sstv_stream_martin1(void)
 {
     LOG("[sstv]   streaming Martin 1 (%u bytes) to the radio...\n",
         (unsigned)sizeof(g_sstv_master_image));
 
+#if CFG_SSTV_DIRECT
+    if (!sstv_direct_ready())
+        return;
+#else
     sleep_us(SSTV_SCOTTIE1_VIS_LEAD_US);   /* same VIS header, same lead time */
+#endif
 
     uint64_t next = time_us_64();
     for (int y = 0; y < SSTV_STREAM_MARTIN1_HEIGHT; y++) {
@@ -466,13 +562,20 @@ static void sstv_stream_martin1(void)
             return;
         }
         const uint8_t *row = &sstv_image320()[(size_t)y * SSTV_STREAM_MARTIN1_WIDTH * 3];
-        sstv_stream_wait(&next, SSTV_MARTIN1_SYNC_US + SSTV_MARTIN1_PORCH_US);
+        SSTV_TOK(0x02u);
+        sstv_stream_wait(&next, SSTV_MARTIN1_SYNC_US);
+        SSTV_TOK(0x01u);
+        SSTV_TOK(0x01u);
+        sstv_stream_wait(&next, SSTV_MARTIN1_PORCH_US);
         sstv_stream_send_channel_martin1(&next, row, 1);   /* Green */
+        SSTV_TOK(0x01u);
         sstv_stream_wait(&next, SSTV_MARTIN1_PORCH_US);
         sstv_stream_send_channel_martin1(&next, row, 2);   /* Blue */
+        SSTV_TOK(0x01u);
         sstv_stream_wait(&next, SSTV_MARTIN1_PORCH_US);
         sstv_stream_send_channel_martin1(&next, row, 0);   /* Red */
     }
+    SSTV_TOK(0x03u);                                       /* fin d'image pour la radio */
     LOG("[sstv]   stream done\n");
 }
 
@@ -513,7 +616,12 @@ static void sstv_stream_pd90(void)
     LOG("[sstv]   streaming PD90 (%u bytes) to the radio...\n",
         (unsigned)sizeof(g_sstv_master_image));
 
+#if CFG_SSTV_DIRECT
+    if (!sstv_direct_ready())
+        return;
+#else
     sleep_us(SSTV_SCOTTIE1_VIS_LEAD_US);   /* same VIS header, same lead time */
+#endif
 
     uint64_t next = time_us_64();
     for (int y = 0; y < SSTV_STREAM_PD90_HEIGHT; y += 2) {
@@ -525,29 +633,34 @@ static void sstv_stream_pd90(void)
         const uint8_t *rowE = &sstv_image320()[(size_t)y * SSTV_STREAM_PD90_WIDTH * 3];
         const uint8_t *rowO = &sstv_image320()[(size_t)yOdd * SSTV_STREAM_PD90_WIDTH * 3];
 
-        sstv_stream_wait(&next, SSTV_PD90_SYNC_US + SSTV_PD90_PORCH_US);
+        SSTV_TOK(0x02u);
+        sstv_stream_wait(&next, SSTV_PD90_SYNC_US);
+        SSTV_TOK(0x01u);
+        SSTV_TOK(0x01u);
+        sstv_stream_wait(&next, SSTV_PD90_PORCH_US);
 
         for (int x = 0; x < SSTV_STREAM_PD90_WIDTH; x++) {   /* Y even */
             sstv_stream_wait(&next, SSTV_PD90_PIXEL_US);
-            uart_putc_raw(CFG_RADIO_UART, pd_y(rowE[x*3], rowE[x*3+1], rowE[x*3+2]));
+            uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(pd_y(rowE[x*3], rowE[x*3+1], rowE[x*3+2])));
         }
         for (int x = 0; x < SSTV_STREAM_PD90_WIDTH; x++) {   /* V (averaged) */
             uint8_t v = (uint8_t)(((uint32_t)pd_v(rowE[x*3], rowE[x*3+1], rowE[x*3+2]) +
                                     pd_v(rowO[x*3], rowO[x*3+1], rowO[x*3+2])) / 2u);
             sstv_stream_wait(&next, SSTV_PD90_PIXEL_US);
-            uart_putc_raw(CFG_RADIO_UART, v);
+            uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(v));
         }
         for (int x = 0; x < SSTV_STREAM_PD90_WIDTH; x++) {   /* U (averaged) */
             uint8_t u = (uint8_t)(((uint32_t)pd_u(rowE[x*3], rowE[x*3+1], rowE[x*3+2]) +
                                     pd_u(rowO[x*3], rowO[x*3+1], rowO[x*3+2])) / 2u);
             sstv_stream_wait(&next, SSTV_PD90_PIXEL_US);
-            uart_putc_raw(CFG_RADIO_UART, u);
+            uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(u));
         }
         for (int x = 0; x < SSTV_STREAM_PD90_WIDTH; x++) {   /* Y odd */
             sstv_stream_wait(&next, SSTV_PD90_PIXEL_US);
-            uart_putc_raw(CFG_RADIO_UART, pd_y(rowO[x*3], rowO[x*3+1], rowO[x*3+2]));
+            uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(pd_y(rowO[x*3], rowO[x*3+1], rowO[x*3+2])));
         }
     }
+    SSTV_TOK(0x03u);                                       /* fin d'image pour la radio */
     LOG("[sstv]   stream done\n");
 }
 
@@ -565,7 +678,12 @@ static void sstv_stream_pd120(void)
     LOG("[sstv]   streaming PD120 (%u bytes) to the radio...\n",
         (unsigned)sizeof(g_sstv_master_image_pd120));
 
+#if CFG_SSTV_DIRECT
+    if (!sstv_direct_ready())
+        return;
+#else
     sleep_us(SSTV_SCOTTIE1_VIS_LEAD_US);   /* same VIS header, same lead time */
+#endif
 
     uint64_t next = time_us_64();
     for (int y = 0; y < SSTV_STREAM_PD120_HEIGHT; y += 2) {
@@ -577,29 +695,34 @@ static void sstv_stream_pd120(void)
         const uint8_t *rowE = &sstv_image_pd120()[(size_t)y * SSTV_STREAM_PD120_WIDTH * 3];
         const uint8_t *rowO = &sstv_image_pd120()[(size_t)yOdd * SSTV_STREAM_PD120_WIDTH * 3];
 
-        sstv_stream_wait(&next, SSTV_PD120_SYNC_US + SSTV_PD120_PORCH_US);
+        SSTV_TOK(0x02u);
+        sstv_stream_wait(&next, SSTV_PD120_SYNC_US);
+        SSTV_TOK(0x01u);
+        SSTV_TOK(0x01u);
+        sstv_stream_wait(&next, SSTV_PD120_PORCH_US);
 
         for (int x = 0; x < SSTV_STREAM_PD120_WIDTH; x++) {   /* Y even */
             sstv_stream_wait(&next, SSTV_PD120_PIXEL_US);
-            uart_putc_raw(CFG_RADIO_UART, pd_y(rowE[x*3], rowE[x*3+1], rowE[x*3+2]));
+            uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(pd_y(rowE[x*3], rowE[x*3+1], rowE[x*3+2])));
         }
         for (int x = 0; x < SSTV_STREAM_PD120_WIDTH; x++) {   /* V (averaged) */
             uint8_t v = (uint8_t)(((uint32_t)pd_v(rowE[x*3], rowE[x*3+1], rowE[x*3+2]) +
                                     pd_v(rowO[x*3], rowO[x*3+1], rowO[x*3+2])) / 2u);
             sstv_stream_wait(&next, SSTV_PD120_PIXEL_US);
-            uart_putc_raw(CFG_RADIO_UART, v);
+            uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(v));
         }
         for (int x = 0; x < SSTV_STREAM_PD120_WIDTH; x++) {   /* U (averaged) */
             uint8_t u = (uint8_t)(((uint32_t)pd_u(rowE[x*3], rowE[x*3+1], rowE[x*3+2]) +
                                     pd_u(rowO[x*3], rowO[x*3+1], rowO[x*3+2])) / 2u);
             sstv_stream_wait(&next, SSTV_PD120_PIXEL_US);
-            uart_putc_raw(CFG_RADIO_UART, u);
+            uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(u));
         }
         for (int x = 0; x < SSTV_STREAM_PD120_WIDTH; x++) {   /* Y odd */
             sstv_stream_wait(&next, SSTV_PD120_PIXEL_US);
-            uart_putc_raw(CFG_RADIO_UART, pd_y(rowO[x*3], rowO[x*3+1], rowO[x*3+2]));
+            uart_putc_raw(CFG_RADIO_UART, SSTV_PIX(pd_y(rowO[x*3], rowO[x*3+1], rowO[x*3+2])));
         }
     }
+    SSTV_TOK(0x03u);                                       /* fin d'image pour la radio */
     LOG("[sstv]   stream done\n");
 }
 
@@ -621,10 +744,6 @@ static void link_poll(void)
         if (g_link_up != 1) {
             g_link_up = 1;
             LOG("[link]   radio replying - link UP\n");
-#if SSTV_CLK_AUTO
-            if (!g_clk_auto_done)
-                g_clk_auto_pending = true;
-#endif
         }
 
         if (id == (CMD_SARSAT_HELLO | 0x8000) && dl >= 7) {
@@ -702,8 +821,8 @@ static void link_poll(void)
         } else if (id == CMD_SSTV_IMAGE_SELECT && dl >= 1) {
             g_sstv_image_sel = d[0] ? 1 : 0;
             LOG("[sstv]   image select: %s\n", g_sstv_image_sel ? "ADRASEC logo" : "photo");
-        } else if (id == CMD_SSTV_CLK_REQ) {
-            g_clk_request = true;
+        } else if (id == CMD_SSTV_RX_REDRAW) {
+            g_sstv_redraw = true;
         } else if (id == CMD_SSTV_STATUS && dl >= 2) {
             uint16_t timeouts = d[0] | (d[1] << 8);
             /* 2026-09-27: le compteur "tim14 late" unique est remplace par
@@ -850,23 +969,95 @@ static void adc_capture_init(void)
     g_dma_chan = dma_claim_unused_channel(true);
 }
 
-static void adc_capture_window(int n)
+/* ---- SARSAT : capture continue en anneau (2026-10-08) ------------------
+ * L'ancienne capture remplissait g_adc_raw par fenetres de 1100 ms BOUT A
+ * BOUT, puis decodait sans rien capturer : une salve a cheval sur deux
+ * fenetres (environ 4 sur 10) etait perdue quel que soit son niveau, et le
+ * temps de decodage ajoutait des trous. Desormais le DMA ecrit sans arret
+ * dans un anneau, et la boucle principale en extrait la derniere fenetre de
+ * CFG_WINDOW_MS toutes les CFG_HOP_MS (decoder_config.h).
+ * L'anneau reutilise g_sonde_ring (32 Ko, aligne) : les modes sont
+ * exclusifs, et chaque *_mode_enter() commence par arreter le DMA. */
+#define SARSAT_RING_SAMPLES SONDE_RING_SAMPLES   /* 16384 = 1,024 s a 16 kHz */
+#define SARSAT_RING_BITS    15                   /* log2(16384 * 2 octets)    */
+#define SARSAT_RING_GUARD   256                  /* marge de recopie (16 ms)  */
+_Static_assert(WINDOW_SAMPLES + SARSAT_RING_GUARD <= SARSAT_RING_SAMPLES,
+               "fenetre SARSAT trop longue pour l'anneau (CFG_WINDOW_MS / "
+               "CFG_SAMPLE_RATE_HZ)");
+_Static_assert(sizeof(g_sonde_ring) == SARSAT_RING_SAMPLES * 2,
+               "SARSAT_RING_BITS suppose un anneau de 32 Ko");
+
+static uint32_t g_sar_widx;     /* index d'ecriture DMA au dernier suivi      */
+static uint32_t g_sar_filled;   /* echantillons captures depuis le demarrage  */
+static uint32_t g_sar_fresh;    /* echantillons arrives depuis la fenetre prec. */
+
+static uint32_t sarsat_ring_widx(void)
 {
-    if (n > WINDOW_SAMPLES) n = WINDOW_SAMPLES;
-    if (n < 1)              n = 1;
+    uint32_t base = (uint32_t)(uintptr_t)g_sonde_ring;
+    return ((dma_hw->ch[g_dma_chan].write_addr - base) / 2)
+           & (SARSAT_RING_SAMPLES - 1);
+}
+
+static void sarsat_ring_start(void)
+{
+    adc_run(false);
+    dma_channel_abort(g_dma_chan);
+    adc_fifo_drain();
+    adc_set_clkdiv((float)48000000.0f / (float)CFG_SAMPLE_RATE_HZ - 1.0f);
 
     dma_channel_config c = dma_channel_get_default_config(g_dma_chan);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
     channel_config_set_read_increment(&c, false);
     channel_config_set_write_increment(&c, true);
+    channel_config_set_ring(&c, true, SARSAT_RING_BITS);  /* rebouclage d'adresse */
     channel_config_set_dreq(&c, DREQ_ADC);
-
-    adc_fifo_drain();
-    adc_run(false);
-    dma_channel_configure(g_dma_chan, &c, g_adc_raw, &adc_hw->fifo, n, true);
+    dma_channel_configure(g_dma_chan, &c, g_sonde_ring, &adc_hw->fifo,
+                          0xFFFFFFFFu, true);
     adc_run(true);
-    dma_channel_wait_for_finish_blocking(g_dma_chan);
-    adc_run(false);
+
+    g_sar_widx   = 0;
+    g_sar_filled = 0;
+    g_sar_fresh  = 0;
+}
+
+/* A appeler a chaque tour de boucle en mode SARSAT (au moins une fois par
+ * tour d'anneau, 1 s) : compte les echantillons arrives. Relance aussi le DMA
+ * avant la fin de son compteur de transferts (2^32 ~ 74 h a 16 kHz) -- sans
+ * ca, une station qui ecoute plusieurs jours finirait par se figer. */
+static void sarsat_ring_track(void)
+{
+    if (dma_hw->ch[g_dma_chan].transfer_count < (1u << 24)) {   /* ~17 min restantes */
+        LOG("[link]   SARSAT ring: DMA transfer count renewed\n");
+        sarsat_ring_start();
+        return;
+    }
+    uint32_t w = sarsat_ring_widx();
+    uint32_t d = (w - g_sar_widx) & (SARSAT_RING_SAMPLES - 1);
+    g_sar_widx = w;
+    if (g_sar_filled < 0x40000000u) g_sar_filled += d;
+    if (g_sar_fresh  < 0x40000000u) g_sar_fresh  += d;
+}
+
+/* Recopie les n derniers echantillons de l'anneau dans g_adc_raw (lineaire,
+ * plus ancien en tete). Retourne combien sont nouveaux depuis la recopie
+ * precedente (borne a n) -- pour le suivi de DC, voir window_to_audio(). Le
+ * DMA continue d'ecrire pendant la recopie, mais n'atteint le debut de la
+ * fenetre qu'apres SARSAT_RING_GUARD echantillons : largement le temps. */
+static int sarsat_ring_copy(int n)
+{
+    if (n > WINDOW_SAMPLES) n = WINDOW_SAMPLES;
+    sarsat_ring_track();
+    uint32_t start = (g_sar_widx - (uint32_t)n) & (SARSAT_RING_SAMPLES - 1);
+    uint32_t first = SARSAT_RING_SAMPLES - start;
+    if (first >= (uint32_t)n) {
+        memcpy(g_adc_raw, &g_sonde_ring[start], (size_t)n * 2);
+    } else {
+        memcpy(g_adc_raw, &g_sonde_ring[start], (size_t)first * 2);
+        memcpy(g_adc_raw + first, g_sonde_ring, (size_t)(n - (int)first) * 2);
+    }
+    int fresh = (g_sar_fresh > (uint32_t)n) ? n : (int)g_sar_fresh;
+    g_sar_fresh = 0;
+    return fresh;
 }
 
 static uint32_t isqrt_u64(uint64_t v)
@@ -892,32 +1083,10 @@ static void console_help(void)
         "     use it to set the radio volume: aim for the HISS at\n"
         "     rms ~2000-3500, clip 0%%, dc near %d. A beacon then reads lower.\n"
         " s : one-shot status line\n"
-        " k : calibrate the radio clock (SSTV: radio transmits 8 s, ~14 s total)\n"
         " h : this help\n"
         "-------------------------------------------------------------\n\n",
         CFG_ADC_DC_CENTER);
 }
-
-/* Envoie un trim a la radio (stocke en EEPROM par la radio). */
-static void sstv_trim_set(int32_t ppm)
-{
-    if (ppm >  20000) ppm =  20000;
-    if (ppm < -20000) ppm = -20000;
-    g_trim_ppm = ppm;
-    uint8_t d[2] = { (uint8_t)(ppm & 0xFF), (uint8_t)((uint16_t)ppm >> 8) };
-    radio_send(CMD_SSTV_TRIM, d, sizeof d);
-    LOG("[trim]   radio clock trim set to %+ld ppm (stored in the radio's EEPROM)\n", (long)ppm);
-}
-
-/* Calibration de l'horloge radio (2026-10-04) -- SANS emission, automatique
- * a la 1re connexion et sur la touche 'k'.
- * La radio fait tourner son timer TIM14 (celui qui cadence les pixels) seul,
- * sans rien emettre, et compte ses debordements de 10 ms. Le RP2040 mesure
- * le temps reel entre l'accuse de demarrage et l'accuse d'arret (quartz,
- * ~20 ppm) : la latence de la boucle radio, presente dans les deux accuses,
- * s'annule. Le trim = temps programme / temps reel - 1. */
-#define SSTV_CLK_DURATION_US  30000000u
-#define SSTV_CLK_WAIT_US      2000000ull
 
 /* Attend une trame radio de commande `want` ; copie son premier u32 dans *val
  * (0 si pas de payload) et son instant de reception dans *t_rx. */
@@ -942,56 +1111,6 @@ static bool sstv_wait_frame(uint16_t want, uint64_t timeout_us, uint32_t *val, u
         }
     }
     return false;
-}
-
-static void sstv_calibrate(void)
-{
-    LOG("[cal]    radio clock calibration (no transmission): measuring %lu s...\n",
-        (unsigned long)(SSTV_CLK_DURATION_US / 1000000u));
-
-    uint32_t dummy;
-    uint64_t t_a1, t_a2;
-    radio_send(CMD_SSTV_CLK_START, NULL, 0);
-    if (!sstv_wait_frame(CMD_SSTV_CLK_ACK, SSTV_CLK_WAIT_US, &dummy, &t_a1)) {
-        LOG("[cal]    no reply from the radio -- is it on the Phase 2 firmware?\n");
-        return;
-    }
-
-    while (time_us_64() < t_a1 + SSTV_CLK_DURATION_US) { }   /* chronometre RP2040 */
-
-    /* END peut se perdre : on le renvoie jusqu'a 3 fois (la radio est idempotente) */
-    uint32_t prog_us = 0;
-    bool got_report = false;
-    int  attempt_ok = 0;
-    for (int attempt = 0; attempt < 3 && !got_report; attempt++) {
-        radio_send(CMD_SSTV_CLK_END, NULL, 0);
-        got_report = sstv_wait_frame(CMD_SSTV_CLK_REPORT, SSTV_CLK_WAIT_US / 2, &prog_us, &t_a2);
-        attempt_ok = attempt;
-    }
-    if (!got_report) {
-        LOG("[cal]    no timing report from the radio -- measure discarded\n");
-        return;
-    }
-
-    /* temps reel entre les deux accuses (latence de la radio annulee). Si le
-     * rapport n'est arrive qu'apres un renvoi, c'est que le precedent a ete
-     * perdu : la radio avait deja arrete son timer au PREMIER END, on retire
-     * donc les attentes des renvois (1 s chacun). */
-    uint64_t real_us = (t_a2 - t_a1) - (uint64_t)attempt_ok * (SSTV_CLK_WAIT_US / 2);
-    int64_t  trim = (int64_t)((uint64_t)prog_us * 1000000u / real_us) - 1000000;
-    if (trim >  20000) trim =  20000;
-    if (trim < -20000) trim = -20000;
-
-    g_trim_suggest    = trim;
-    g_trim_suggest_ok = true;
-    {
-        uint8_t d[2] = { (uint8_t)(trim & 0xFF), (uint8_t)((uint16_t)trim >> 8) };
-        radio_send(CMD_SSTV_CLK_RESULT, d, sizeof d);   /* proposition pour l'ecran de la radio */
-    }
-    LOG("[cal]    radio timer %lu ms programmed, %lu ms real (RP2040) -> suggested trim %+ld ppm\n",
-        (unsigned long)(prog_us / 1000u), (unsigned long)(real_us / 1000u), (long)trim);
-    LOG("[cal]    'y' = apply it   '+' '-' = adjust by 250 ppm   'r' = %d ppm\n",
-        SSTV_TRIM_DEFAULT_PPM);
 }
 
 static void meter_print(const audio_stats_t *st, int noise_rms, const char *tag)
@@ -1031,9 +1150,6 @@ static void console_poll(const audio_stats_t *st, int noise_rms)
                 "(tune 144.800, let a beacon come)\n");
             break;
 #endif
-        case 'k': case 'K':
-            sstv_calibrate();
-            break;
         case 'h': case 'H': case '?':
             console_help();
             break;
@@ -1045,11 +1161,25 @@ static void console_poll(const audio_stats_t *st, int noise_rms)
 }
 
 /* Convert raw ADC window to signed audio; fill *st.
- * g_dc holds the DC estimate as raw<<8 fixed point. */
-static void window_to_audio(audio_stats_t *st, int n)
+ * g_dc holds the DC estimate as raw<<8 fixed point.
+ * `fresh` = how many of the n samples (the last ones) are new since the
+ * previous window: the ring windows overlap (CFG_HOP_MS < CFG_WINDOW_MS), so
+ * the DC tracker only advances over those -- running it over the whole
+ * window again would make it CFG_WINDOW_MS / CFG_HOP_MS times faster. The
+ * window is then converted with that one DC value (it moves by a negligible
+ * amount within a window at this time constant). */
+static void window_to_audio(audio_stats_t *st, int n, int fresh)
 {
     if (n > WINDOW_SAMPLES) n = WINDOW_SAMPLES;
     if (n < 1)              n = 1;
+    if (fresh > n)          fresh = n;
+
+    /* Hardware bias sets the operating point now; keep the DC tracker very
+     * slow so it does not chase the FM-hiss envelope between beacons. */
+    for (int i = n - fresh; i < n; i++)
+        g_dc += (((long)(g_adc_raw[i] & 0x0FFF) << 8) - g_dc) >> 15;   /* ~2 s */
+    const long dc = g_dc >> 8;
+
     int peak = 0, raw_min = 4095, raw_max = 0, clipped = 0;
     uint64_t sq = 0;
     for (int i = 0; i < n; i++) {
@@ -1058,10 +1188,7 @@ static void window_to_audio(audio_stats_t *st, int n)
         if (raw > raw_max) raw_max = raw;
         if (raw == 0 || raw == 4095) clipped++;
 
-        /* Hardware bias sets the operating point now; keep the DC tracker very
-         * slow so it does not chase the FM-hiss envelope between beacons. */
-        g_dc += (((long)raw << 8) - g_dc) >> 15;      /* ~2 s tracker */
-        long s = ((long)raw - (g_dc >> 8)) << CFG_AUDIO_GAIN_SHIFT;
+        long s = ((long)raw - dc) << CFG_AUDIO_GAIN_SHIFT;
         if (s >  32767) s =  32767;
         if (s < -32768) s = -32768;
         g_audio[i] = (int32_t)s;
@@ -1433,18 +1560,19 @@ static void aprs_mode_enter(void)
 
 static void sarsat_mode_enter(void)
 {
-    adc_run(false);
-    dma_channel_abort(g_dma_chan);
-    adc_fifo_drain();
-    adc_set_clkdiv((float)48000000.0f / (float)CFG_SAMPLE_RATE_HZ - 1.0f);
+    sarsat_ring_start();               /* capture continue, voir sarsat_ring_* */
     g_mode = MODE_SARSAT;
-    LOG("[link]   mode SARSAT  (%d Hz)  -- 406 / 434.2 MHz FM\n",
-        CFG_SAMPLE_RATE_HZ);
+    LOG("[link]   mode SARSAT  (%d Hz, ring %d ms, window %d ms every %d ms)"
+        "  -- 406 / 434.2 MHz FM\n", CFG_SAMPLE_RATE_HZ,
+        SARSAT_RING_SAMPLES * 1000 / CFG_SAMPLE_RATE_HZ, CFG_WINDOW_MS, CFG_HOP_MS);
 }
 
 
+static uint64_t g_sstv_t0_us;   /* debut du mode SSTV : mesure du debit reel d'echantillons */
+
 static void sstv_mode_enter(void)
 {
+    g_sstv_t0_us = time_us_64();
     adc_run(false);
     dma_channel_abort(g_dma_chan);
     adc_fifo_drain();
@@ -1500,10 +1628,27 @@ static void sstv_rx_emit_row(void)
     p[0] = g_sstv_screen_row;
     memcpy(p + 1, bits, sizeof bits);
     radio_send(CMD_SSTV_RX_ROW, p, sizeof p);
+#if CFG_SSTV_RX_KEEP
+    memcpy(g_sstv_bits[g_sstv_screen_row], bits, sizeof bits);
+#endif
 
     memset(g_sstv_col_accum, 0xFF, sizeof g_sstv_col_accum);   /* 0xFFFF/col: see its own comment */
     if (++g_sstv_screen_row >= SSTV_RX_SCREEN_HEIGHT)
         g_sstv_screen_row = 0;   /* defensive: the demod itself wraps at 256 lines */
+}
+
+/* Renvoie l'image complete a la radio (CLEAR puis toutes les lignes gardees). */
+static void sstv_redraw_screen(void)
+{
+#if CFG_SSTV_RX_KEEP
+    radio_send(CMD_SSTV_RX_CLEAR, NULL, 0);
+    for (int r = 0; r < SSTV_RX_SCREEN_HEIGHT; r++) {
+        uint8_t p[1 + SSTV_RX_ROW_BYTES];
+        p[0] = (uint8_t)r;
+        memcpy(p + 1, g_sstv_bits[r], SSTV_RX_ROW_BYTES);
+        radio_send(CMD_SSTV_RX_ROW, p, sizeof p);
+    }
+#endif
 }
 
 /* Drain the (shared APRS) ADC ring through the SSTV demod; on each
@@ -1513,6 +1658,49 @@ static void sstv_rx_emit_row(void)
  * tool reassembles these into an image (tools/sstv_log_to_png.py) -- kept
  * alongside the live radio-side display (sstv_rx_emit_row() above), useful
  * for offline higher-quality reprocessing / debugging the decoder itself. */
+/* Mesure d'horloge de l'emetteur DISTANT (2026-10-04) : affichage seulement.
+ * Le recepteur ne peut pas regler l'emetteur d'un autre poste : on donne
+ * l'ecart et la correction a ajouter a son trim, a transmettre a son
+ * operateur. Provisoire toutes les 16 lignes, FINAL en fin d'image. */
+static void sstv_clock_report(const sstv_demod_t *d)
+{
+    uint32_t li = d->line_ready_idx;
+    if (li % 16u != 15u && li != 255u)
+        return;
+    int32_t ppm = 0;
+    bool ok = sstv_demod_clock_error_ppm(d, 8, &ppm);
+
+    /* page "5" de l'ecran SSTVRx de la radio */
+    uint16_t lines = (uint16_t)(li + 1u);
+    uint16_t iv    = (uint16_t)(d->n_sync_iv > 0xFFFFu ? 0xFFFFu : d->n_sync_iv);
+    uint8_t  flags = (uint8_t)((ok ? 1u : 0u) | (li == 255u ? 2u : 0u));
+    uint32_t pu    = (uint32_t)ppm;
+    uint8_t  p[10] = { 1u, flags,
+                       (uint8_t)(lines & 0xFFu), (uint8_t)(lines >> 8),
+                       (uint8_t)(iv & 0xFFu), (uint8_t)(iv >> 8),
+                       (uint8_t)(pu & 0xFFu), (uint8_t)((pu >> 8) & 0xFFu),
+                       (uint8_t)((pu >> 16) & 0xFFu), (uint8_t)(pu >> 24) };
+    radio_send(CMD_SSTV_RX_INFO, p, sizeof p);
+
+    if (!ok) {
+        uint64_t el = time_us_64() - g_sstv_t0_us;
+        uint32_t rate = (el > 0) ? (uint32_t)((uint64_t)d->sample_idx * 1000000u / el) : 0u;
+        LOG("[rx]     TX clock: waiting, %lu line intervals (need 8); samples %lu, real rate %lu Hz (declared %u)\n",
+            (unsigned long)d->n_sync_iv, (unsigned long)d->sample_idx, (unsigned long)rate,
+            (unsigned)CFG_SSTV_SAMPLE_RATE_HZ);
+        LOG("[rx]     freq Hz: <900:%lu 900-1100:%lu 1100-1300:%lu 1300-1450:%lu "
+            "1450-1650:%lu 1650-1900:%lu 1900-2150:%lu >2150:%lu\n",
+            (unsigned long)d->fhist[0], (unsigned long)d->fhist[1], (unsigned long)d->fhist[2],
+            (unsigned long)d->fhist[3], (unsigned long)d->fhist[4], (unsigned long)d->fhist[5],
+            (unsigned long)d->fhist[6], (unsigned long)d->fhist[7]);
+        return;
+    }
+    LOG("[rx]     TX clock %s: %+ld ppm over %lu line intervals -> transmitter's trim "
+        "must change by %+ld ppm\n",
+        li == 255u ? "FINAL" : "provisional", (long)ppm,
+        (unsigned long)d->n_sync_iv, (long)-ppm);
+}
+
 static void sstv_service(void)
 {
     uint32_t base = (uint32_t)(uintptr_t)g_aprs_ring;
@@ -1526,11 +1714,15 @@ static void sstv_service(void)
 
         if (sstv_demod_sample(&g_sstv_demod, sample)) {
             g_sstv_lines++;
+            sstv_clock_report(&g_sstv_demod);
             if (g_sstv_demod.line_ready_idx == 0) {
                 /* first line of a new picture -- clear the radio's screen
                  * and reset our own column accumulator/group state too, in
                  * case the previous picture ended mid-group (abort/re-hunt) */
                 radio_send(CMD_SSTV_RX_CLEAR, NULL, 0);
+#if CFG_SSTV_RX_KEEP
+                memset(g_sstv_bits, 0, sizeof g_sstv_bits);
+#endif
                 memset(g_sstv_col_accum, 0xFF, sizeof g_sstv_col_accum);   /* see its own comment */
                 g_sstv_screen_row = 0;
                 g_sstv_racc = 0;
@@ -1554,8 +1746,9 @@ static void sstv_service(void)
                 sstv_rx_emit_row();
             }
 
+            /* dump hexa de chaque ligne : desactive par defaut, touche 'l' */
             static const char *const chname[3] = { "G", "B", "R" };
-            for (int ch = 0; ch < 3; ch++) {
+            for (int ch = 0; ch < 3 && g_sstv_linedump; ch++) {
                 for (int i = 0; i < SSTV_SCOTTIE1_WIDTH; i += 32) {
                     char ln[32 * 2 + 1];
                     int k = 0;
@@ -1929,21 +2122,29 @@ int main(void)
     absolute_time_t rearm_at    = get_absolute_time();
     absolute_time_t last_decode = get_absolute_time();
     char            last_id[24] = {0};
+    /* BCH-corrected decode awaiting corroboration from another ring window
+     * -- see the comment at its use below. */
+    char            pending_id[24] = {0};
+    double          pending_lat = 0.0, pending_lon = 0.0;
+    absolute_time_t pending_time = get_absolute_time();
+    bool            pending_valid = false;
     int             noise_rms   = 1200;   /* running estimate of the no-signal hiss */
     bool            noise_seeded = false;
+    absolute_time_t next_win    = get_absolute_time();   /* prochaine fenetre SARSAT */
+    absolute_time_t next_nosync_log = get_absolute_time();
+    unsigned        nosync_tries = 0;     /* essais sans synchro depuis le dernier log */
+
+    /* Le mode SARSAT est actif des le demarrage (g_mode = MODE_SARSAT) sans
+     * passer par la bascule de mode : lancer sa capture en anneau ici. */
+    sarsat_mode_enter();
 
     for (;;) {
         /* calibration horloge, une fois par demarrage, a la 1re connexion. En tete
          * de boucle : le mode APRS fait son propre continue et n'arriverait pas
          * jusqu'a la fin de l'iteration. */
-        if (g_clk_request) {
-            g_clk_request = false;
-            sstv_calibrate();   /* demandee par le menu SSTVCal de la radio */
-        }
-        if (g_clk_auto_pending && g_mode == MODE_APRS) {
-            g_clk_auto_pending = false;
-            g_clk_auto_done = true;
-            sstv_calibrate();
+        if (g_sstv_redraw) {
+            g_sstv_redraw = false;
+            sstv_redraw_screen();
         }
         link_poll();
 
@@ -2025,39 +2226,20 @@ int main(void)
                 if (c == 'w' || c == 'W') {
                     g_dump_st = DUMP_ARMED;
                     LOG("[aprs.raw] armed - waiting for the next carrier\n");
-                } else if (c == '+') {
-                    sstv_trim_set(g_trim_ppm + 250);
-                } else if (c == '-') {
-                    sstv_trim_set(g_trim_ppm - 250);
-                } else if (c == 'r' || c == 'R') {
-                    sstv_trim_set(SSTV_TRIM_DEFAULT_PPM);
-                } else if (c == 'y' || c == 'Y') {
-                    if (g_trim_suggest_ok) {
-                        g_trim_suggest_ok = false;
-                        sstv_trim_set(g_trim_suggest);
-                    } else {
-                        LOG("[trim]   nothing to apply -- press 'k' first\n");
-                    }
-                } else if (c == 'k' || c == 'K') {
-                    /* calibration horloge radio (2026-10-04) -- ce bloc lit
-                     * ses propres touches et jetait tout le reste, donc 'k'
-                     * n'atteignait jamais console_poll() */
-                    sstv_calibrate();
+                } else if (c == 'l' || c == 'L') {
+                    g_sstv_linedump = !g_sstv_linedump;
+                    LOG("[sstv]   line dump %s (key 'l')\n", g_sstv_linedump ? "ON" : "OFF");
                 } else if (c == 'h' || c == 'H' || c == '?') {
                     LOG("[aprs]   'w' = capture the next burst's raw ADC "
                         "([aprs.raw] hex, decode off-line)\n");
-                    LOG("[aprs]   'k' = measure the radio clock (SSTV, 30 s, no transmission)\n");
-                    LOG("[aprs]   'k' then 'y' = apply the measured SSTV clock trim, '+' '-' = +/-250 ppm, 'r' = %d ppm\n",
-                        SSTV_TRIM_DEFAULT_PPM);
+                    LOG("[aprs]   'l' = SSTV line hex dump on/off (debug, off by default)\n");
                 }
             }
             aprs_dump_flush();
 #else
             {
-                int c = getchar_timeout_us(0);
-                if (c == 'k' || c == 'K')
-                    sstv_calibrate();
-            }   /* keep CDC drained */
+                (void)getchar_timeout_us(0);   /* keep CDC drained */
+            }
 #endif
             sleep_us(300);
             continue;
@@ -2158,15 +2340,23 @@ int main(void)
         }
 
         /* -------- SARSAT mode -------------------------------------------- */
-        /* While the radio's level screen is open, capture short windows so the
-         * bar refreshes fast (~7 Hz) for AF-gain tuning; a whole beacon burst
-         * won't fit, so skip decoding until the user leaves that view. */
-        const int wn = g_lvl_view ? (CFG_SAMPLE_RATE_HZ / 8) : WINDOW_SAMPLES;
+        /* Continuous ring capture (sarsat_ring_*): the latest CFG_WINDOW_MS is
+         * analysed every CFG_HOP_MS, so no burst falls between two windows and
+         * nothing is lost while decoding. While the radio's level screen is
+         * open, short windows every 125 ms (~8 Hz) for AF-gain tuning; a whole
+         * beacon burst won't fit, so no decoding until the user leaves it. */
+        const int      wn     = g_lvl_view ? (CFG_SAMPLE_RATE_HZ / 8) : WINDOW_SAMPLES;
+        const uint32_t hop_ms = g_lvl_view ? 125u : CFG_HOP_MS;
 
-        adc_capture_window(wn);
+        sarsat_ring_track();
+        if (g_sar_filled < (uint32_t)wn || !time_reached(next_win)) {
+            sleep_us(300);
+            continue;
+        }
+        next_win = make_timeout_time_ms(hop_ms);
 
         audio_stats_t st;
-        window_to_audio(&st, wn);
+        window_to_audio(&st, wn, sarsat_ring_copy(wn));
 
         console_poll(&st, noise_rms);
         if (g_meter)
@@ -2206,9 +2396,11 @@ int main(void)
         if (!is_burst) {
             /* hiss / dead air: track the floor. Update on any window that is
              * not clearly quieter than the current estimate, so the floor
-             * still rises to a hot hiss whose peaks are large. */
+             * still rises to a hot hiss whose peaks are large. >> 5 (was >> 3
+             * with back-to-back 1.1 s windows): about 4 windows per second now,
+             * same ~8 s time constant. */
             if (!quieted)
-                noise_rms += (st.rms - noise_rms) >> 3;
+                noise_rms += (st.rms - noise_rms) >> 5;
             if (time_reached(next_lvl)) {
                 LOG("[lvl]    peak=%-5d rms=%-5d (%ld%% of floor) clip=%d%%  "
                     "adc[%d..%d] dc=%ld  floorRMS=%d  %s%s\n",
@@ -2235,26 +2427,37 @@ int main(void)
         }
 #endif
 
-        LOG("[burst]  peak=%d rms=%d (%ld%% of floor) clip=%d%% adc[%d..%d] dc=%ld "
-            "floorRMS=%d -> decoding\n",
-            st.peak, st.rms, quiet_pct, st.clipped, st.raw_min, st.raw_max, st.dc,
-            noise_rms);
-
         sarsat_result_t r;
         int rc = sarsat_decode_window(g_audio, WINDOW_SAMPLES,
                                       CFG_SAMPLE_RATE_HZ, &r);
 
         if (rc == 0) {
-            LOG("[slicer] no sync / no frame in this window\n");
+            /* Overlapping windows: hiss passing the absolute peak arm can be
+             * tried up to 4 times a second -- one summary line at most every
+             * CFG_LEVEL_LOG_MS instead of two lines per try. */
+            nosync_tries++;
+            if (time_reached(next_nosync_log)) {
+                LOG("[burst]  peak=%d rms=%d (%ld%% of floor) clip=%d%% dc=%ld "
+                    "floorRMS=%d -> no sync (%u window(s) tried)\n",
+                    st.peak, st.rms, quiet_pct, st.clipped, st.dc, noise_rms,
+                    nosync_tries);
+                nosync_tries = 0;
+                next_nosync_log = make_timeout_time_ms(CFG_LEVEL_LOG_MS);
+            }
             continue;
         }
 
+        LOG("[burst]  peak=%d rms=%d (%ld%% of floor) clip=%d%% adc[%d..%d] dc=%ld "
+            "floorRMS=%d -> decoding\n",
+            st.peak, st.rms, quiet_pct, st.clipped, st.raw_min, st.raw_max, st.dc,
+            noise_rms);
         LOG("[slicer] %d bits: %s\n", r.frame_bits, r.raw_hex);
 
         if (rc < 0) {
             LOG("[decode] BCH uncorrectable - frame rejected "
                 "(weak signal / mistune / off-band?)\n");
-            rearm_at = make_timeout_time_ms(500);
+            /* No rearm: the next window, CFG_HOP_MS later, holds the same
+             * burst at another offset and may well slice it cleanly. */
             continue;
         }
 
@@ -2276,6 +2479,42 @@ int main(void)
                 rearm_at = make_timeout_time_ms(500);
                 continue;
             }
+        }
+
+        /* A corrected decode (BCH flipped 1-3 bits) is only guaranteed unique
+         * and correct up to the code's proven radius (3 bits BCH1, 2 bits
+         * BCH2 -- see dec406_v1g.c). Past that radius, pure noise can land
+         * on a different valid codeword and still pass the frame-sync guard
+         * in decode_slice(): documented there as a ~0.4% residual. A real
+         * burst spans several overlapping ring windows (CFG_WINDOW_MS /
+         * CFG_HOP_MS of them) and reproduces the SAME corrected id+position
+         * in each; a noise coincidence does not. So require a corrected
+         * result to repeat, identically, in another window before trusting
+         * it -- costs up to CFG_HOP_MS of extra latency, only on corrected
+         * frames; clean (uncorrected) decodes are pushed immediately as
+         * before. If the burst never lands in a second window the decode is
+         * dropped silently (logged only); the beacon retransmits in ~50 s. */
+        if (r.info.bch1_fixed || r.info.bch2_fixed) {
+            bool confirmed = pending_valid &&
+                             strcmp(r.hex_id, pending_id) == 0 &&
+                             r.info.lat == pending_lat &&
+                             r.info.lon == pending_lon &&
+                             absolute_time_diff_us(pending_time, get_absolute_time())
+                                 < (int64_t)CFG_WINDOW_MS * 1000;
+            if (!confirmed) {
+                snprintf(pending_id, sizeof(pending_id), "%s", r.hex_id);
+                pending_lat   = r.info.lat;
+                pending_lon   = r.info.lon;
+                pending_time  = get_absolute_time();
+                pending_valid = true;
+                LOG("[decode] BCH fixed %u+%u bit -- en attente de "
+                    "confirmation sur une autre fenetre\n",
+                    r.info.bch1_fixed, r.info.bch2_fixed);
+                continue;               /* no rearm: retried next hop */
+            }
+            pending_valid = false;      /* confirmed, consumed */
+            LOG("[decode] BCH fixed %u+%u bit -- confirme par une 2e "
+                "fenetre\n", r.info.bch1_fixed, r.info.bch2_fixed);
         }
 
         /* de-dup: the beacon re-transmits every ~50 s; keep the log terse and
