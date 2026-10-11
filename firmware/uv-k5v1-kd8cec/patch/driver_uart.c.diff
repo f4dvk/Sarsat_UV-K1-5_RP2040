@@ -1,0 +1,19 @@
+--- a/driver/uart.c	2024-01-19 14:43:30.000000000 +0100
++++ driver/uart.c	2026-10-10 00:00:00.000000000 +0200
+@@ -39,5 +39,15 @@
+ 	}
+ 
+-	UART1->BAUD = Frequency / 39053U;
++	/* 2026-10-10 : porte de 38400 a 230400 (meme debit que le RP2040,
++	 * CFG_RADIO_UART_BAUD, rp2040/src/decoder_config.h) -- le RP2040 est
++	 * une image unique partagee par toutes les radios et a ete bascule a
++	 * 230400 le 2026-09-26 (branche SSTV, streaming temps reel) sans que
++	 * ce firmware V1 ne suive, ce qui rompait la liaison SARSAT/APRS/
++	 * Sonde. 230400 / 38400 = 6 exactement -> meme constante magique,
++	 * multipliee par 6 (39053 * 6 = 234318), pour ne pas introduire de
++	 * nouvelle erreur de calibration au-dela de celle deja presente dans
++	 * 39053 (non documentee, jamais mesuree au banc pour ce projet).
++	 */
++	UART1->BAUD = Frequency / 234318U;
+ 	UART1->CTRL = UART_CTRL_RXEN_BITS_ENABLE | UART_CTRL_TXEN_BITS_ENABLE | UART_CTRL_RXDMAEN_BITS_ENABLE;
+ 	UART1->RXTO = 4;

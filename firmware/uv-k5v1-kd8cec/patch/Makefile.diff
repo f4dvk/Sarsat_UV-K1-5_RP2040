@@ -19,7 +19,7 @@
  # ---- DEBUGGING ----
  ENABLE_AM_FIX_SHOW_DATA       ?= 0
  ENABLE_AGC_SHOW_DATA          ?= 0
-@@ -142,6 +149,16 @@
+@@ -142,6 +149,18 @@
  ifeq ($(ENABLE_SPECTRUM), 1)
  OBJS += app/spectrum.o
  endif
@@ -33,6 +33,8 @@
 +ifeq ($(ENABLE_SONDE),1)
 +OBJS += app/sonde.o
 +endif
++# F+7 picker (A/B/C) -- compiles to an empty TU if none of the above are set
++OBJS += app/rp_menu.o
  OBJS += app/scanner.o
  ifeq ($(ENABLE_UART),1)
  	OBJS += app/uart.o
