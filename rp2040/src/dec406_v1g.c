@@ -68,7 +68,7 @@ static char decode_baudot_char(int x);
 static int validate_coordinates(double lat, double lon);
 static int validate_frame_sync(const char *frame, int frame_length);
 /* exposed (non-static) for sarsat_decoder.c / host tests */
-void decode_1g_frame(const char *frame, int frame_length, BeaconInfo1G *info);
+void decode_1g_frame(char *frame, int frame_length, BeaconInfo1G *info);
 
 // ===================================================
 // CRC validation functions
@@ -106,6 +106,83 @@ int test_crc1(const char *s) {
     for (j = 0; j < 22; j++) ss += div[j];
     return (ss == 0) ? 0 : 1;
 }
+
+// ===================================================
+// BCH error correction (see dec406_v1g.h's fix_crc1()/fix_crc2() doc) --
+// same two C/S T.001 codes as test_crc1()/test_crc2() above (bits 25..106,
+// 82 bits / 21-bit code ; bits 107..144, 38 bits / 12-bit code), reimplemented
+// as a plain cyclic-code remainder (equivalent to those LFSR loops, checked
+// against a known-good decoded frame -- both give syndrome 0 on it).
+// ===================================================
+#define BCH_MAX_N 82   /* le plus grand des deux codes (BCH1) */
+
+static uint32_t bch_syndrome(const char *s, int base, int n, uint32_t gen, int r) {
+    uint32_t reg = 0;
+    for (int i = 0; i < n; i++) {
+        reg = (reg << 1) | (uint32_t)(s[base + i] == '1');
+        if (reg >> r) reg ^= gen;
+    }
+    return reg;
+}
+
+/* Syndrome d'une erreur d'un seul bit a la position locale p (0..n-1) --
+ * independant du message par linearite du code, voir fix_crc1()/fix_crc2(). */
+static uint32_t bch_syndrome_single(int n, uint32_t gen, int r, int p) {
+    uint32_t reg = 0;
+    for (int i = 0; i < n; i++) {
+        reg = (reg << 1) | (uint32_t)(i == p);
+        if (reg >> r) reg ^= gen;
+    }
+    return reg;
+}
+
+/* Essaie de corriger jusqu'a max_t bits dans s[base..base+n-1] pour annuler
+ * le syndrome. Retourne le nombre de bits corriges (0 = deja valide), ou -1
+ * si aucune combinaison jusqu'a max_t ne correspond. max_t ne doit jamais
+ * depasser le rayon de correction prouve du code (3 pour BCH1, 2 pour BCH2)
+ * sous peine d'appliquer une correction fausse mais au syndrome correct. */
+static int bch_fix(char *s, int base, int n, uint32_t gen, int r, int max_t) {
+    uint32_t synd = bch_syndrome(s, base, n, gen, r);
+    if (synd == 0) return 0;
+
+    uint32_t s1[BCH_MAX_N];
+    for (int p = 0; p < n; p++) s1[p] = bch_syndrome_single(n, gen, r, p);
+
+    for (int p = 0; p < n; p++) {
+        if (s1[p] == synd) {
+            s[base + p] = (s[base + p] == '1') ? '0' : '1';
+            return 1;
+        }
+    }
+    if (max_t >= 2) {
+        for (int p1 = 0; p1 < n; p1++)
+            for (int p2 = p1 + 1; p2 < n; p2++)
+                if ((s1[p1] ^ s1[p2]) == synd) {
+                    s[base + p1] = (s[base + p1] == '1') ? '0' : '1';
+                    s[base + p2] = (s[base + p2] == '1') ? '0' : '1';
+                    return 2;
+                }
+    }
+    if (max_t >= 3) {
+        for (int p1 = 0; p1 < n; p1++)
+            for (int p2 = p1 + 1; p2 < n; p2++)
+                for (int p3 = p2 + 1; p3 < n; p3++)
+                    if ((s1[p1] ^ s1[p2] ^ s1[p3]) == synd) {
+                        s[base + p1] = (s[base + p1] == '1') ? '0' : '1';
+                        s[base + p2] = (s[base + p2] == '1') ? '0' : '1';
+                        s[base + p3] = (s[base + p3] == '1') ? '0' : '1';
+                        return 3;
+                    }
+    }
+    return -1;
+}
+
+int fix_crc1(char *s, int max_t)                                          /* bits 25..106 */
+{
+    if (max_t > 3) max_t = 3;          /* rayon prouve du code, jamais au-dela */
+    return bch_fix(s, 24, 82, 0x26D9E3u, 21, max_t);
+}
+int fix_crc2(char *s) { return bch_fix(s, 106, 38, 0x1539u, 12, 2); }    /* bits 107..144 */
 
 int test_crc2(const char *s) {
     int g[] = {1,0,1,0,1,0,0,1,1,1,0,0,1};
@@ -859,13 +936,25 @@ static void binary_to_hex(const char *binary, int length, char *hex_output, size
 // ===================================================
 // Main decoding function
 // ===================================================
-void decode_1g_frame(const char *frame, int frame_length, BeaconInfo1G *info) {
+void decode_1g_frame(char *frame, int frame_length, BeaconInfo1G *info) {
     memset(info, 0, sizeof(BeaconInfo1G));
     info->frame_type = frame_length;
     info->crc_error = 0;
 
-    // CRC verification
-    int crc1_failed = test_crc1(frame);
+    // CRC verification -- fix_crc1()/fix_crc2() flip bits in `frame` in place
+    // when the error is within the code's proven correction radius (3 bits
+    // for BCH1, 2 for BCH2), so every field decoded below already sees the
+    // corrected frame. -1 means still bad: same "reject" outcome as the old
+    // test_crc1()/test_crc2(), just with a wider net cast first.
+    //
+    // Short frames: BCH1 limited to 2 bits. Only BCH1 protects them, and the
+    // slicer regularly turns hiss into candidate frames (seen in field logs):
+    // a random 82-bit block falls within 3 bits of a valid codeword 4.4% of
+    // the time (91,964 words per codeword / 2^21), within 2 bits only 0.16%.
+    // Long frames keep 3: BCH2 adds its own protection on top.
+    int bch1 = fix_crc1(frame, frame_length == LONG_FRAME_BITS ? 3 : 2);
+    int bch2 = 0;
+    int crc1_failed = (bch1 < 0);
     int crc2_failed = 0;
     int is_orbitography = 0;
 
@@ -877,9 +966,12 @@ void decode_1g_frame(const char *frame, int frame_length, BeaconInfo1G *info) {
 
         if (!is_orbitography) {
             // Only test CRC2 if NOT orbitography
-            crc2_failed = test_crc2(frame);
+            bch2 = fix_crc2(frame);
+            crc2_failed = (bch2 < 0);
         }
     }
+    info->bch1_fixed = (uint8_t)(bch1 > 0 ? bch1 : 0);
+    info->bch2_fixed = (uint8_t)(bch2 > 0 ? bch2 : 0);
 
     // Display CRC status
     if (crc1_failed || crc2_failed) {
@@ -892,7 +984,10 @@ void decode_1g_frame(const char *frame, int frame_length, BeaconInfo1G *info) {
                  crc2_failed ? "FAIL" : "OK");
         }
     } else {
-        if (is_orbitography) {
+        if (info->bch1_fixed || info->bch2_fixed) {
+            DIAG("CRC: CRC1=OK (%u bit fixed) CRC2=OK (%u bit fixed)\n",
+                 info->bch1_fixed, info->bch2_fixed);
+        } else if (is_orbitography) {
             DIAG("CRC: CRC1=OK\n");
         } else {
             DIAG("CRC: CRC1=OK CRC2=OK\n");

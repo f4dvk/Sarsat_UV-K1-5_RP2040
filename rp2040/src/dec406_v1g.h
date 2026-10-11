@@ -70,16 +70,38 @@ typedef struct {
     uint8_t lon_offset_min;
     uint8_t lon_offset_sec;
     uint8_t protocol_bits;
+    uint8_t bch1_fixed;   /* bits corrected by BCH-1 (0 = none needed), see fix_crc1() */
+    uint8_t bch2_fixed;   /* bits corrected by BCH-2 (0 = none needed), see fix_crc2() */
 } BeaconInfo1G;
 
-/* BCH syndrome checks (detection only, no correction) — 0 = OK, 1 = error.
- * `s` is a '0'/'1' character string of at least the frame length. */
-int test_crc1(const char *s);   /* BCH-1 / PDF-1, bits 25..85  */
-int test_crc2(const char *s);   /* BCH-2 / PDF-2, bits 107..132 (long frames) */
+/* BCH syndrome checks, detection only (0 = OK, 1 = error) — kept for anyone
+ * relying on the pure-detect behaviour; decode_1g_frame() itself now calls
+ * fix_crc1()/fix_crc2() instead. `s` is a '0'/'1' character string of at
+ * least the frame length. */
+int test_crc1(const char *s);   /* BCH-1 / PDF-1, bits 25..106 (82 bits, 21-bit code) */
+int test_crc2(const char *s);   /* BCH-2 / PDF-2, bits 107..144 (38 bits, 12-bit code), long frames */
+
+/* BCH correction (C/S T.001 codes): both are linear, so an error's syndrome
+ * is the XOR of its individual bits' syndromes -- verified by exhaustive
+ * search (host script, every weight-1/2/3 pattern) that BCH-1 corrects up to
+ * 3 bit errors and BCH-2 up to 2, with no syndrome collision below that
+ * weight, i.e. a match found is the unique correct fix, not a guess. Flips
+ * the offending bit(s) of `s` in place. Returns the number of bits fixed (0
+ * = already valid), or -1 if no combination within the code's proven radius
+ * matches (more damage than it can guarantee -- same as the old test_crc*
+ * reporting failure). fix_crc1() takes the radius to try (clamped to 3):
+ * decode_1g_frame() uses 3 for long frames, 2 for short ones -- see there.
+ * A correction also widens the door to false accepts on hiss-sliced junk,
+ * so sarsat_decode_window() additionally requires an exact frame sync on
+ * any corrected frame. */
+int fix_crc1(char *s, int max_t);
+int fix_crc2(char *s);
 
 /* Full parse of a 112- or 144-bit frame given as a '0'/'1' string (index 0 =
- * first bit sync '1'). Fills *info; check info->crc_error before trusting it. */
-void decode_1g_frame(const char *frame, int frame_length, BeaconInfo1G *info);
+ * first bit sync '1'). May flip bits in `frame` in place to correct BCH
+ * errors (see fix_crc1()/fix_crc2()) before extracting fields. Fills *info;
+ * check info->crc_error before trusting it. */
+void decode_1g_frame(char *frame, int frame_length, BeaconInfo1G *info);
 
 /* Legacy entry point: parse `bits` (one byte per bit, value 0/1) and print a
  * human-readable report to stdout. Kept for host debugging / dec406.c dispatch. */

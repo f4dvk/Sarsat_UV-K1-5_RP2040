@@ -66,9 +66,17 @@
 #define CFG_AUDIO_GAIN_SHIFT  3       /* (raw - dc) << shift -> slicer domain   */
 
 /* ---- burst capture --------------------------------------------------- */
-#define CFG_WINDOW_MS        1100     /* >= 2x a full FGB burst (~520 ms) so a  */
-                                      /* whole frame always fits whatever its   */
-                                      /* phase in the window                    */
+/* Capture continue en anneau (2026-10-08, main.c SARSAT_RING_*) : une fenetre
+ * de CFG_WINDOW_MS est reanalysee toutes les CFG_HOP_MS, donc toute portion de
+ * CFG_WINDOW_MS - CFG_HOP_MS = 750 ms tombe entiere dans au moins une fenetre
+ * (salve complete, porteuse de tete comprise : ~580 ms). L'ancienne capture
+ * par fenetres de 1100 ms bout a bout -- plus un trou pendant le decodage --
+ * coupait environ 4 salves sur 10 entre deux fenetres, quel que soit leur
+ * niveau (l'ancien commentaire "une trame tient toujours" etait faux pour des
+ * fenetres sans recouvrement). La fenetre doit tenir dans l'anneau de
+ * SARSAT_RING_SAMPLES (16384 = 1,024 s a 16 kHz), d'ou 1000 ms. */
+#define CFG_WINDOW_MS        1000
+#define CFG_HOP_MS            250
 #define CFG_BURST_PEAK_ON     3000    /* gained |sample| for the ABSOLUTE arm    */
                                       /* path (kept as a fallback). The main    */
                                       /* detector is now relative, see below.   */
@@ -226,10 +234,17 @@
                                          /* time margin as the previous 8192  */
                                          /* @ 48 kHz gave (doubled the rate,  */
                                          /* doubled the buffer)               */
-#define SONDE_RING_BITS     14           /* log2(SONDE_RING_SAMPLES*2), must */
+#define SONDE_RING_BITS     15           /* log2(SONDE_RING_SAMPLES*2), must */
                                          /* survive the blocking radio_send  */
                                          /* burst on a decode (same rationale */
                                          /* as APRS_RING_BITS, aprs_rx.c)    */
+/* ⚠️ (2026-10-08) etait 14 depuis le doublement de l'anneau (8192 -> 16384
+ * echantillons) : le DMA rebouclait sur 16 Ko = 8192 echantillons pendant que
+ * sonde_service() lisait modulo 16384, soit ~85 ms d'echantillons jamais
+ * ecrits (zeros/anciens) injectes dans le demodulateur a chaque tour
+ * d'anneau. Le tampon g_sonde_ring est bien aligne sur 32 Ko (main.c). */
+_Static_assert((1u << SONDE_RING_BITS) == SONDE_RING_SAMPLES * 2,
+               "SONDE_RING_BITS doit couvrir tout l'anneau (DMA vs lecture)");
 
 #define CMD_SONDE_CLEAR      0x06E0u     /* no payload                       */
 #define CMD_SONDE_TEXT       0x06E1u     /* {line:u8, invert:u8, ascii[...]} */
@@ -407,23 +422,23 @@
  * que le controle EXIT cote radio, pour ne pas perturber le cadencement
  * pixel deja fragile -- voir l'historique de sstv_stream_wait()). */
 #define CMD_SSTV_STOP          0x06E7u    /* radio -> RP2040: {} (no payload) */
-/* Calibration de l'horloge radio, SANS emission (2026-10-04) :
- *   CMD_SSTV_CLK_START : RP2040 -> radio {} -- la radio demarre son timer TIM14
- *                        et repond CMD_SSTV_CLK_ACK (accuse, sert a la mesure).
- *   CMD_SSTV_CLK_END   : RP2040 -> radio {} -- arret ; la radio repond
- *                        CMD_SSTV_CLK_REPORT {prog_us: u32 LE}.
- *   CMD_SSTV_TRIM      : RP2040 -> radio {trim_ppm: i16 LE} -- stocke en EEPROM.
- * Le RP2040 calcule le trim : prog / (temps reel entre les deux accuses) - 1. */
-#define CMD_SSTV_CLK_START     0x06EBu
-#define CMD_SSTV_CLK_END       0x06ECu
-#define CMD_SSTV_TRIM          0x06E9u
-#define CMD_SSTV_CLK_REPORT    0x06EDu
-#define CMD_SSTV_CLK_ACK       0x06EEu
-/* Menu SSTVCal de la radio (2026-10-04) :
- *   CMD_SSTV_CLK_REQ    : radio -> RP2040 {} -- lancer une mesure, renvoyer le resultat
- *   CMD_SSTV_CLK_RESULT : RP2040 -> radio {trim_ppm: i16 LE} -- proposition */
-#define CMD_SSTV_CLK_REQ       0x06F0u
-#define CMD_SSTV_CLK_RESULT    0x06EFu
+/* RP2040 -> radio (2026-10-04) : page "5" de SSTVRx -- {mode:u8 (1 Scottie 1),
+ * flags:u8 (bit0 valide, bit1 final), lignes:u16, synchros:u16, ecart_ppm:i32} */
+#define CMD_SSTV_RX_INFO       0x06F1u
+/* radio -> RP2040 (2026-10-04) : la page 5 vient de se fermer, renvoyer l'image
+ * reçue (CLEAR + toutes les lignes gardees par le RP2040). Payload vide. */
+#define CMD_SSTV_RX_REDRAW     0x06F2u
+/* Essai "cadence RP2040" (Scottie 1) : la radio signale le debut de l'image. */
+#define CMD_SSTV_IMG_READY     0x06F3u
+#ifndef CFG_SSTV_DIRECT
+#  define CFG_SSTV_DIRECT  1   /* 1 = Scottie/Martin/PD cadences par le RP2040 (jetons 0xFF) */
+#endif
+/* Garder l'image reçue cote RP2040 (896 o de RAM) pour la renvoyer apres la
+ * page 5 de la radio. Pico 2 seulement : le Pico d'origine manque de RAM
+ * (overflow de 616 o avec cette fonction). */
+#ifndef CFG_SSTV_RX_KEEP
+#  define CFG_SSTV_RX_KEEP  (defined(PICO_RP2350) && PICO_RP2350)
+#endif
 
 /* ⚠️ (2026-10-03) SSTV RX en direct sur l'ecran radio (branch SSTV_SSDV) :
  * jusqu'ici le RP2040 decodait une image REELLEMENT recue (sstv_demod.c,
