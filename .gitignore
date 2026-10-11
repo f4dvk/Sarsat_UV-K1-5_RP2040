@@ -2,7 +2,16 @@
 rp2040/build/
 rp2040/build2/
 rp2040/build-*/
+firmware/f4hwn-v6/build-*/
+firmware/f4hwn-v6/build_link/
 build/
+
+# build / config logs
+firmware/f4hwn-v6/build_*.log
+firmware/f4hwn-v6/build-*.log
+firmware/f4hwn-v6/cfg_*.log
+rp2040/build_*.log
+rp2040/cfg_*.log
 
 # host test artefacts (compiled executables have no extension)
 rp2040/test/host/test_*
