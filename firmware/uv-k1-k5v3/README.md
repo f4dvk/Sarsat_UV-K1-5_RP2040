@@ -6,16 +6,17 @@ qui couvre à la fois l'**UV-K1** nouvelle génération et l'**UV-K5 V3**
 (même plateforme matérielle, même binaire).
 
 La C-Board RP2040 et le protocole série (`docs/protocol.md`) sont **inchangés**
-— c'est le même lien `AB CD … DC BA` à 38400 8N1, commandes `0x06Cx`. Aucune
+— c'est le même lien `AB CD … DC BA` à 230400 8N1, commandes `0x06Cx`. Aucune
 modification côté `rp2040/` n'est nécessaire pour ce port.
 
 ## État
 
 | Composant | État |
 |---|---|
-| Écran SARSAT (décodage 406 MHz affiché) | **validé sur matériel**, y compris signal faible — voir `bin/` et `patch/integration.md` (correctif AFC). Ouverture directe par **F+8**, comme sur le V1 (a remplacé rétroéclairage à la demande / inversion de fréquence sur cette touche). |
+| Écran SARSAT (décodage 406 MHz affiché) | **validé sur matériel**, y compris signal faible — voir `bin/` et `patch/integration.md` (correctif AFC). Ouverture par l'écran de lancement **F+7** (A APRS-RP / B SARSAT-RP / C SSTV-RP / D SONDE-RP, `patch/rp_menu.c`), comme sur le V1 — a remplacé les anciens combos fixes F+8/F+5 **et** le mécanisme F1/F2 assignable (2026-10-11, parité avec le V1 : plus aucune autre façon d'ouvrir ces quatre écrans). |
 | Réglage de gain C-Board (potentiomètre volume au max) | fait, sur la vue niveau de l'écran SARSAT (touche `5`, UP/DOWN), partagé avec l'APRS. |
-| Tracker APRS (TX/RX, GPS, canal dédié 170) | **compilé, 0 warning** — pas encore testé sur matériel. Ouverture directe par **F+5** (combinaison libre sur ce preset), comme sur le V1. Voir `patch/integration.md`. |
+| Tracker APRS (TX/RX, GPS, canal dédié 170) | **compilé, 0 warning** — pas encore testé sur matériel. Ouverture par **F+7 → A**, comme SARSAT. Voir `patch/integration.md`. |
+| SSTV (TX 4 modes, RX, choix image) | **compilé, 0 warning**. Ouverture par **F+7 → C** — un seul écran (`patch/sstv_rx.c`, porté de f4hwn-v6) : touche `1` change de mode TX, `2` bascule photo/logo, `MENU` émet, `4` bascule vue image/info, `EXIT` revient puis quitte. |
 | Icône GPS en barre de statut | **compilé, 0 warning** — pas encore testé sur matériel. |
 | Affichage « Icom » (façon V1) | **en cours, par étapes** — bandeau d'en-tête inversé + fréquence en gros chiffres + S-mètre recentré, actif en Main Only **et** en Dual Watch (portée limitée à la vue fréquence au repos pour l'instant, pas encore aux canaux mémoire/NOAA). Objectif final : parité complète avec le V1 (affichage/menu/décodage). Voir `patch/integration.md` et la Phase 6 du plan de suivi. |
 

@@ -42,4 +42,7 @@ void SSTV_SendPD120(void);
  * resolution). */
 void SSTV_ToggleImage(void);
 
+/* Nom de la source courante : "photo" ou "logo" (affichage ecran SSTV-RP) */
+const char *SSTV_ImageName(void);
+
 #endif

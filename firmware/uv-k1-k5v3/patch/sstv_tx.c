@@ -1072,6 +1072,12 @@ static void sstv_send_image_sel(void)
     SendReply(UART_PORT_UART, buf, sizeof buf);
 }
 
+const char *SSTV_ImageName(void)
+{
+    sstv_image_sel_init();
+    return s_image_sel ? "logo" : "photo";
+}
+
 void SSTV_ToggleImage(void)
 {
     sstv_image_sel_init();
