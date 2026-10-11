@@ -112,7 +112,11 @@
 #include "app/uart.h"     /* UART_PORT_UART, pour SendReply() */
 
 #include "driver/bk4819.h"
-#include "driver/eeprom.h"    /* EEPROM_ReadBuffer()/WriteBuffer() -- image sel persistence */
+#include "driver/eeprom.h"
+
+/* 1 = tous les modes (Scottie, Martin, PD90, PD120) cadences par le RP2040 */
+#define SSTV_DIRECT_SCOTTIE 1u
+static void sstv_send_direct(void);    /* EEPROM_ReadBuffer()/WriteBuffer() -- image sel persistence */
 #include "driver/keyboard.h"  /* KEYBOARD_Poll()/KEY_EXIT -- abort a transmission in progress */
 #include "driver/st7565.h"    /* ST7565_BlitFullScreen(), SSTV_ToggleImage()'s confirmation */
 #include "driver/systick.h"
@@ -346,54 +350,6 @@ static volatile uint8_t  s_queue_tail;   /* prochaine case a VIDER (ISR) */
 static uint8_t s_queue_mask = (uint8_t)(SSTV_QUEUE_DEPTH - 1u);
 static volatile uint16_t s_last_pushed_period_us;   /* pour sstv_hw_tone_finish() */
 
-/* Correction d'horloge radio (2026-10-04). L'oscillateur interne du PY32 fait
- * ~-0,5 % d'erreur sur les durees TIM14 (mesure : 430,3 ms au lieu de
- * 428,22 ms par ligne Scottie 1, horloge plus lente que nominal). La mesure
- * se fait SANS emission (SSTV_ClockStart/End) : le RP2040 chronometre 30 s
- * avec son quartz, la radio compte les cycles de son SysTick (meme oscillateur
- * que TIM14) pendant ce temps. Le facteur est stocke en EEPROM et applique a
- * chaque duree poussee dans la file. La valeur par defaut (-4860 ppm)
- * reproduit la correction mesuree a la main (432 us -> 430 us). */
-#define SSTV_TRIM_EE_ADDR      0x0A1B8u
-#define SSTV_TRIM_EE_MAGIC     0x5Au
-#define SSTV_TRIM_DEFAULT_PPM  (-4860)
-#define SSTV_TRIM_LIMIT_PPM    20000
-static int16_t s_trim_ppm = SSTV_TRIM_DEFAULT_PPM;
-
-static void sstv_trim_load(void)
-{
-    uint8_t buf[8];
-    EEPROM_ReadBuffer(SSTV_TRIM_EE_ADDR, buf, sizeof(buf));
-    if (buf[0] == SSTV_TRIM_EE_MAGIC)
-        s_trim_ppm = (int16_t)(buf[1] | ((uint16_t)buf[2] << 8));
-}
-
-void SSTV_SetTrim(int16_t ppm)
-{
-    if (ppm > SSTV_TRIM_LIMIT_PPM)  ppm = SSTV_TRIM_LIMIT_PPM;
-    if (ppm < -SSTV_TRIM_LIMIT_PPM) ppm = -SSTV_TRIM_LIMIT_PPM;
-    s_trim_ppm = ppm;
-    uint8_t buf[8] = { SSTV_TRIM_EE_MAGIC, (uint8_t)(ppm & 0xFF), (uint8_t)((uint16_t)ppm >> 8), 0, 0, 0, 0, 0 };
-    EEPROM_WriteBuffer(SSTV_TRIM_EE_ADDR, buf);
-}
-
-int16_t SSTV_GetTrim(void)
-{
-    return s_trim_ppm;
-}
-
-/* Relit le trim stocke en EEPROM (sinon la RAM garde la valeur par defaut
- * tant qu'aucune emission n'a eu lieu depuis le demarrage). */
-void SSTV_LoadTrim(void)
-{
-    sstv_trim_load();
-}
-
-static uint16_t sstv_trim_apply(uint16_t us)
-{
-    int32_t corrected = (int32_t)us + ((int32_t)us * s_trim_ppm) / 1000000;
-    return (uint16_t)corrected;
-}
 static bool               s_hw_started;
 
 /* ⚠️ (2026-09-27, retour terrain : repartition sync/porche vs pixel
@@ -416,22 +372,12 @@ static volatile uint16_t s_tim_late_pixel;
  * absent, ou file de pixels pleine. Rapportes dans CMD_SSTV_STATUS. */
 static uint16_t s_cnt_uart_wait;
 static uint16_t s_cnt_queue_full;
-/* Mesure d'horloge (SSTV_ClockStart/End) : TIM14 tourne seul, sans
- * tonalite ni queue -- chaque debordement compte une periode de 10 ms. */
-static volatile bool     s_clk_mode;
-static volatile uint32_t s_clk_pops;
-static uint32_t          s_clk_last_prog;   /* dernier temps programme, redonne si END est renvoye */
 
 void TIM14_IRQHandler(void)
 {
     if (!LL_TIM_IsActiveFlag_UPDATE(TIM14))
         return;
     LL_TIM_ClearFlag_UPDATE(TIM14);
-
-    if (s_clk_mode) {          /* mesure d'horloge : rien d'autre a faire */
-        s_clk_pops++;
-        return;
-    }
 
     if (s_queue_tail != s_queue_head) {
         uint16_t reg  = s_queue[s_queue_tail].reg71;
@@ -483,7 +429,6 @@ static void sstv_hw_init(void)
  * suivants). */
 static void sstv_hw_queue_push(uint8_t kind, uint16_t reg71, uint16_t period_us)
 {
-    period_us = sstv_trim_apply(period_us);
     if (!s_hw_started) {
         /* ⚠️ (2026-10-01, retour terrain : plusieurs decodeurs independants
          * -- QSSTV, RPI_SSTV -- n'accrochent jamais sur PD120, alors que
@@ -595,7 +540,7 @@ static void sstv_hw_tone_finish(void)
  * de 428.22 ms, soit ~+0.5 % (~2.2 us/pixel). Horloge radio un peu lente ->
  * on programme 430 us pour obtenir ~432 us effectifs. Le RP2040 garde 432 us
  * comme reference de cadence (sstv_stream_scottie1). */
-#define SCOTTIE1_PIXEL_US   432u   /* 138240 us / 320 : nominal, la correction d'horloge est appliquee par le trim (sstv_trim_apply) */
+#define SCOTTIE1_PIXEL_US   432u   /* 138240 us / 320 : nominal */
 
 static void sstv_send_vis(uint8_t code)
 {
@@ -887,6 +832,10 @@ static void sstv_scan_channel_martin1(void)
 
 static void sstv_send_martin1_image(void)
 {
+    if (SSTV_DIRECT_SCOTTIE) {          /* meme chemin que Scottie 1 : jetons du RP2040 */
+        sstv_send_direct();
+        return;
+    }
     sstv_hw_init();
     for (int y = 0; y < MARTIN1_HEIGHT; y++) {
         sstv_hw_tone(SSTV_SYNC_HZ, MARTIN1_SYNC_US);
@@ -936,6 +885,10 @@ static void sstv_scan_channel_pd90(void)
 
 static void sstv_send_pd90_image(void)
 {
+    if (SSTV_DIRECT_SCOTTIE) {          /* meme chemin que Scottie 1 : jetons du RP2040 */
+        sstv_send_direct();
+        return;
+    }
     sstv_hw_init();
     for (int p = 0; p < (PD90_HEIGHT + 1) / 2; p++) {
         sstv_hw_tone(SSTV_SYNC_HZ, PD90_SYNC_US);
@@ -967,6 +920,10 @@ static void sstv_scan_channel_pd120(void)
 
 static void sstv_send_pd120_image(void)
 {
+    if (SSTV_DIRECT_SCOTTIE) {          /* meme chemin que Scottie 1 : jetons du RP2040 */
+        sstv_send_direct();
+        return;
+    }
     sstv_hw_init();
     for (int p = 0; p < (PD120_HEIGHT + 1) / 2; p++) {
         sstv_hw_tone(SSTV_SYNC_HZ, PD120_SYNC_US);
@@ -979,8 +936,58 @@ static void sstv_send_pd120_image(void)
     sstv_hw_tone_finish();
 }
 
+/* ---- Essai "cadence RP2040" (2026-10-04), Scottie 1 uniquement ---- */
+
+/* Lit un octet du flux (bloquant). Retourne 0xFFFF si abandon (EXIT). */
+static uint16_t sstv_direct_read(void)
+{
+    uint32_t spin = 0;
+    while (SSTV_UartDmaWritePos() == s_stream_read_pos) {
+        if (s_tx_abort)
+            return 0xFFFFu;
+        if ((++spin & 0x3FFu) == 0u && sstv_tx_exit_pressed())
+            return 0xFFFFu;
+    }
+    uint8_t b = SSTV_UartDmaPeek(s_stream_read_pos);
+    s_stream_read_pos = (uint16_t)((s_stream_read_pos + 1) & 0xFFu);
+    return b;
+}
+
+static void sstv_direct_freq(uint32_t freq_hz)
+{
+    BK4819_WriteRegister(BK4819_REG_71, (uint16_t)((freq_hz * 103244u + 5000u) / 10000u));
+}
+
+static void sstv_send_direct(void)
+{
+    /* le RP2040 attend ce signal avant de cadencer l'image (pas de file) */
+    uint8_t rdy[4] = { (uint8_t)(SSTV_CMD_IMG_READY & 0xFFu), (uint8_t)(SSTV_CMD_IMG_READY >> 8), 0, 0 };
+    SendReply(UART_PORT_UART, rdy, sizeof rdy);
+    s_stream_read_pos = SSTV_UartDmaWritePos();
+
+    for (;;) {
+        uint16_t w = sstv_direct_read();
+        if (w == 0xFFFFu)
+            break;
+        if (w == 0xFFu) {
+            uint16_t c = sstv_direct_read();
+            if (c == 0xFFFFu)
+                break;
+            if (c == 0x01u)      sstv_direct_freq(SSTV_GAP_HZ);    /* gap 1500 Hz */
+            else if (c == 0x02u) sstv_direct_freq(SSTV_SYNC_HZ);   /* synchro 1200 Hz */
+            else if (c == 0x03u) break;                             /* fin d'image */
+        } else {
+            BK4819_WriteRegister(BK4819_REG_71, s_reg71_lut[(uint8_t)w]);
+        }
+    }
+}
+
 static void sstv_send_scottie1_image(void)
 {
+    if (SSTV_DIRECT_SCOTTIE) {
+        sstv_send_direct();
+        return;
+    }
     /* ⚠️ (2026-09-26) SUPPRIME A NOUVEAU -- decision finale.
      * Historique : supprime une premiere fois sur la foi de HTCommander
      * (encodeur+decodeur sans ce sync) ; retabli sur la foi de CEC/uvk5cec
@@ -1093,7 +1100,6 @@ static void sstv_send_common(uint8_t stream_mode, uint8_t vis_code, void (*send_
     s_tx_abort = false;   /* fresh transmission -- see sstv_tx_exit_pressed() */
     s_cnt_uart_wait = 0;
     s_cnt_queue_full = 0;
-    sstv_trim_load();     /* hors chronometrage : avant la cle, pas pendant la file */
 
     /* Tell the RP2040 to start streaming pixel bytes NOW -- see this file's
      * header comment and CMD_SSTV_START (decoder_config.h) for the full
@@ -1263,50 +1269,3 @@ void SSTV_SendPD120(void)
     sstv_send_common(SSTV_STREAM_MODE_PD120, PD120_VIS_CODE, sstv_send_pd120_image);
 }
 
-
-/* ---- Calibration horloge radio, SANS emission (2026-10-04) ----
- * La radio fait tourner TIM14 seul pendant que le RP2040 chronometre (quartz,
- * precis a ~20 ppm). Chaque debordement TIM14 = 10 000 us programmes : on
- * compte les debordements et on les compare au temps reel donne par le
- * RP2040. C'est exactement la base de temps des durees de pixels, donc le
- * trim corrige directement l'erreur qui fait penche les images. Aucune
- * ecriture BK4819 : pas d'emission. */
-#define SSTV_CLK_PERIOD_US  10000u
-#define SSTV_CMD_CLK_REPORT 0x06EDu     /* radio -> RP2040: {prog_us:u32} -- temps programme ecoule */
-#define SSTV_CMD_CLK_ACK    0x06EEu     /* radio -> RP2040: {} -- timer demarre (accuse de reception) */
-
-/* Le RP2040 mesure le temps reel entre DEUX accuses (un au demarrage, un
- * apres l'arret) : la latence de la boucle radio, identique dans les deux cas
- * a un petit bruit pres, s'annule. Pas de trim ici, c'est le RP2040 qui le
- * calcule et le renvoie (SSTV_CMD_TRIM). */
-void SSTV_ClockStart(void)
-{
-    sstv_hw_init();
-    LL_TIM_SetAutoReload(TIM14, SSTV_CLK_PERIOD_US - 1u);
-    LL_TIM_ClearFlag_UPDATE(TIM14);
-    s_clk_pops = 0;
-    s_clk_mode = true;
-    LL_TIM_EnableCounter(TIM14);
-    uint8_t ack[4] = { (uint8_t)(SSTV_CMD_CLK_ACK & 0xFFu), (uint8_t)(SSTV_CMD_CLK_ACK >> 8), 0, 0 };
-    SendReply(UART_PORT_UART, ack, sizeof ack);
-}
-
-void SSTV_ClockEnd(void)
-{
-    /* Idempotent : si le RP2040 renvoie END (trame perdue), on redonne le meme
-     * resultat sans toucher au timer. */
-    if (s_clk_mode) {
-        LL_TIM_DisableCounter(TIM14);
-        s_clk_mode = false;
-        /* Temps programme = debordements * 10 ms + fraction en cours (CNT, en us). */
-        s_clk_last_prog = s_clk_pops * SSTV_CLK_PERIOD_US + (uint32_t)LL_TIM_GetCounter(TIM14);
-    }
-    uint32_t prog = s_clk_last_prog;
-    uint8_t buf[8] = {
-        (uint8_t)(SSTV_CMD_CLK_REPORT & 0xFFu), (uint8_t)(SSTV_CMD_CLK_REPORT >> 8),
-        4, 0,
-        (uint8_t)(prog & 0xFFu), (uint8_t)((prog >> 8) & 0xFFu),
-        (uint8_t)((prog >> 16) & 0xFFu), (uint8_t)((prog >> 24) & 0xFFu),
-    };
-    SendReply(UART_PORT_UART, buf, sizeof buf);
-}

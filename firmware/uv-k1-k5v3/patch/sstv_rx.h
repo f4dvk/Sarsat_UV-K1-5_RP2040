@@ -18,19 +18,19 @@ bool SSTV_RxActive(void);
  * already in this file's history (aprs.h, sarsat.h...). */
 #define SSTV_CMD_RX_CLEAR      0x06E4u    /* RP2040 -> radio: {} (no payload) */
 #define SSTV_CMD_RX_ROW        0x06E5u    /* RP2040 -> radio: {row:u8, bits[16]} */
-#define SSTV_CMD_CLK_START     0x06EBu    /* RP2040 -> radio: {duration_us:u32} -- debut mesure horloge (sstv_tx.c) */
-#define SSTV_CMD_CLK_END       0x06ECu    /* RP2040 -> radio: {} -- fin mesure horloge (sstv_tx.c) */
-#define SSTV_CMD_TRIM          0x06E9u    /* RP2040 -> radio: {trim_ppm:i16} -- correction horloge (sstv_tx.c) */
 #define SSTV_RX_SCREEN_WIDTH   128u
 #define SSTV_RX_SCREEN_HEIGHT  56u        /* = gFrameBuffer's FRAME_LINES (7) * 8 px */
 #define SSTV_RX_ROW_BYTES      (SSTV_RX_SCREEN_WIDTH / 8u)
 
 void SSTV_HandleUART(uint16_t id, const uint8_t *data, uint16_t size);
 void APP_RunSstvRx(void);
-void APP_RunSstvCal(void);
 
-/* RP2040 -> radio (2026-10-04) : resultat de la mesure d'horloge, {trim_ppm:i16}
- * -- proposition affichee par l'ecran SSTVCal. */
-#define SSTV_CMD_CLK_RESULT    0x06EFu
+/* RP2040 -> radio (2026-10-04) : informations de reception pour la page "5"
+ * de l'ecran SSTVRx. Payload (10 octets) : mode:u8 (1 = Scottie 1),
+ * flags:u8 (bit0 mesure valide, bit1 final), lignes:u16, synchros:u16,
+ * ecart_ppm:i32 -- voir rp2040/src/decoder_config.h. */
+#define SSTV_CMD_RX_INFO       0x06F1u
+/* radio -> RP2040 (2026-10-04) : sortie de la page 5, demande le renvoi de l'image */
+#define SSTV_CMD_RX_REDRAW     0x06F2u
 
 #endif
