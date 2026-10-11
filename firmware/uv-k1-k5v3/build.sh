@@ -48,6 +48,13 @@ cp "$HERE/patch/sstv_tx.h"         App/app/sstv_tx.h
 cp "$HERE/patch/sstv_rx.c"         App/app/sstv_rx.c
 cp "$HERE/patch/sstv_rx.h"         App/app/sstv_rx.h
 cp "$HERE/patch/ui_main.c" App/ui/main.c
+# F+7 : ecran de lancement (A/B/C/D) -- remplace les combos fixes F+8/F+5
+# et le mecanisme F1/F2 assignable, meme choix que le port V1
+# (patch/rp_menu.c/.h). SSTV y est inclus (D SSTV-RP) : ses six actions
+# (4 modes TX, RX, choix image) sont repliees dans l'ecran lui-meme
+# (sstv_rx.c, porte de f4hwn-v6), plus besoin du mecanisme F1/F2.
+cp "$HERE/patch/rp_menu.c" App/app/rp_menu.c
+cp "$HERE/patch/rp_menu.h" App/app/rp_menu.h
 
 echo "== points d'ancrage"
 # Chaque insertion est faite une seule fois (perl en mode "slurp", pas de /g)
@@ -438,33 +445,14 @@ perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_APRS\n        case APRS_CMD
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SONDE\n        case SONDE_CMD_CLEAR:\n        case SONDE_CMD_TEXT:\n            SONDE_HandleUART(pUART_Command->Header.ID,\n                             pUART_Command->Buffer + sizeof(Header_t),\n                             pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 perl -0pi -e 's/\n    \} \/\/ switch/\n#ifdef ENABLE_SSTV\n        case SSTV_CMD_RX_CLEAR:\n        case SSTV_CMD_RX_ROW:\n            SSTV_HandleUART(pUART_Command->Header.ID,\n                            pUART_Command->Buffer + sizeof(Header_t),\n                            pUART_Command->Header.Size);\n            break;\n#endif$&/' App/app/uart.c
 
-# App/settings.h : nouvelles entrées ACTION_OPT_SARSAT / ACTION_OPT_APRS /
-# ACTION_OPT_SONDE (juste avant le sentinel LEN)
-perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SARSAT\n    ACTION_OPT_SARSAT,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
-perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_APRS\n    ACTION_OPT_APRS,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
-perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SONDE\n    ACTION_OPT_SONDE,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
-perl -0pi -e 's/    ACTION_OPT_LEN\n\};/#ifdef ENABLE_SSTV\n    ACTION_OPT_SSTV1,\n    ACTION_OPT_SSTVM1,\n    ACTION_OPT_SSTVPD90,\n    ACTION_OPT_SSTVPD120,\n    ACTION_OPT_SSTV_RX,\n    ACTION_OPT_SSTV_IMG,\n#endif\n    ACTION_OPT_LEN\n};/' App/settings.h
-
-# App/app/action.c : ouvrir l'écran SARSAT / APRS / Sonde depuis une touche
-# assignable (F1/F2 court/long via le menu F4HWN standard "F1Shrt"/"F1Long"/
-# "F2Shrt"/"F2Long" -> "SARSAT"/"APRS"/"SONDE"), en plus de l'auto-ouverture
-# sur trame reçue. Pas de raccourci F+N dedie pour Sonde (contrairement a
-# SARSAT/F+8 et APRS/F+5) : cette seule voie suffit et evite de sacrifier
-# une autre combinaison de touche.
-perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SARSAT\n#include "app/sarsat.h"\n#endif\n}' App/app/action.c
-perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_APRS\n#include "app/aprs.h"\n#endif\n}' App/app/action.c
-perl -0pi -e 's{#include "app/app.h"\n}{$&#ifdef ENABLE_SONDE\n#include "app/sonde.h"\n#endif\n#ifdef ENABLE_SSTV\n#include "app/sstv_tx.h"\n#include "app/sstv_rx.h"\n#endif\n}' App/app/action.c
-perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SARSAT\n    [ACTION_OPT_SARSAT] = &APP_RunSarsat,\n#endif\n$&/' App/app/action.c
-perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_APRS\n    [ACTION_OPT_APRS] = &APP_RunAprs,\n#endif\n$&/' App/app/action.c
-perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SONDE\n    [ACTION_OPT_SONDE] = &APP_RunSonde,\n#endif\n$&/' App/app/action.c
-perl -0pi -e 's/\};\n\nstatic_assert\(ARRAY_SIZE\(action_opt_table\) == ACTION_OPT_LEN\);/#ifdef ENABLE_SSTV\n    [ACTION_OPT_SSTV1] = &SSTV_SendScottie1,\n    [ACTION_OPT_SSTVM1] = &SSTV_SendMartin1,\n    [ACTION_OPT_SSTVPD90] = &SSTV_SendPD90,\n    [ACTION_OPT_SSTVPD120] = &SSTV_SendPD120,\n    [ACTION_OPT_SSTV_RX] = &APP_RunSstvRx,\n    [ACTION_OPT_SSTV_IMG] = &SSTV_ToggleImage,\n#endif\n$&/' App/app/action.c
-
-# App/ui/menu.c : entrées "SARSAT" / "APRS" / "SONDE" dans la liste des
-# fonctions assignables
-perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SARSAT\n    {"SARSAT",          ACTION_OPT_SARSAT},\n#endif\n$&/' App/ui/menu.c
-perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_APRS\n    {"APRS",            ACTION_OPT_APRS},\n#endif\n$&/' App/ui/menu.c
-perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SONDE\n    {"SONDE",           ACTION_OPT_SONDE},\n#endif\n$&/' App/ui/menu.c
-perl -0pi -e 's/\};\n\nconst uint8_t gSubMenu_SIDEFUNCTIONS_size/#ifdef ENABLE_SSTV\n    {"SSTV1",           ACTION_OPT_SSTV1},\n    {"SSTVM1",          ACTION_OPT_SSTVM1},\n    {"SSTVPD90",         ACTION_OPT_SSTVPD90},\n    {"SSTVPD120",        ACTION_OPT_SSTVPD120},\n    {"SSTVRx",          ACTION_OPT_SSTV_RX},\n    {"SSTVImg",         ACTION_OPT_SSTV_IMG},\n#endif\n$&/' App/ui/menu.c
+# App/settings.h, App/app/action.c, App/ui/menu.c : plus aucun patch ici
+# (2026-10-11, demande explicite : supprimer tout autre moyen d'acceder a
+# SARSAT/APRS/SONDE/SSTV que l'ecran de lancement F+7). SSTV est desormais
+# aussi un simple "ouvre cet ecran" depuis rp_menu.c -- ses six actions (4
+# modes TX, RX, choix image) sont repliees dans APP_RunSstvRx() lui-meme
+# (touches 1/2/4/MENU internes a sstv_rx.c, porte de f4hwn-v6), donc plus
+# besoin de les exposer une a une au mecanisme F1/F2 assignable. Les trois
+# fichiers restent entierement stock, meme situation que le port V1.
 
 # App/driver/eeprom_compat.c : reserver de la place dans la queue non revendiquee
 # du secteur "Settings" (0x00A170.. , juste apres "Settings Version" qui
@@ -616,25 +604,23 @@ perl -0pi -e 's/#define MR_CHANNELS_MAX 1024/#define MR_CHANNELS_MAX 170 \/* Sar
 perl -0pi -e 's/#include "ui\/status.h"\n/$&#ifdef ENABLE_APRS\n#include "app\/aprs.h"\n#endif\n/' App/ui/status.c
 perl -0pi -e 's/(    x \+= sizeof\(gFontPttClassic\) \+ 3;\n#endif\n)/$1\n#ifdef ENABLE_APRS\n    \{\n        extern uint32_t millis10(void);\n        static const uint8_t BITMAP_GPS[5] = \{ 0x04, 0x0A, 0x15, 0x0A, 0x04 \};\n        const uint8_t gps = APRS_GpsState();\n        if (gps == 2 || (gps == 1 \&\& (millis10() % 80) < 40)) \{\n            memcpy(line + x, BITMAP_GPS, sizeof(BITMAP_GPS));\n            x1 = x + sizeof(BITMAP_GPS) + 1;\n        \}\n        if (gps) x += sizeof(BITMAP_GPS) + 3;\n    \}\n#endif\n/' App/ui/status.c
 
-# App/app/main.c : F+5 ouvre directement l'ecran APRS (comme le V1), sur un
-# appui court -- F+5 est mort dans ce build (case KEY_5 ne fait rien tant que
-# ENABLE_NOAA et ENABLE_SPECTRUM sont tous deux desactives, ce qui est notre
-# cas ici : ENABLE_SPECTRUM est coupe pour faire de la place a APRS, voir
-# plus haut). Priorite NOAA/SPECTRUM > APRS conservee pour ne rien casser
-# sur un autre preset qui activerait l'un des deux.
-perl -0pi -e 's/#include "app\/generic.h"\n/$&#ifdef ENABLE_APRS\n#include "app\/aprs.h"\n#endif\n/' App/app/main.c
-perl -0pi -e 's/(#elif defined\(ENABLE_SPECTRUM\)\n                APP_RunSpectrum\(\);\n                gRequestDisplayScreen = DISPLAY_MAIN;\n)#endif/$1#elif defined(ENABLE_APRS)\n                APP_RunAprs();\n#endif/' App/app/main.c
-# F+8 ouvre directement l'ecran SARSAT, comme sur le V1 (App/app/main.c du
-# V1 : "case KEY_8: #ifdef ENABLE_SARSAT APP_RunSarsat(); #else ... #endif").
-# Contrairement a F+5, F+8 n'etait pas une combinaison morte ici -- appui
-# court = ACTION_BackLightOnDemand(), appui long = bascule FrequencyReverse
-# -- sacrifiees toutes les deux, sur demande explicite, pour la parite de
-# touche avec le V1 (qui ne sacrifiait que l'inversion de frequence, seule
-# chose que F+8 y faisait).
-perl -0pi -e 's/#include "app\/generic.h"\n/$&#ifdef ENABLE_SARSAT\n#include "app\/sarsat.h"\n#endif\n/' App/app/main.c
-perl -0pi -e 's/        case KEY_8:\n            if \(!beep\) \{\n                ACTION_BackLightOnDemand\(\); \n            \}\n            else \{\n                gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;\n                gRequestSaveChannel = 1;\n            \}\n/        case KEY_8:\n#ifdef ENABLE_SARSAT\n            APP_RunSarsat();                 \/\/ F+8 : open the SARSAT screen (same as V1)\n            gRequestDisplayScreen = DISPLAY_MAIN;\n#else\n            if (!beep) {\n                ACTION_BackLightOnDemand(); \n            }\n            else {\n                gTxVfo->FrequencyReverse = gTxVfo->FrequencyReverse == false;\n                gRequestSaveChannel = 1;\n            }\n#endif\n/' App/app/main.c
+# App/app/main.c : F+7 (appui court) ouvre l'ecran de lancement rp_menu.c
+# (A APRS-RP / B SARSAT-RP / C SSTV-RP / D SONDE-RP), meme choix que le
+# port V1 -- remplace les anciens combos fixes F+8 -> SARSAT / F+5 -> APRS
+# (qui sacrifiaient ACTION_BackLightOnDemand()/FrequencyReverse sur F+8,
+# F+5 etant deja mort dans ce preset). F+8/F+5 retrouvent leur comportement
+# d'origine. F+7 maintenu 2 s bascule le VOX (ACTION_Vox(), comme f4hwn-v6
+# et comme le faisait F+7 avant ce patch) -- seul l'appui court change de
+# sens, sur demande explicite (2026-10-11), pour la parite avec le V1.
+perl -0pi -e 's/#include "app\/generic.h"\n/$&#if defined(ENABLE_SARSAT) || defined(ENABLE_APRS) || defined(ENABLE_SONDE) || defined(ENABLE_SSTV)\n#include "app\/rp_menu.h"\n#endif\n/' App/app/main.c
+perl -0pi -e 's~        case KEY_7:\n#ifdef ENABLE_FEAT_F4HWN_GAME\n            if \(!beep\) \{\n                APP_RunBreakout\(\);\n            \} else \{\n#endif\n#ifdef ENABLE_VOX\n                ACTION_Vox\(\);\n//#else\n//              toggle_chan_scanlist\(\);\n#endif\n#ifdef ENABLE_FEAT_F4HWN_GAME\n            \}\n#endif\n\n            break;\n~        case KEY_7:\n#if defined(ENABLE_SARSAT) || defined(ENABLE_APRS) || defined(ENABLE_SONDE) || defined(ENABLE_SSTV)\n            if (!beep) {                     // appui court : ecran de lancement\n                APP_RunRpMenu();              // F+7 : APRS-RP/SARSAT-RP/SSTV-RP/SONDE-RP picker\n                gRequestDisplayScreen = DISPLAY_MAIN;\n            }\n#ifdef ENABLE_VOX\n            else {\n                ACTION_Vox();                  // F+7 maintenu (2 s) : VOX, comme f4hwn-v6\n            }\n#endif\n#else\n#ifdef ENABLE_FEAT_F4HWN_GAME\n            if (!beep) {\n                APP_RunBreakout();\n            } else {\n#endif\n#ifdef ENABLE_VOX\n                ACTION_Vox();\n//#else\n//              toggle_chan_scanlist();\n#endif\n#ifdef ENABLE_FEAT_F4HWN_GAME\n            }\n#endif\n#endif\n\n            break;\n~' App/app/main.c
 
-# App/CMakeLists.txt : option + sources
+# App/CMakeLists.txt : option + sources. app/rp_menu.c compile toujours
+# (base target_sources, pas enable_feature) : il n'y a pas de drapeau
+# ENABLE_RP_MENU dedie, et SARSAT/APRS/SONDE sont toujours tous les trois
+# actives ensemble dans ce script -- son propre #if interne (voir
+# patch/rp_menu.c) le reduit a un fichier vide si ce n'etait pas le cas.
+perl -0pi -e 's/    app\/main\.c\n/$&    app\/rp_menu.c\n/' App/CMakeLists.txt
 perl -0pi -e 's/enable_feature\(ENABLE_UART_RW_BK_REGS\)\n/$&enable_feature(ENABLE_SARSAT\n    app\/sarsat.c\n    app\/afgain.c\n)\nenable_feature(ENABLE_APRS\n    app\/aprs.c\n    app\/ax25.c\n)\nenable_feature(ENABLE_SONDE\n    app\/sonde.c\n)\nenable_feature(ENABLE_SSTV\n    app\/sstv_tx.c\n    app\/sstv_rx.c\n)\n/' App/CMakeLists.txt
 
 # CMakePresets.json : defaut (off) dans chaque bloc de presets où ENABLE_UART_RW_BK_REGS
@@ -657,14 +643,6 @@ grep -q 'app/aprs.h'        App/app/uart.c  || { echo "!! uart.c : include aprs"
 grep -q 'APRS_HandleUART'   App/app/uart.c  || { echo "!! uart.c : dispatch aprs"; exit 1; }
 grep -q 'APRS_CMD_DIGI'     App/app/uart.c  || { echo "!! uart.c : dispatch digipeat"; exit 1; }
 grep -qE '^void SendReply\(' App/app/uart.c || { echo "!! uart.c : SendReply toujours static"; exit 1; }
-grep -q 'ACTION_OPT_SARSAT' App/settings.h  || { echo "!! settings.h : enum sarsat"; exit 1; }
-grep -q 'ACTION_OPT_APRS'   App/settings.h  || { echo "!! settings.h : enum aprs"; exit 1; }
-grep -q 'app/sarsat.h'      App/app/action.c || { echo "!! action.c : include sarsat"; exit 1; }
-grep -q 'ACTION_OPT_SARSAT.*APP_RunSarsat' App/app/action.c || { echo "!! action.c : table sarsat"; exit 1; }
-grep -q 'app/aprs.h'        App/app/action.c || { echo "!! action.c : include aprs"; exit 1; }
-grep -q 'ACTION_OPT_APRS.*APP_RunAprs' App/app/action.c || { echo "!! action.c : table aprs"; exit 1; }
-grep -q 'ACTION_OPT_SARSAT' App/ui/menu.c   || { echo "!! menu.c : SIDEFUNCTIONS sarsat"; exit 1; }
-grep -q 'ACTION_OPT_APRS'   App/ui/menu.c   || { echo "!! menu.c : SIDEFUNCTIONS aprs"; exit 1; }
 grep -q 'ENABLE_SARSAT'     App/CMakeLists.txt || { echo "!! CMakeLists.txt : ENABLE_SARSAT"; exit 1; }
 grep -q 'ENABLE_APRS'       App/CMakeLists.txt || { echo "!! CMakeLists.txt : ENABLE_APRS"; exit 1; }
 grep -q 'ENABLE_SARSAT'     CMakePresets.json  || { echo "!! CMakePresets.json : ENABLE_SARSAT"; exit 1; }
@@ -685,18 +663,19 @@ grep -q 'APRS_TX_CHANNEL' App/ui/main.c || { echo "!! main.c : label APRS en mod
 grep -q 'app/aprs.h'    App/ui/status.c || { echo "!! status.c : include aprs"; exit 1; }
 grep -q 'APRS_GpsState' App/ui/status.c || { echo "!! status.c : icone GPS"; exit 1; }
 grep -q 'MainHeaderIcom' App/ui/main.c  || { echo "!! main.c : ecran icom"; exit 1; }
-grep -q 'app/aprs.h'  App/app/main.c    || { echo "!! app/main.c : include aprs"; exit 1; }
-grep -q 'APP_RunAprs' App/app/main.c    || { echo "!! app/main.c : F+5 -> APRS"; exit 1; }
-grep -q 'app/sarsat.h' App/app/main.c   || { echo "!! app/main.c : include sarsat"; exit 1; }
-grep -q 'APP_RunSarsat' App/app/main.c  || { echo "!! app/main.c : F+8 -> SARSAT"; exit 1; }
+grep -q 'app/rp_menu.h' App/app/main.c   || { echo "!! app/main.c : include rp_menu"; exit 1; }
+grep -q 'APP_RunRpMenu' App/app/main.c  || { echo "!! app/main.c : F+7 -> rp_menu"; exit 1; }
+grep -q 'app/rp_menu.c' App/CMakeLists.txt || { echo "!! CMakeLists.txt : rp_menu.c"; exit 1; }
+grep -q 'APRS-RP'   App/app/rp_menu.c   || { echo "!! rp_menu.c : entree APRS-RP"; exit 1; }
+grep -q 'SARSAT-RP' App/app/rp_menu.c   || { echo "!! rp_menu.c : entree SARSAT-RP"; exit 1; }
+grep -q 'SSTV-RP'   App/app/rp_menu.c   || { echo "!! rp_menu.c : entree SSTV-RP"; exit 1; }
+grep -q 'SONDE-RP'  App/app/rp_menu.c   || { echo "!! rp_menu.c : entree SONDE-RP"; exit 1; }
+grep -q 'SSTV_ImageName' App/app/sstv_tx.h || { echo "!! sstv_tx.h : declaration SSTV_ImageName"; exit 1; }
+grep -q 'const char \*SSTV_ImageName' App/app/sstv_tx.c || { echo "!! sstv_tx.c : definition SSTV_ImageName"; exit 1; }
 grep -q 'app/sonde.h'   App/app/app.c   || { echo "!! app.c : include sonde"; exit 1; }
 grep -q 'APP_RunSonde'  App/app/app.c   || { echo "!! app.c : hook tick 10ms sonde"; exit 1; }
 grep -q 'app/sonde.h'   App/app/uart.c  || { echo "!! uart.c : include sonde"; exit 1; }
 grep -q 'SONDE_HandleUART' App/app/uart.c || { echo "!! uart.c : dispatch sonde"; exit 1; }
-grep -q 'ACTION_OPT_SONDE' App/settings.h || { echo "!! settings.h : enum sonde"; exit 1; }
-grep -q 'app/sonde.h'   App/app/action.c || { echo "!! action.c : include sonde"; exit 1; }
-grep -q 'ACTION_OPT_SONDE.*APP_RunSonde' App/app/action.c || { echo "!! action.c : table sonde"; exit 1; }
-grep -q 'ACTION_OPT_SONDE' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sonde"; exit 1; }
 grep -q 'ENABLE_SONDE'  App/CMakeLists.txt || { echo "!! CMakeLists.txt : ENABLE_SONDE"; exit 1; }
 grep -q 'ENABLE_SONDE'  CMakePresets.json  || { echo "!! CMakePresets.json : ENABLE_SONDE"; exit 1; }
 grep -q 'ENABLE_SSTV'   App/CMakeLists.txt || { echo "!! CMakeLists.txt : ENABLE_SSTV"; exit 1; }
@@ -704,26 +683,6 @@ grep -q 'ENABLE_SSTV'   CMakePresets.json  || { echo "!! CMakePresets.json : ENA
 grep -q 'BaudRate = 230400' App/driver/uart.c || { echo "!! uart.c : debit 230400"; exit 1; }
 grep -q 'SSTV_UartDmaWritePos' App/driver/uart.c || { echo "!! uart.c : accesseur DMA write pos"; exit 1; }
 grep -q 'SSTV_UartDmaPeek' App/driver/uart.c || { echo "!! uart.c : accesseur DMA peek"; exit 1; }
-grep -q 'ACTION_OPT_SSTV1' App/settings.h  || { echo "!! settings.h : enum sstv"; exit 1; }
-grep -q 'app/sstv_tx.h' App/app/action.c   || { echo "!! action.c : include sstv"; exit 1; }
-grep -q 'ACTION_OPT_SSTV1.*SSTV_SendScottie1' App/app/action.c || { echo "!! action.c : table sstv"; exit 1; }
-grep -q 'SSTV1.*ACTION_OPT_SSTV1' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv"; exit 1; }
-grep -q 'ACTION_OPT_SSTVM1' App/settings.h  || { echo "!! settings.h : enum sstv martin1"; exit 1; }
-grep -q 'ACTION_OPT_SSTVM1.*SSTV_SendMartin1' App/app/action.c || { echo "!! action.c : table sstv martin1"; exit 1; }
-grep -q 'SSTVM1.*ACTION_OPT_SSTVM1' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv martin1"; exit 1; }
-grep -q 'ACTION_OPT_SSTVPD90' App/settings.h  || { echo "!! settings.h : enum sstv pd90"; exit 1; }
-grep -q 'ACTION_OPT_SSTVPD90.*SSTV_SendPD90' App/app/action.c || { echo "!! action.c : table sstv pd90"; exit 1; }
-grep -q 'SSTVPD90.*ACTION_OPT_SSTVPD90' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv pd90"; exit 1; }
-grep -q 'ACTION_OPT_SSTVPD120' App/settings.h  || { echo "!! settings.h : enum sstv pd120"; exit 1; }
-grep -q 'ACTION_OPT_SSTVPD120.*SSTV_SendPD120' App/app/action.c || { echo "!! action.c : table sstv pd120"; exit 1; }
-grep -q 'SSTVPD120.*ACTION_OPT_SSTVPD120' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv pd120"; exit 1; }
-grep -q 'ACTION_OPT_SSTV_RX' App/settings.h  || { echo "!! settings.h : enum sstv rx"; exit 1; }
-grep -q 'app/sstv_rx.h' App/app/action.c     || { echo "!! action.c : include sstv rx"; exit 1; }
-grep -q 'ACTION_OPT_SSTV_RX.*APP_RunSstvRx' App/app/action.c || { echo "!! action.c : table sstv rx"; exit 1; }
-grep -q 'SSTVRx.*ACTION_OPT_SSTV_RX' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv rx"; exit 1; }
-grep -q 'ACTION_OPT_SSTV_IMG' App/settings.h  || { echo "!! settings.h : enum sstv img"; exit 1; }
-grep -q 'ACTION_OPT_SSTV_IMG.*SSTV_ToggleImage' App/app/action.c || { echo "!! action.c : table sstv img"; exit 1; }
-grep -q 'SSTVImg.*ACTION_OPT_SSTV_IMG' App/ui/menu.c || { echo "!! menu.c : SIDEFUNCTIONS sstv img"; exit 1; }
 grep -q 'app/sstv_rx.h'    App/app/uart.c || { echo "!! uart.c : include sstv rx"; exit 1; }
 grep -q 'SSTV_HandleUART'  App/app/uart.c || { echo "!! uart.c : dispatch sstv rx"; exit 1; }
 grep -q 'SSTV_CMD_RX_ROW'  App/app/uart.c || { echo "!! uart.c : dispatch sstv rx row"; exit 1; }

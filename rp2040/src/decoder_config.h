@@ -19,7 +19,7 @@
  * Verified by static analysis of KD8CEC's stock C-Board image
  * (cboard_v032.uf2, "C-BOARD FOR UV-K5/CEC4 V0.32"):
  *   - UART0 on GP0/GP1 (GPIO func 2)                  = radio link
- *     (stock firmware: 57600 8N1; we use 38400, see below)
+ *     (stock firmware: 57600 8N1; we use 230400, see below)
  *   - UART1 on GP4/GP5, baud 9600                     = GPS (NMEA), unused here
  *   - GP26 / ADC0, DMA-fed                            = audio in
  *   - GP2 / GP15 / GP22 / GP25 / GP27                 = misc I/O (buttons / LED
