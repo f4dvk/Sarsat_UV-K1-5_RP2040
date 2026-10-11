@@ -81,12 +81,21 @@ typedef struct {
                             *            radio disables its own tracker/popup
                             *            and just relays frames. Pushed via
                             *            APRS_PushConfig() flags byte.         */
-    char     comment[15];
+    char     comment[17];   /* <= 16 chars, grown from 14 (2026-10-11) -- the
+                            * most this screen's 18-glyph display budget can
+                            * take (draw_config's "[x]" cursor cell costs 2
+                            * extra glyphs: 16 + 2 = 18). Borrows 2 bytes from
+                            * _rsv below, shifting msg_to -- an EEPROM written
+                            * by an older build will show ~2 garbage trailing
+                            * characters here once (harmless, delete them with
+                            * *) and may clear msg_to once (the existing
+                            * charset validation below already guards against
+                            * this exact situation, see msg_to's own comment). */
     char     msg_to[10];   /* fixed recipient of the "121 MHz beacon report"
                             * message (APRS screen -> "Send report"): an APRS
                             * addressee, <= 9 chars, e.g. "F4DVK-7". Empty =
                             * feature unavailable (like the NOCALL beacon guard) */
-    uint8_t  _rsv[6];      /* pad to 56 B (7 x 8-byte EEPROM pages) so
+    uint8_t  _rsv[4];      /* pad to 56 B (7 x 8-byte EEPROM pages) so
                             * APRS_Save()'s 8-byte write loop stays exact      */
 } aprs_cfg_t;
 

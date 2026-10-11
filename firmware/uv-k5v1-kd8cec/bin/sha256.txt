@@ -1,2 +1,2 @@
-60214c898223db340dd95afa52a858e74f11a7c797f15df129163b3ec9aa8cd6  uvk5-cec-0.3q-sarsat.bin
-4424e9aa3102f71f8616cb57fe1ef8057fac7728b21985a6e782f589c636edd6  uvk5-cec-0.3q-sarsat.packed.bin
+8acb38282bde6e493c83ac1a5b33f4cccd62a7280c6ddd3fd8947dc5e1525655  uvk5-cec-0.3q-sarsat.bin
+bebcfa19db545651387b42a1677b106b6889daadadf2cf42fd1483ee1b896c74  uvk5-cec-0.3q-sarsat.packed.bin

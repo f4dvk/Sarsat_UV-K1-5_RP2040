@@ -1221,18 +1221,35 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 enum { F_CALL, F_SSID, F_PATH, F_SYM, F_TEXT, F_INT, F_POPUP, F_AFGAIN, F_SQL,
        F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_SENDB, F_KISS, F_N };
 
-/* char cycling for the keypad-poor text fields: space, A-Z, 0-9, then a few
- * punctuation marks for the comment. */
-static const char CALLSET[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-static const char TEXTSET[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./+";
-static const char ADDRSET[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
-static char cyc_char(char c, int dir, const char *set)
+/* T9-style multi-tap entry (2026-10-11; replaces the original UP/DOWN
+ * "cycle through every character" editing -- it left no way to go back and
+ * fix an earlier mistake, since * only ever moved the cursor forward.
+ * UP/DOWN now move the cursor left/right instead, and * deletes the
+ * character under it (shifts the rest of the field left) -- so a wrong
+ * character is fixed by moving back onto it, then either retyping (T9) or
+ * deleting it outright). # (KEY_F -- the physical "#" key, see
+ * driver/keyboard.h) cycles the input mode: UPPER -> lower -> digits ->
+ * UPPER for the free-text comment (F_TEXT); Call/MsgTo skip "lower" (APRS
+ * addresses must stay uppercase) and only toggle UPPER <-> digits. Pressing
+ * the same digit key again within T9_HOLD_TICKS cycles the cell to the next
+ * letter in that key's group; a different key, or the same key after the
+ * window expires, finalizes the cell and advances the cursor -- same
+ * "cycle vs commit" timing as a phone keypad. */
+#define T9_HOLD_TICKS 45   /* ~900 ms at this loop's ~20 ms tick (SYSTEM_DelayMs) */
+enum { T9_UPPER = 0, T9_LOWER, T9_DIGIT };
+static const char *t9_group(KEY_Code_t key, bool txt, bool addr)
 {
-    const char *p = strchr(set, (c == 0) ? ' ' : c);
-    int n = (int)strlen(set);
-    int i = p ? (int)(p - set) : 0;
-    return set[(i + dir + n) % n];
+    static const char *const G[10] = {
+        " 0", "1", "ABC2", "DEF3", "GHI4", "JKL5", "MNO6", "PQRS7", "TUV8", "WXYZ9"
+    };
+    if (key == KEY_1) {
+        if (txt)  return "-_./+1";     /* comment: the extra TEXTSET punctuation */
+        if (addr) return "-1";         /* message "To": ADDRSET's only punctuation */
+        return "1";                    /* callsign: no punctuation at all */
+    }
+    return G[key - KEY_0];
 }
+
 static const char *const PATHS[] = { "none", "WIDE1-1", "WIDE2-1", "WIDE1+2" };
 /* a few common symbols: code, label */
 static const struct { char t, c; const char *n; } SYMS[] = {
@@ -1259,7 +1276,9 @@ static void field_str(int f, char *out)
     case F_PATH: sprintf(out, "Path  %s", PATHS[gAprsCfg.path < APRS_PATH_N ?
                                                 gAprsCfg.path : 0]); break;
     case F_SYM:  sprintf(out, "Icon  %s", SYMS[sym_index()].n); break;
-    case F_TEXT: sprintf(out, "Txt %.14s",
+    case F_TEXT: sprintf(out, "Txt %.14s",   /* preview only, truncated to this
+                         * line's own 18-glyph budget ("Txt " = 4); the edit
+                         * view (draw_config) shows and edits the full 16 */
                          gAprsCfg.comment[0] ? gAprsCfg.comment : "(empty)"); break;
     case F_INT:
         if      (gAprsCfg.interval_s == 0)            strcpy(out, "Interval OFF");
@@ -1486,15 +1505,17 @@ void APRS_HiliteBar(int row, unsigned textx, const char *s)
 /* full-width title bar, 1 px light gap below (mask 0x7F) */
 void APRS_InvertBar(int row) { invert_span(row, 0, 128, 0x7Fu); }
 
-static void draw_config(int sel, int editing, int callcur, int first)
+static void draw_config(int sel, int editing, int callcur, int first, int t9_mode)
 {
     char s[24];
     UI_DisplayClear();
 
     if (editing && (sel == F_CALL || sel == F_MSGTO))
-        sprintf(s, "char %d   A:ok", callcur + 1);
+        sprintf(s, "chr%d #%s *:del", callcur + 1,
+                t9_mode == T9_DIGIT ? "123" : "ABC");
     else if (editing && sel == F_TEXT)
-        sprintf(s, "TEXT pos %d UP/DN", callcur + 1);
+        sprintf(s, "TXT%d #%s *:del", callcur + 1,
+                t9_mode == T9_DIGIT ? "123" : t9_mode == T9_LOWER ? "abc" : "ABC");
     else if (editing && (sel == F_LAT || sel == F_LON))
         strcpy(s, "0-9  *:sign  A:ok");
     else if (editing)
@@ -1517,9 +1538,11 @@ static void draw_config(int sel, int editing, int callcur, int first)
             char v[16];
             kbuf_render(v, f == F_LAT ? 2 : 3);
             sprintf(s, "%s %s", f == F_LAT ? "Lat " : "Lon ", v);
-        } else if (editing && f == sel && (f == F_TEXT || f == F_MSGTO)) {
-            const char *b = (f == F_TEXT) ? gAprsCfg.comment : gAprsCfg.msg_to;
-            const int   m = (f == F_TEXT) ? 14 : 9;   /* +[ ] brackets <= 18 */
+        } else if (editing && f == sel && (f == F_TEXT || f == F_MSGTO || f == F_CALL)) {
+            const char *b = (f == F_TEXT) ? gAprsCfg.comment
+                                          : (f == F_MSGTO) ? gAprsCfg.msg_to
+                                                            : gAprsCfg.call;
+            const int   m = (f == F_TEXT) ? 16 : (f == F_MSGTO) ? 9 : 6;   /* +[ ] brackets <= 18 */
             int w = 0;
             for (int i = 0; i < m; i++) {
                 char ch = b[i] ? b[i] : ' ';
@@ -1857,6 +1880,9 @@ void APP_RunAprs(void)
     bool armed = false, run = true, closed_by_key = false;
     KEY_Code_t prev = KEY_INVALID;
     bool dirty = true;
+    int        t9_mode = T9_UPPER, t9_idx = 0;    /* T9 multi-tap state, see t9_group() */
+    KEY_Code_t t9_key  = KEY_INVALID;
+    uint16_t   t9_hold = 0;
     uint16_t last_pkts = s_rx_pkts;
     uint8_t  last_msg   = s_msg.state;
     uint8_t  last_tries = s_msg.tries;   /* redraw the "Send report" row on each (re)send */
@@ -1968,8 +1994,10 @@ void APP_RunAprs(void)
             if      (s_wiz)     draw_wizard();
             else if (view == 2) draw_adrasec();
             else if (view == 1) draw_rx(!popup);   /* popup: hide the "APRS RX" line */
-            else               draw_config(sel, editing, callcur, first);
+            else               draw_config(sel, editing, callcur, first, t9_mode);
         }
+
+        if (t9_hold) t9_hold--;   /* multi-tap commit window, decays every tick */
 
         KEY_Code_t k = KEYBOARD_Poll();
         if (k == KEY_INVALID) { armed = true; prev = k; SYSTEM_DelayMs(20); continue; }
@@ -2040,6 +2068,7 @@ void APP_RunAprs(void)
                     break;
                 }
                 editing = 1; callcur = 0; s_klen = 0;
+                t9_mode = T9_UPPER; t9_key = KEY_INVALID; t9_hold = 0;
                 s_kneg = (sel == F_LAT) ? (gAprsCfg.lat_e5 < 0) :
                          (sel == F_LON) ? (gAprsCfg.lon_e5 < 0) : 0;
                 break;
@@ -2053,12 +2082,50 @@ void APP_RunAprs(void)
             const bool addr = (sel == F_MSGTO);
             char       *buf = addr ? gAprsCfg.msg_to
                                    : txt ? gAprsCfg.comment : gAprsCfg.call;
-            const int   fw  = addr ? 9 : txt ? 14 : 6;
-            const char *set = addr ? ADDRSET : txt ? TEXTSET : CALLSET;
-            switch (k) {
-            case KEY_UP:   buf[callcur] = cyc_char(buf[callcur], +1, set); break;
-            case KEY_DOWN: buf[callcur] = cyc_char(buf[callcur], -1, set); break;
-            case KEY_STAR: callcur = (callcur + 1) % fw; break;
+            const int   fw  = addr ? 9 : txt ? 16 : 6;
+            if (k <= KEY_9) {   /* T9 multi-tap -- see t9_group()'s doc comment */
+                /* DIGIT mode has one glyph per key: every press is a new
+                 * character, there is nothing to cycle (unlike ABC/abc). */
+                bool same = (t9_mode != T9_DIGIT) && (k == t9_key) && t9_hold;
+                if (same) {
+                    t9_idx++;
+                } else {
+                    /* clamp, don't wrap: typing past the last cell just
+                     * keeps overwriting it, rather than silently looping
+                     * back and corrupting the start of the field */
+                    if (t9_key != KEY_INVALID && callcur < fw - 1) callcur++;
+                    t9_idx = 0;
+                }
+                char c;
+                if (t9_mode == T9_DIGIT) {
+                    c = (char)('0' + (int)k);
+                } else {
+                    const char *grp = t9_group(k, txt, addr);
+                    c = grp[t9_idx % (int)strlen(grp)];
+                    if (t9_mode == T9_LOWER && c >= 'A' && c <= 'Z')
+                        c = (char)(c - 'A' + 'a');
+                }
+                buf[callcur] = c;
+                t9_key  = k;
+                t9_hold = T9_HOLD_TICKS;
+            } else switch (k) {
+            case KEY_UP:   if (callcur > 0) callcur--;        /* clamp, no wrap */
+                           t9_key = KEY_INVALID;                           break;
+            case KEY_DOWN: if (callcur < fw - 1) callcur++;   /* clamp, no wrap */
+                           t9_key = KEY_INVALID;                           break;
+            case KEY_STAR: /* delete the character under the cursor, shift the
+                             * rest of the field left (classic backspace-over-
+                             * the-cell, not "move forward" like before T9) */
+                for (int i = callcur; i < fw - 1; i++) buf[i] = buf[i + 1];
+                buf[fw - 1] = 0;
+                t9_key = KEY_INVALID;
+                break;
+            case KEY_F:    /* # : cycle the T9 input mode -- no "lower" for an
+                             * APRS address (Call/MsgTo), it would make an
+                             * invalid on-air callsign */
+                t9_mode = txt ? (t9_mode + 1) % 3
+                              : (t9_mode == T9_UPPER ? T9_DIGIT : T9_UPPER);
+                break;
             case KEY_MENU: editing = 0; APRS_Save(); APRS_PushConfig(); break;
             case KEY_EXIT: editing = 0; APRS_Init();    break;   /* reload */
             default: break;
