@@ -23,7 +23,7 @@ KD8CEC pour l'UV-K5.
   │  bypassés sur BK4829/4819)│                 │  → syndrome BCH-1/BCH-2   │
   │                           │                 │  → parseur T.001         │
   │ app écran « SARSAT »      │◀── UART 0xABCD ─│ commandes texte 0x06Cx   │
-  │  ID / pays / position     │  38400 8N1 GP4  │                          │
+  │  ID / pays / position     │ 230400 8N1 GP4  │                          │
   └───────────────────────────┘                 └──────────────────────────┘
 ```
 
@@ -40,14 +40,15 @@ KD8CEC pour l'UV-K5.
   (dé-emphase RX + HPF300 + LPF3k bypassés, FI WIDE) pour que la ligne HP porte
   les données bi-phase-L FGB. *Pas* un mode « RAW » bande de base/BLU — celui-ci
   bat le porteur 406 MHz en un sifflement continu.
-- **Sortie texte :** la trame série Quansheng `AB CD … DC BA` à **38400 8N1**
+- **Sortie texte :** la trame série Quansheng `AB CD … DC BA` à **230400 8N1**
   (C-Board GP0 = UART0 TX vers le RX série de la radio), nouvelles commandes
   applicatives `0x06C0..0x06CF` (voir [docs/protocol.md](docs/protocol.md)).
   C'est *notre* protocole sur les broches UART de la C-Board — sans rapport avec
   le lien propriétaire C-Board↔firmware-CEC de KD8CEC. Le brochage de la C-Board
   est confirmé par analyse statique du `cboard_v032.uf2` de KD8CEC (son firmware
-  d'origine utilise 57600 ; on remplace les deux bouts et on standardise sur
-  38400).
+  d'origine utilise 57600 ; on remplace les deux bouts — 38400 au départ, puis
+  230400 depuis le 26/09/2026 pour le streaming SSTV temps réel, voir
+  `rp2040/src/decoder_config.h`).
 
 Les balises 2ᵉ génération (SGB / T.018 / DSSS-OQPSK) sont **hors périmètre sur le
 RP2040** : c'est un algorithme IQ (2,4576 MHz complexe, FFT de 131072 points,
@@ -60,9 +61,10 @@ de trame 2G + BCH(250,202) portable sur MCU est conservé non compilé sous
 | Composant | État |
 |---|---|
 | Décodeur 1G RP2040 (`rp2040/`) | **fonctionne sur matériel** (C-Board / RP2040-Zero) : décode de vraies balises FGB y compris signal faible, tests hôte OK. `.uf2` pré-compilés `rp2040/bin/sarsat_rp2040-{pico,pico2}.uf2`. |
-| Lien radio ↔ RP2040 (`docs/protocol.md`) | **bidirectionnel** — RP2040 → UV-K5 `0x06Cx` à 38400 ; l'UV-K5 répond `ID\|0x8000` (ACK + un statut HELLO avec VFO / modulation / fréquence RX). Le RP2040 le logge en `[link]`. |
-| **Firmware UV-K5 V1 (base KD8CEC)** | **fonctionne sur matériel** — `firmware/uv-k5v1-kd8cec/`, `ENABLE_SARSAT`, F+8 / auto-ouverture, discriminateur FM + AF plat REG_2B, reçoit sur le VFO sélectionné avec squelch forcé ouvert, affiche les 6 lignes décodées. Ajoute aussi le tracker APRS (TX + RX via la C-Board), l'entrée GPS et un écran VFO principal redessiné — voir `firmware/uv-k5v1-kd8cec/integration.md`. |
-| Firmware UV-K1 / UV-K5 V3 (base F4HWN) | **écran SARSAT validé sur matériel** (affichage classique F4HWN) — `firmware/uv-k1-k5v3/`. Réglage de gain C-Board fait (potentiomètre au max). Tracker APRS/GPS/canal dédié **compilé, 0 warning, pas encore testé sur matériel**. Voir `firmware/uv-k1-k5v3/patch/integration.md`. |
+| Lien radio ↔ RP2040 (`docs/protocol.md`) | **bidirectionnel** — RP2040 → UV-K5 `0x06Cx` à 230400 ; l'UV-K5 répond `ID\|0x8000` (ACK + un statut HELLO avec VFO / modulation / fréquence RX). Le RP2040 le logge en `[link]`. |
+| **Firmware UV-K5 V1 (base KD8CEC)** | **fonctionne sur matériel** — `firmware/uv-k5v1-kd8cec/`, `ENABLE_SARSAT`, écran de lancement **F+7** (A APRS-RP / B SARSAT-RP / C SONDE-RP) + auto-ouverture de SARSAT sur trame décodée, discriminateur FM + AF plat REG_2B, reçoit sur le VFO sélectionné avec squelch forcé ouvert, affiche les 6 lignes décodées. Ajoute aussi le tracker APRS (TX + RX via la C-Board), l'entrée GPS et un écran VFO principal redessiné — voir `firmware/uv-k5v1-kd8cec/integration.md`. |
+| Firmware UV-K1 / UV-K5 V3 (base F4HWN) | **écran SARSAT validé sur matériel** (affichage classique F4HWN) — `firmware/uv-k1-k5v3/`. Écran de lancement **F+7** (A APRS-RP / B SARSAT-RP / C SSTV-RP / D SONDE-RP), même mécanisme que V1 — remplace les anciens combos fixes F+8/F+5 **et** le mécanisme F1/F2 assignable : plus aucune autre façon d'ouvrir ces quatre écrans. Les six actions SSTV (4 modes TX, RX, choix image) sont repliées dans l'écran SSTV-RP lui-même (touches 1/2/4/MENU internes, porté de f4hwn-v6). Réglage de gain C-Board fait (potentiomètre au max). |
+| **Firmware f4hwn-v6 (base F4HWN v6, UV-K1/UV-K5 V3)** | **fonctionne sur matériel** — `firmware/f4hwn-v6/`. Écran de lancement **F+7** (menu d'overlay-apps F4HWN v6) avec quatre entrées intégrées en tête de liste : A APRS-RP, B SARSAT-RP, C SSTV-RP, D SONDE-RP — les emplacements d'overlay suivants gardent leur numéro physique. Aucun F1/F2 assignable ni combo fixe pour ces quatre écrans. Auto-ouverture de SARSAT/Sonde sur trame décodée. |
 
 ### Notes de terrain
 
@@ -77,21 +79,35 @@ de trame 2G + BCH(250,202) portable sur MCU est conservé non compilé sous
 
   Détails, tableau des valeurs et choix du condensateur dans
   [docs/hardware.md](docs/hardware.md).
-- **Raccourcis clavier** (ouverture manuelle des écrans, les deux firmwares) :
-  **F+8** → écran **SARSAT**, **F+5** → écran **APRS** (menu de config + vue RX).
-  L'écran SARSAT s'ouvre aussi tout seul à l'arrivée d'une trame décodée.
+- **Raccourcis clavier** (ouverture manuelle des écrans) : sur **les trois
+  firmwares (V1, V3, f4hwn-v6)**, un point d'entrée unique — l'écran de
+  lancement **F+7**, qui remplace les anciens raccourcis fixes F+0/F+5/F+8
+  **et** le mécanisme F1/F2 assignable (menu `F1Shrt`/`F1Long`/`F2Shrt`/
+  `F2Long`) : plus aucune autre façon d'ouvrir SARSAT, APRS, Sonde ou SSTV.
+  F+7 liste les écrans disponibles par lettre (A, B, C, D sur V3 et
+  f4hwn-v6 — V1 n'a pas SSTV, donc seulement A/B/C) ; **MENU** ouvre l'écran
+  sélectionné, **HAUT/BAS** change la sélection, **EXIT** revient au menu
+  puis quitte. L'écran SARSAT s'ouvre aussi tout seul, sur les trois
+  firmwares, à l'arrivée d'une trame décodée.
 - **Réglage du niveau audio** (une fois, mémorisé) : mets le **potentiomètre de
   volume de la radio au maximum** et laisse-le là ; accorde la radio sur une
-  **fréquence UHF** où l'on entend le souffle FM (squelch ouvert) ; ouvre l'écran
-  **SARSAT** (**F+8**), appuie sur **`5`** pour passer en vue niveau, puis ajuste
-  avec **HAUT / BAS** jusqu'à ce que le **souffle** amène la barre à mi-échelle
-  (« reglage correct »). Une salve de balise, plus faible, décode alors sans y
+  **fréquence UHF** où l'on entend le souffle FM (squelch ouvert) ; ouvre
+  l'écran **SARSAT** (**F+7 → B**, sur les trois firmwares), appuie sur
+  **`5`** pour passer en vue niveau, puis ajuste avec **HAUT /
+  BAS** jusqu'à ce que le **souffle** amène la barre à mi-échelle (« reglage
+  correct »). Une salve de balise, plus faible, décode alors sans y
   retoucher. Le curseur pilote le gain AF de la C-Board côté BK4819 (sauvé en
   EEPROM), indépendamment du potentiomètre.
 - Pourquoi l'APRS marche sur la même carte avec le firmware de KD8CEC mais qu'ici
   la correction de polarisation a été nécessaire : l'AFSK ne demande que
   ton/timing et ignore l'écrêtage ; le slicer par corrélation d'amplitude
   bi-phase-L a besoin d'une forme d'onde bipolaire propre.
+- **Notice d'utilisation** (destinée aux opérateurs, pas aux développeurs) :
+  [docs/notice_utilisation.pdf](docs/notice_utilisation.pdf), générée depuis
+  [docs/notice_utilisation.html](docs/notice_utilisation.html) (source
+  éditable — `google-chrome --headless --disable-gpu --no-sandbox
+  --no-pdf-header-footer --print-to-pdf=docs/notice_utilisation.pdf
+  docs/notice_utilisation.html` pour la régénérer après modification).
 
 ## Compiler — firmware RP2040
 
@@ -154,7 +170,7 @@ pour l'attribution détaillée.
 
 Le dépôt agrège aussi du code amont sous d'autres licences (toutes
 compatibles GPL‑3.0 dans le sens absorption, jamais l'inverse) : **Apache‑2.0**
-pour les deux firmwares Quansheng, **BSD‑3‑Clause** pour le démodulateur AFSK
+pour les trois firmwares Quansheng, **BSD‑3‑Clause** pour le démodulateur AFSK
 porté de `pico_tnc`, **MIT** pour le décodeur SARSAT porté de
 `moricef/Decode_sarsat_406_v1g_v2g` (Copyright (c) 2026 Fabrice Morel ; cœur
 `dec406_v7` de **F4EHY**, 2020 — copie du `LICENSE` amont dans

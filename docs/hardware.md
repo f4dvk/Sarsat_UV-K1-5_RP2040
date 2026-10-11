@@ -182,4 +182,4 @@ LM1117 depuis la batterie 8,4 V (voir historique git de ce fichier).
 | GP5 = UART1 RX | ← | GPS TX | — |
 | GP26 (+27/28) = ADC0 | ← | audio HP (via C1 + pont + clamp) | 3,5 mm |
 
-38400 8N1 pour le lien radio, 9600 8N1 NMEA pour le GPS.
+230400 8N1 pour le lien radio, 9600 8N1 NMEA pour le GPS.

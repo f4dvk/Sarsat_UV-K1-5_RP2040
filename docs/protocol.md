@@ -4,14 +4,16 @@ Couche physique (d'après la C-Board `cboard_v032.uf2` de KD8CEC, analyse statiq
 
 | ligne | broche | débit | usage |
 |------|-----|------|-----|
-| lien radio | RP2040 **GP0 = UART0 TX**, **GP1 = UART0 RX** | **38400 8N1** | ce protocole |
+| lien radio | RP2040 **GP0 = UART0 TX**, **GP1 = UART0 RX** | **230400 8N1** | ce protocole |
 | GPS | GP4/GP5 = UART1 | 9600 8N1 | NMEA, non utilisé par le firmware SARSAT |
 
 On **n'utilise pas** le framing propriétaire C-Board de KD8CEC. Le débit est un
-choix libre puisque les deux bouts sont à nous : les patches firmware SARSAT
-pour l'UV-K1 et l'UV-K5 V1 gardent l'UART à **38400** (le défaut egzumer/F4HWN,
-et ce qu'utilise l'outillage de `benshi-esp32-sim`). Le firmware C-Board
-d'origine de KD8CEC utilise 57600 — sans objet ici puisqu'il est remplacé.
+choix libre puisque les deux bouts sont à nous : les trois firmwares radio
+(UV-K1, UV-K5 V1, UV-K5/K1 V3 f4hwn) sont à **230400** depuis le 26/09/2026
+(branche SSTV temps réel — voir `rp2040/src/decoder_config.h`,
+`CFG_RADIO_UART_BAUD`), pas le défaut egzumer/F4HWN de 38400 d'origine. Le
+firmware C-Board d'origine de KD8CEC utilise 57600 — sans objet ici puisqu'il
+est remplacé.
 
 Transport = la trame UART Quansheng standard (egzumer / F4HWN
 `App/app/uart.c`), **RP2040 → radio uniquement** pour l'instant :
@@ -22,7 +24,7 @@ inner = [ID:u16 LE][data_size:u16 LE][data…]
 inner + crc sont masqués par XOR avec la table Obfuscation de 16 octets
 ```
 
-38400 8N1. Encodeur : `rp2040/src/quansheng_frame.c`.
+230400 8N1. Encodeur : `rp2040/src/quansheng_frame.c`.
 Le firmware radio (Phase 3/4) ajoute un gestionnaire pour les ID ci-dessous dans
 `UART_HandleCommand()` plus une petite app écran « SARSAT ».
 
