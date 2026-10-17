@@ -28,9 +28,12 @@ int ax25_build_ui(uint8_t *out,
                   const char *info, int infolen);
 
 /* HDLC-encode `frame` (len bytes): `flags` opening 0x7E flags, bit-stuffed
- * body, one closing flag; then NRZI. `tones` gets one byte per transmitted
- * bit-cell: 0 = 2200 Hz (space), 1 = 1200 Hz (mark). Returns the bit count
- * (<= AX25_MAX_BITS) or 0 on overflow. */
+ * body, one closing flag; then NRZI. `tones` is a packed bitset, >=
+ * (AX25_MAX_BITS+7)/8 bytes: bit i of tones[i>>3] is tone-cell i (0 = 2200 Hz
+ * space, 1 = 1200 Hz mark), not tones[i] itself -- 2026-10-14, shrunk from
+ * one byte per bit (RAM-pressure audit: this was the firmware's 2nd-largest
+ * .bss consumer). Returns the bit count (<= AX25_MAX_BITS) or 0 on
+ * overflow. */
 int ax25_hdlc_nrzi(const uint8_t *frame, int len, int flags, uint8_t *tones);
 
 /* CRC-16/X.25 (poly 0x1021 reflected, init 0xFFFF, xorout 0xFFFF). */

@@ -15,6 +15,7 @@
  */
 
 #include "apps/app_overlay.h"
+#include "apps/app_config_proxy.h"
 
 #ifdef ENABLE_FEAT_F4HWN_OVERLAY_APPS
 
@@ -34,6 +35,16 @@
 #include "driver/st7565.h"
 #include "driver/system.h"
 #include "driver/backlight.h"
+#ifdef ENABLE_APRS
+#include "app/afgain.h"
+#include "app/aprs.h"
+#endif
+#ifdef ENABLE_SARSAT
+#include "app/sarsat.h"
+#endif
+#ifdef ENABLE_SONDE
+#include "app/sonde.h"
+#endif
 #ifdef ENABLE_FEAT_F4HWN_K5VIEWER
 #include "k5viewer.h"
 #endif
@@ -81,9 +92,13 @@ _Static_assert(APP_ASSET_OFFSET + APP_ASSET_MAX == APP_CODE_OFFSET,
                "assets must end where the code sector starts");
 _Static_assert(APP_ASSET_MAX <= APP_OVERLAY_MAX,
                "assets are CRC-checked through the overlay buffer");
+_Static_assert(APP_SCREEN_SAVE_LEN == sizeof(gStatusLine) + sizeof(gFrameBuffer),
+               "the saved screen is the status line plus the frame buffer");
+_Static_assert(APP_SLOT_BASE(APP_SLOT_COUNT) <= 0x001DE000u,
+               "overlay app slots overlap the Sonic 4K reserve");
 
 enum {
-    APP_AVAILABLE_CAPS = 0u
+    APP_AVAILABLE_CAPS = APP_CAP_CFG_PROXY
 #ifdef ENABLE_FMRADIO
                        | APP_CAP_FM
 #endif
@@ -97,13 +112,20 @@ enum {
 
 /* Keep the small zero-initialized state together so callbacks can address it
  * from one base. The nonzero RNG seed stays separate to keep this in .bss. */
+#define APP_SHORTCUT_COUNT 5u   /* positions used by app_shortcut_index() */
+
 static struct {
     uint16_t asset_size;
+    uint16_t cfg_target_offset;
+    uint32_t cfg_target_magic;
 #ifdef ENABLE_FEAT_F4HWN_OVERLAY_BEAM
     uint16_t beam_pending_channel;
 #endif
     uint8_t run_slot;
     uint8_t cfg_len;       /* staged length; 0 = nothing to commit */
+    uint8_t cfg_target_slot;
+    uint8_t cfg_proxy_len;
+    bool cfg_proxy;
     bool allow_screen_saver;
     bool screen_saver_wake;
 #ifdef ENABLE_FMRADIO
@@ -113,10 +135,9 @@ static struct {
     bool beam_dirty;
 #endif
     bool shortcuts_cached;
-    uint8_t shortcut_mask;
-    uint8_t shortcut_slots[4];
+    uint8_t shortcut_slots[APP_SHORTCUT_COUNT];   /* per position, 0xFF = none */
     uint8_t slot_revision;
-    uint8_t cfg_buf[16];
+    uint8_t cfg_buf[APP_CONFIG_PROXY_MAX];
 } app_state;
 
 /* ---- ABI wrappers: the few resident calls that are not a direct signature match ---- */
@@ -405,7 +426,20 @@ static uint32_t app_rx_freq(void)      { return gRxVfo->pRX->Frequency; }
 
 static void app_cfg_load(uint8_t *buf, uint8_t len)
 {
-    if (len > sizeof(app_state.cfg_buf)) len = sizeof(app_state.cfg_buf);
+    if (app_state.cfg_proxy) {
+        const uint8_t requested = len;
+        if (app_state.cfg_target_slot < APP_SLOT_COUNT &&
+            len <= app_state.cfg_proxy_len) {
+            PY25Q16_ReadBuffer(APP_SLOT_BASE(app_state.cfg_target_slot) +
+                               APP_ASSET_OFFSET + app_state.cfg_target_offset,
+                               buf, len);
+        } else {
+            memset(buf, 0xFF, requested);
+        }
+        return;
+    }
+
+    if (len > APP_CONFIG_LOCAL_MAX) len = APP_CONFIG_LOCAL_MAX;
     const uint32_t base = APP_SLOT_BASE(app_state.run_slot);
     char name[APP_NAME_LEN], owner[APP_NAME_LEN];
     PY25Q16_ReadBuffer(base + offsetof(app_header_t, name), name, sizeof(name));
@@ -419,12 +453,22 @@ static void app_cfg_load(uint8_t *buf, uint8_t len)
 }
 static void app_cfg_save(const uint8_t *buf, uint8_t len)
 {
-    if (len > sizeof(app_state.cfg_buf)) len = sizeof(app_state.cfg_buf);
+    if (app_state.cfg_proxy) {
+        uint32_t magic;
+        if (app_state.cfg_target_slot >= APP_SLOT_COUNT ||
+            len != app_state.cfg_proxy_len || len < sizeof(magic))
+            return;
+        memcpy(&magic, buf, sizeof(magic));
+        if (magic != app_state.cfg_target_magic)
+            return;
+    } else if (len > APP_CONFIG_LOCAL_MAX) {
+        len = APP_CONFIG_LOCAL_MAX;
+    }
     memcpy(app_state.cfg_buf, buf, len);
     app_state.cfg_len = len;   /* mark dirty; the loader commits after the app returns */
 }
 
-_Static_assert(APP_CFG_OFFSET + sizeof(app_state.cfg_buf) <= APP_CFG_OWNER &&
+_Static_assert(APP_CFG_OFFSET + APP_CONFIG_LOCAL_MAX <= APP_CFG_OWNER &&
                APP_CFG_OWNER + APP_NAME_LEN <= APP_ASSET_OFFSET,
                "config area overlaps its owner tag or the assets");
 
@@ -573,6 +617,56 @@ static uint8_t app_read_validated_header(uint8_t slot, app_header_t *h)
     return APP_OK;
 }
 
+/* Resolve an optional configuration-proxy descriptor from the running app's
+ * asset prefix.  The descriptor is declarative: resident code knows nothing
+ * about APRS or any other editor/target pair. */
+static void app_config_proxy_resolve(void)
+{
+    app_state.cfg_proxy        = false;
+    app_state.cfg_target_slot  = 0xFFu;
+    app_state.cfg_proxy_len    = 0u;
+    app_state.cfg_target_offset = 0u;
+    app_state.cfg_target_magic = 0u;
+
+    if (app_state.asset_size < sizeof(app_config_proxy_t))
+        return;
+
+    app_config_proxy_t proxy;
+    PY25Q16_ReadBuffer(APP_SLOT_BASE(app_state.run_slot) + APP_ASSET_OFFSET,
+                       &proxy, sizeof(proxy));
+    if (proxy.magic != APP_CONFIG_PROXY_MAGIC)
+        return;
+
+    /* Once the marker matches, never fall back to the editor's ordinary
+     * config area: an invalid or missing target must remain a read-only error. */
+    app_state.cfg_proxy = true;
+    if (proxy.reserved != 0u || proxy.target_len == 0u ||
+        proxy.target_len > APP_CONFIG_PROXY_MAX)
+        return;
+
+    for (uint8_t slot = 0; slot < APP_SLOT_COUNT; slot++) {
+        app_header_t target;
+        if (slot == app_state.run_slot ||
+            app_read_validated_header(slot, &target) != APP_OK ||
+            memcmp(target.name, proxy.target_name, APP_NAME_LEN) != 0 ||
+            proxy.target_offset > target.asset_size ||
+            proxy.target_len > target.asset_size - proxy.target_offset)
+            continue;
+
+        uint32_t magic;
+        PY25Q16_ReadBuffer(APP_SLOT_BASE(slot) + APP_ASSET_OFFSET +
+                           proxy.target_offset, &magic, sizeof(magic));
+        if (magic != proxy.target_magic)
+            continue;
+
+        app_state.cfg_target_slot   = slot;
+        app_state.cfg_target_offset = proxy.target_offset;
+        app_state.cfg_target_magic  = proxy.target_magic;
+        app_state.cfg_proxy_len     = proxy.target_len;
+        return;
+    }
+}
+
 uint8_t APP_ValidateSlot(uint8_t slot, app_header_t *out_header)
 {
     app_header_t h;
@@ -594,21 +688,31 @@ void APP_NotifySlotChanged(void)
     app_state.slot_revision++;
 }
 
+/* Position of a shortcut ID in shortcut_slots[], -1 if unknown.  Every
+ * position goes through SHORTCUT_POS, which refuses to compile one that is not
+ * below APP_SHORTCUT_COUNT: a new shortcut takes the next position and raises
+ * the count. */
+#define SHORTCUT_POS(p) __extension__ ({                                      \
+    _Static_assert((p) < APP_SHORTCUT_COUNT,                                  \
+                   "shortcut position not below APP_SHORTCUT_COUNT");        \
+    (int8_t)(p); })
 static int8_t app_shortcut_index(uint8_t shortcut)
 {
-    if (shortcut == APP_SHORTCUT_FM)      return 0;
-    if (shortcut == APP_SHORTCUT_FOXHUNT) return 1;
-    if (shortcut == APP_SHORTCUT_BEACON)  return 2;
-    if (shortcut == APP_SHORTCUT_BEAM)    return 3;
+    if (shortcut == APP_SHORTCUT_FM)       return SHORTCUT_POS(0);
+    if (shortcut == APP_SHORTCUT_FOXHUNT)  return SHORTCUT_POS(1);
+    if (shortcut == APP_SHORTCUT_BEACON)   return SHORTCUT_POS(2);
+    if (shortcut == APP_SHORTCUT_BEAM)     return SHORTCUT_POS(3);
+    if (shortcut == APP_SHORTCUT_TONECALL) return SHORTCUT_POS(4);
     return -1;
 }
+_Static_assert(APP_SLOT_COUNT < 0xFFu, "0xFF marks a shortcut no app holds");
 
 static void app_cache_shortcuts(void)
 {
     if (app_state.shortcuts_cached)
         return;
 
-    app_state.shortcut_mask = 0;
+    memset(app_state.shortcut_slots, 0xFF, sizeof(app_state.shortcut_slots));
     const uint32_t overlay_vma = (uint32_t)PY25Q16_OverlayBuffer();
 
     for (uint8_t slot = 0; slot < APP_SLOT_COUNT; slot++) {
@@ -619,33 +723,32 @@ static void app_cache_shortcuts(void)
         const uint8_t shortcut = (uint8_t)((h.flags & APP_FLAG_SHORTCUT_MASK) >>
                                            APP_FLAG_SHORTCUT_SHIFT);
         const int8_t index = app_shortcut_index(shortcut);
-        if (index >= 0) {
-            if (!(app_state.shortcut_mask & shortcut)) {
-                app_state.shortcut_mask |= shortcut;
-                app_state.shortcut_slots[index] = slot;
-            }
-        }
+        if (index >= 0 && app_state.shortcut_slots[index] == 0xFFu)
+            app_state.shortcut_slots[index] = slot;   /* the first app wins */
     }
 
     app_state.shortcuts_cached = true;
 }
 
-uint8_t APP_OverlayShortcutMask(void)
+/* Slot of the app holding a shortcut ID, 0xFF if none. */
+static uint8_t app_shortcut_slot(uint8_t shortcut)
 {
+    const int8_t index = app_shortcut_index(shortcut);
+    if (index < 0)
+        return 0xFFu;
     app_cache_shortcuts();
-    return app_state.shortcut_mask;
+    return app_state.shortcut_slots[index];
+}
+
+bool APP_OverlayShortcutInstalled(uint8_t shortcut)
+{
+    return app_shortcut_slot(shortcut) != 0xFFu;
 }
 
 uint8_t APP_LaunchOverlayShortcut(uint8_t shortcut)
 {
-    const int8_t index = app_shortcut_index(shortcut);
-    if (index < 0)
-        return APP_ERR_MAGIC;
-
-    app_cache_shortcuts();
-    return (app_state.shortcut_mask & shortcut)
-         ? APP_LaunchOverlay(app_state.shortcut_slots[index])
-         : APP_ERR_MAGIC;
+    const uint8_t slot = app_shortcut_slot(shortcut);
+    return slot != 0xFFu ? APP_LaunchOverlay(slot) : APP_ERR_MAGIC;
 }
 
 uint8_t APP_SlotInfo(uint8_t slot, app_header_t *out_header)
@@ -657,6 +760,29 @@ uint8_t APP_SlotInfo(uint8_t slot, app_header_t *out_header)
     /* Slot info returns the raw header even when its magic is invalid. */
     PY25Q16_ReadBuffer(APP_SLOT_BASE(slot), h, sizeof(*h));
     return (h->magic == APP_MAGIC) ? APP_OK : APP_ERR_MAGIC;
+}
+
+/* APP_FLAG_SAVE_SCREEN: the screen the app left in the display buffers replaces
+ * the last APP_SCREEN_SAVE_LEN bytes of its assets. Nothing was staged: those
+ * buffers are resident RAM, and the overlay the app just left is free again to
+ * hold the header sector while it is patched (screen, asset CRC) and written
+ * back with one erase. An unchanged screen costs no write. */
+static void app_screen_save(uint32_t base, uint16_t asset_size, uint8_t *ws)
+{
+    if (asset_size < APP_SCREEN_SAVE_LEN)
+        return;
+    uint8_t *const assets = ws + APP_ASSET_OFFSET;
+    uint8_t *const screen = assets + asset_size - APP_SCREEN_SAVE_LEN;
+    PY25Q16_InvalidateCache();           /* the overlay held app code */
+    PY25Q16_ReadBuffer(base, ws, APP_SECTOR_SIZE);
+    if (!memcmp(screen, gStatusLine, sizeof(gStatusLine)) &&
+        !memcmp(screen + sizeof(gStatusLine), gFrameBuffer, sizeof(gFrameBuffer)))
+        return;
+    memcpy(screen, gStatusLine, sizeof(gStatusLine));
+    memcpy(screen + sizeof(gStatusLine), gFrameBuffer, sizeof(gFrameBuffer));
+    const uint16_t crc = (uint16_t)MB_Crc32Bytes(assets, asset_size);
+    memcpy(ws + offsetof(app_header_t, asset_crc), &crc, sizeof(crc));
+    PY25Q16_OverlayWriteSector(base);
 }
 
 /* All services are immutable.  Keeping the table in flash avoids rebuilding a
@@ -810,6 +936,7 @@ uint8_t APP_LaunchOverlay(uint8_t slot)
     app_state.run_slot   = slot;   /* for cfg_load / cfg_save / asset_read */
     app_state.asset_size = h.asset_size;
     app_state.cfg_len    = 0;
+    app_config_proxy_resolve();
     app_rng_mix();
 #ifdef ENABLE_FMRADIO
     app_state.fm_dirty = false;
@@ -849,9 +976,47 @@ uint8_t APP_LaunchOverlay(uint8_t slot)
     gRxVfo         = gTxVfo;
     gCurrentVfo    = gTxVfo;
     RADIO_SetupRegisters(true);
+#ifdef ENABLE_APRS
+    /* Force the STOCK gain here, not AFGAIN_Apply() (2026-10-13, user
+     * report: a FIXED low SARSAT AF gain starved APRSRX's own demod to the
+     * point of total decode failure). Some overlay apps (APRSRX, APRSDIGI)
+     * sample the BK4819's own AF output themselves, via PA4/ADC, upstream
+     * of the speaker amp, for their own software decode -- the exact same
+     * path REG_48 controls. AFGAIN_TimeSlice() keeps re-asserting a fixed
+     * override every ~500 ms in the background regardless of which screen
+     * is open, so gEeprom.VOLUME_GAIN is very likely already pinned low by
+     * the time execution reaches here; simply not calling AFGAIN_Apply()
+     * would not undo that. The override itself is unaffected (gAfGain is
+     * untouched) and comes back normally on exit, below. */
+    AFGAIN_Bypass();
+#endif
+    /* Restore the BK4819's stock AFC excursion range (2026-10-13, user
+     * hypothesis confirmed: "un AFC... actif et pas sur le firmware
+     * F4HWN"). SARSAT, APRS and SONDE each narrow REG_73<13:11> ("AFC
+     * Range Selection") to its minimum (111) while their own screen/tick is
+     * active, to stop AFC chasing a transient burst -- same register,
+     * independently, in sarsat.c, aprs.c's APRS_ApplyAfc() and
+     * driver/bk4829.c's Sonde path. Nothing else ever widens it back:
+     * BK4819_Init() writes the chip's own default (000, 0x4691) once at
+     * boot and never again, so once any of those screens has run, this
+     * stays pinned narrow for the rest of the power-on session -- degrading
+     * an overlay app's own demod (e.g. APRSRX sampling the discriminator
+     * output directly) with no reason to expect a restricted range. Those
+     * screens re-assert their own restriction every tick while running, so
+     * nothing needs restoring here on exit -- returning to one of them
+     * narrows it again on its own. */
+    {
+        uint16_t r73 = BK4819_ReadRegister(0x73);
+        r73 = (uint16_t)(r73 & ~(0x7u << 11));     /* range = 000 = stock/max */
+        BK4819_WriteRegister(0x73, r73);
+    }
 
     app_entry_t entry = (app_entry_t)(((uint32_t)ws + h.entry_off) | 1u);
     entry(&app_api);
+
+    /* First thing after the app: nothing has drawn over its last screen yet. */
+    if (h.flags & APP_FLAG_SAVE_SCREEN)
+        app_screen_save(APP_SLOT_BASE(slot), h.asset_size, ws);
 
     APP_ModalScreenSaverExit();
     app_state.allow_screen_saver = false;
@@ -863,6 +1028,34 @@ uint8_t APP_LaunchOverlay(uint8_t slot)
     gTxVfo         = saved_tx;
     gCurrentVfo    = saved_current;
     RADIO_SetupRegisters(true);
+#ifdef ENABLE_APRS
+    /* Same reassertion on the way out (2026-10-12, user report: a fixed
+     * SARSAT AF gain read back as "auto" after running an overlay app) --
+     * without it the fixed gain only comes back up to ~500 ms later, on
+     * AFGAIN_TimeSlice()'s own cadence, once the main tick resumes. */
+    AFGAIN_Apply();
+#endif
+
+    /* The RP2040 keeps streaming SARSAT/Sonde/APRS decode frames over UART
+     * the whole time the app above was blocking the main tick; those
+     * commands only queue up (UART_HandleCommand isn't polled while an
+     * overlay app runs), so any one of them that would normally pop its
+     * screen fires in a burst the instant the tick resumes -- stale by
+     * then, and surprising mid-navigation (2026-10-12, user report: Sonde /
+     * SARSAT screens flashing up right after leaving an overlay app,
+     * needing a second EXIT to actually get back to the radio screen).
+     * The underlying data is still captured (each HandleCommand already
+     * ran and updated its own module's state); only the cosmetic auto-open
+     * trigger for that backlog is discarded here. */
+#ifdef ENABLE_SARSAT
+    gSarsatShowRequest = false;
+#endif
+#ifdef ENABLE_SONDE
+    gSondeShowRequest = false;
+#endif
+#ifdef ENABLE_APRS
+    gAprsShowRequest = false;
+#endif
 
     /* The overlay held app code, not a valid config sector. */
     PY25Q16_InvalidateCache();
@@ -871,12 +1064,36 @@ uint8_t APP_LaunchOverlay(uint8_t slot)
     app_beam_commit();
 #endif
 
-    /* Commit any deferred config the app staged (RMW keeps the slot header),
-     * tagged with the app's name. */
+    /* Commit ordinary per-app config, or the bounded target asset selected by
+     * a validated proxy descriptor.  Both paths run only after app_main exits. */
     if (app_state.cfg_len) {
-        const uint32_t base = APP_SLOT_BASE(slot);
-        PY25Q16_WriteBuffer(base + APP_CFG_OFFSET, app_state.cfg_buf, app_state.cfg_len, false);
-        PY25Q16_WriteBuffer(base + APP_CFG_OWNER, h.name, APP_NAME_LEN, false);
+        if (app_state.cfg_proxy && app_state.cfg_target_slot < APP_SLOT_COUNT) {
+            app_header_t target;
+            uint32_t magic;
+            const uint8_t target_slot = app_state.cfg_target_slot;
+            const uint32_t base = APP_SLOT_BASE(target_slot);
+            if (app_read_validated_header(target_slot, &target) == APP_OK &&
+                app_state.cfg_target_offset <= target.asset_size &&
+                app_state.cfg_len <= target.asset_size - app_state.cfg_target_offset) {
+                PY25Q16_ReadBuffer(base + APP_ASSET_OFFSET + app_state.cfg_target_offset,
+                                   &magic, sizeof(magic));
+                if (magic == app_state.cfg_target_magic) {
+                    PY25Q16_ReadBuffer(base + APP_ASSET_OFFSET, ws, target.asset_size);
+                    memcpy(ws + app_state.cfg_target_offset,
+                           app_state.cfg_buf, app_state.cfg_len);
+                    const uint16_t crc = (uint16_t)MB_Crc32Bytes(ws, target.asset_size);
+                    PY25Q16_WriteBuffer(base + APP_ASSET_OFFSET + app_state.cfg_target_offset,
+                                       app_state.cfg_buf, app_state.cfg_len, false);
+                    PY25Q16_WriteBuffer(base + offsetof(app_header_t, asset_crc),
+                                       &crc, sizeof(crc), false);
+                }
+            }
+        } else if (!app_state.cfg_proxy) {
+            const uint32_t base = APP_SLOT_BASE(slot);
+            PY25Q16_WriteBuffer(base + APP_CFG_OFFSET,
+                               app_state.cfg_buf, app_state.cfg_len, false);
+            PY25Q16_WriteBuffer(base + APP_CFG_OWNER, h.name, APP_NAME_LEN, false);
+        }
         PY25Q16_InvalidateCache();
     }
 #ifdef ENABLE_FMRADIO

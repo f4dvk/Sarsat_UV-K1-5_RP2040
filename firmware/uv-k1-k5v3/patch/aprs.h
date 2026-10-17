@@ -78,7 +78,11 @@ typedef struct {
                             * bit6     : KISS TNC mode -- the RP2040 becomes a
                             *            dumb Bell-202 modem on its USB, the
                             *            radio disables its own tracker/popup
-                            *            and just relays frames.              */
+                            *            and just relays frames;
+                            * bit7     : "BatTx" -- append battery voltage +
+                            *            charge percent to the beacon comment
+                            *            (APRS_FormatPosition()), in addition
+                            *            to whatever text is programmed.      */
     char     comment[17];   /* <= 16 chars, grown from 14 (2026-10-11) -- the
                             * most this screen's 18-glyph display budget can
                             * take (draw_config's "[x]" cursor cell costs 2
@@ -104,6 +108,7 @@ typedef struct {
 #define APRS_OPT_DIGI_SHIFT 4
 #define APRS_OPT_DIGI_MASK  0x30u   /* 0 off, 1 WIDE1, 2 +WIDE2, 3 +WIDE3      */
 #define APRS_OPT_KISS       0x40u   /* KISS TNC mode (RP2040 is the modem)     */
+#define APRS_OPT_BATTXT     0x80u   /* append battery voltage/% to the beacon  */
 
 extern aprs_cfg_t gAprsCfg;
 extern bool       gAprsShowRequest;   /* set on an RX packet; app.c opens the screen */

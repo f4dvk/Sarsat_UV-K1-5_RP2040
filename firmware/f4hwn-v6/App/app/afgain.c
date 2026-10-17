@@ -44,7 +44,40 @@ void AFGAIN_Save(void)
 
 void AFGAIN_ResyncKnob(void)
 {
-    s_stock_volgain = 0xFF;
+    /* Only safe to refresh from the live gEeprom.VOLUME_GAIN when "auto":
+     * that's the only case where the live value genuinely is the knob, not
+     * some earlier override. Re-entering a screen that uses the override
+     * (SARSAT/SONDE/APRS-RP) while a *fixed* gAfGain from an earlier visit
+     * is still active in the background would otherwise re-capture the
+     * override's own low value as if it were "stock" -- permanently losing
+     * the real stock gain for the rest of the power-on session (2026-10-17,
+     * user report: a fixed SARSAT level leaking into SetVol/overlay apps
+     * with no way back short of a reboot). Keep whatever was already
+     * cached instead. */
+    if (gAfGain < 1 || gAfGain > 78)
+        s_stock_volgain = 0xFF;
+}
+
+/* Force the stock (knob) RX audio gain once, ignoring gAfGain entirely --
+ * for callers that need a normal-level BK4819 AF signal regardless of any
+ * SARSAT override, without disturbing gAfGain itself (2026-10-13, user
+ * report: launching an overlay app with a FIXED low SARSAT AF gain starved
+ * APRSRX's own demod -- it taps the same BK4819 AF path, via PA4/ADC,
+ * upstream of the speaker amp, to sample RX audio for its own software
+ * decode; AFGAIN_TimeSlice() keeps re-asserting that low gain every ~500 ms
+ * in the background regardless of which screen is open, so the overlay
+ * loader can't just skip calling AFGAIN_Apply() at launch -- gEeprom.
+ * VOLUME_GAIN is already pinned low by the time it gets there). gAfGain
+ * (and thus the override) is restored normally by AFGAIN_Apply() once the
+ * app returns. */
+void AFGAIN_Bypass(void)
+{
+    AFGAIN_Init();
+    if (s_stock_volgain == 0xFF)
+        s_stock_volgain = gEeprom.VOLUME_GAIN;
+    gEeprom.VOLUME_GAIN = s_stock_volgain;
+    gEeprom.DAC_GAIN    = 0x0F;
+    BK4819_SetRxAudioGain();
 }
 
 /* Same slider math as the V1 (KD8CEC) firmware's APRS_ApplyAfGain(): spend
@@ -106,4 +139,12 @@ void AFGAIN_TimeSlice(void)
         return;
     s_tick = 0;
     AFGAIN_Apply();
+}
+
+uint8_t AFGAIN_StockVolGain(void)
+{
+    if (gAfGain < 1 || gAfGain > 78)      /* auto: no override active, live *is* stock */
+        return gEeprom.VOLUME_GAIN;
+    AFGAIN_Init();
+    return (s_stock_volgain == 0xFF) ? gEeprom.VOLUME_GAIN : s_stock_volgain;
 }

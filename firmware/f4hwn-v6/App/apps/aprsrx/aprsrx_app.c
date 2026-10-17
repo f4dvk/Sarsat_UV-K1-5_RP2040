@@ -102,7 +102,26 @@ static inline volatile uint32_t *hw(uint32_t a){
 #define PRE_BITS    24u    /* busy for 3 bytes after two back-to-back flags */
 
 /* ---- AX.25 ---- */
-#define FRAME_MAX   330u   /* 10 addresses + control + PID + 256 info + FCS */
+/* 300, not the protocol's own 330-byte ceiling (10 addresses + control + PID
+ * + 256 info + FCS) -- FRAME_MAX sizes buf[] in BOTH frame_t (x HISTORY) and
+ * sl_t (x NSL), 8 copies live on the stack at once between app_main() and
+ * listen(). At 330 that alone is 3056 B; combined with the ~900 B the
+ * resident call chain already uses just to reach an overlay app, that's
+ * 3956 B against the ~3936 B available between _ebss and _estack (2026-10-14
+ * measurement, after packing aprs.c's TX tone buffer as a bitset -- see
+ * ax25_hdlc_nrzi() -- freed ~1.9 KiB and nearly doubled this ceiling from
+ * ~2016 B) -- 20 B over, a near-certain stack overflow into resident .bss
+ * (observed: gAfGain/VOLUME_GAIN corruption, intermittent decode). 150 and
+ * 180 were tried first and both tested WORSE than 330 for real traffic
+ * (user report: decoding looked "random") -- too many real local frames
+ * exceeded them and were silently rejected on a bad FCS (hdlcBit() already
+ * bounds-checks every write, so no crash, just a quiet drop that looks
+ * exactly like flaky reception). 300 only trims 9% off the protocol's own
+ * worst case while landing comfortably inside the budget (2808 B measured,
+ * ~228 B to spare with HISTORY and NSL both still at their full upstream
+ * defaults) -- raise it further only alongside a fresh -fstack-usage
+ * measurement against the current ~3936 B ceiling. */
+#define FRAME_MAX   300u
 #define FRAME_MIN   18u    /* 2 addresses + control + PID + FCS              */
 #define FCS_GOOD    0xF0B8u
 #define HISTORY     5u

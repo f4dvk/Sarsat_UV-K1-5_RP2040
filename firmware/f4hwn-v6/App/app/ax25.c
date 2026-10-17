@@ -60,10 +60,17 @@ int ax25_hdlc_nrzi(const uint8_t *frame, int len, int flags, uint8_t *tones)
     int ones = 0;             /* consecutive 1s, for bit stuffing */
     int level = 1;            /* current NRZI tone (1 = mark) */
 
-    #define EMIT(bit) do {                              \
-        if (nb >= AX25_MAX_BITS) return 0;              \
-        if ((bit) == 0) level ^= 1;   /* 0 -> toggle */ \
-        tones[nb++] = (uint8_t)level;                   \
+    /* `tones` is a packed bitset (AX25_MAX_BITS/8 bytes), one bit per tone
+     * level -- not one byte per level. Saves 7/8 of a 2200 B static buffer
+     * (2026-10-14, RAM-pressure audit: this was the firmware's 2nd-largest
+     * .bss consumer after the overlay-app buffer itself, squeezing every
+     * overlay app's stack margin). APRS_SendTones() unpacks the same way. */
+    #define EMIT(bit) do {                                      \
+        if (nb >= AX25_MAX_BITS) return 0;                      \
+        if ((bit) == 0) level ^= 1;   /* 0 -> toggle */         \
+        if (level) tones[nb >> 3] |= (uint8_t)(1u << (nb & 7)); \
+        else       tones[nb >> 3] &= (uint8_t)~(1u << (nb & 7));\
+        nb++;                                                   \
     } while (0)
 
     /* opening flags (not stuffed) */

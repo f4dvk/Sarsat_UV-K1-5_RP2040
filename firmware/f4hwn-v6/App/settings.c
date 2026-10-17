@@ -18,6 +18,9 @@
 #include <string.h>
 
 #include "app/dtmf.h"
+#ifdef ENABLE_APRS
+    #include "app/afgain.h"
+#endif
 #ifdef ENABLE_FMRADIO
     #include "app/fm.h"
 #endif
@@ -142,8 +145,10 @@ void SETTINGS_InitEEPROM(void)
                 }
             }
 
-            if (needsWrite) {
-                for (uint8_t i = 0; i < 7; i++)
+            // Bands 1 and 2 both at 0 were left by an old settings save that
+            // overwrote them on every write: restore their defaults too.
+            if (needsWrite || (buf[0] == 0 && buf[1] == 0)) {
+                for (uint8_t i = 0; i < (needsWrite ? 7 : 2); i++)
                     buf[i] = dBmCorrTable[i];
                 PY25Q16_WriteBuffer(0x00A0B9, buf, 7, false);
             }
@@ -1068,10 +1073,7 @@ void SETTINGS_SaveSettings(void)
 #ifdef ENABLE_VOICE
     State[0] = gEeprom.VOICE_PROMPT;
 #endif
-#ifdef ENABLE_RSSI_BAR
-    State[1] = gEeprom.S0_LEVEL;
-    State[2] = gEeprom.S9_LEVEL;
-#endif
+    // State[1..7] hold dBmCorrTable (0x00A0B9..0x00A0BF): kept as read from flash
 
     // 0x0EA8
     State = SecBuf + 0x18;
@@ -1385,7 +1387,11 @@ void SETTINGS_UpdateChannel(uint16_t channel, const VFO_Info_t *pVFO, bool keep)
         uint8_t State[8];
         // 0x1F88
         PY25Q16_ReadBuffer(0x010000 + 0x188, State, sizeof(State));
+#ifdef ENABLE_APRS
+        State[6] = AFGAIN_StockVolGain();
+#else
         State[6] = gEeprom.VOLUME_GAIN;
+#endif
         PY25Q16_WriteBuffer(0x010000 + 0x188, State, sizeof(State), false);
     }
 #endif

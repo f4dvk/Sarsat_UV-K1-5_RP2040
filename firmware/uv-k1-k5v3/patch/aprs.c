@@ -32,6 +32,8 @@
 #include "ax25.h"
 #include "app/uart.h"
 #include "app/afgain.h"     /* shared C-Board AF-gain setting (gAfGain) */
+#include "helper/battery.h" /* gBatteryVoltageAverage, BATTERY_VoltsToPercent() --
+                             * "BatTx" option, appends battery status to the beacon */
 #include "app/chFrScanner.h"
 #include "driver/keyboard.h"
 #include "driver/backlight.h"
@@ -368,8 +370,29 @@ static int APRS_FormatPosition(char *info)
     if (gps && s_gps.speed_kmh > 3)
         n += sprintf(info + n, "%03u/%03u", (unsigned)(s_gps.course % 360u),
                      (unsigned)((s_gps.speed_kmh * 100u + 92u) / 185u));  /* km/h->kn */
+    /* /A=aaaaaa : altitude in feet, 6 digits zero-padded (APRS data
+     * extension) -- GPS fix only, manual lat/lon has no altitude to offer.
+     * s_gps.alt is meters (int16_t, from the C-Board's GPS); x3.28084 in
+     * integer math (no FPU on this MCU), clamped to a sane non-negative
+     * range (a dip just below sea level reads as 0, not a huge wrapped
+     * unsigned value). */
+    if (gps) {
+        int32_t alt_ft = ((int32_t)s_gps.alt * 328084L + 50000L) / 100000L;
+        if (alt_ft < 0)        alt_ft = 0;
+        if (alt_ft > 999999L)  alt_ft = 999999L;
+        n += sprintf(info + n, "/A=%06u", (unsigned)alt_ft);
+    }
     n += sprintf(info + n, "%.*s", (int)sizeof(gAprsCfg.comment),
                  gAprsCfg.comment);
+    /* "BatTx" : append battery voltage + charge, in addition to whatever
+     * text is programmed above -- gBatteryVoltageAverage is in 10 mV units
+     * (helper/battery.h), BATTERY_VoltsToPercent() turns that into 0..100
+     * using the configured battery type's discharge curve (same values the
+     * stock status screen shows). ~15 chars, well inside AX25_MAX_INFO (80). */
+    if (gAprsCfg.opts & APRS_OPT_BATTXT)
+        n += sprintf(info + n, " Bat= %u.%02uV %u%%",
+                     gBatteryVoltageAverage / 100u, gBatteryVoltageAverage % 100u,
+                     BATTERY_VoltsToPercent(gBatteryVoltageAverage));
     return n;
 }
 
@@ -393,6 +416,10 @@ static uint16_t afsk_scale(uint16_t f)
  * actual tone change (NRZI runs stay phase-continuous) and clock the bit
  * cells off a free-running SysTick deadline that absorbs the write time and
  * self-corrects for IRQ jitter, so the average stays exactly 1200 baud. */
+/* `tones` is a packed bitset (see ax25_hdlc_nrzi()'s EMIT macro): bit i of
+ * byte i>>3 holds level i, not tones[i] itself. */
+#define TONE_BIT(tones, i) (((tones)[(i) >> 3] >> ((i) & 7)) & 1u)
+
 static void APRS_SendTones(const uint8_t *tones, int nb)
 {
     const uint16_t r_mark  = afsk_scale(AFSK_MARK);
@@ -407,14 +434,14 @@ static void APRS_SendTones(const uint8_t *tones, int nb)
     BK4819_EnableTXLink();               /* REG_30: TX DSP + PA_GAIN + PLL_VCO */
     SYSTEM_DelayMs(50);
 
-    int cur = tones[0] ? 1 : 0;
+    int cur = (int)TONE_BIT(tones, 0);
     BK4819_WriteRegister(BK4819_REG_71, cur ? r_mark : r_space);
     BK4819_ExitTxMute();
 
     uint32_t last = SysTick->VAL;        /* SysTick is a 24-bit down-counter  */
     uint32_t acc  = 0;
     for (int i = 0; i < nb; i++) {
-        const int want = tones[i] ? 1 : 0;
+        const int want = (int)TONE_BIT(tones, i);
         if (want != cur) {
             BK4819_WriteRegister(BK4819_REG_71, want ? r_mark : r_space);
             cur = want;
@@ -458,7 +485,7 @@ static int APRS_Digi(ax25_addr_t *d)
  * RX. */
 static void APRS_TxFrame(const uint8_t *frame, int flen)
 {
-    static uint8_t tones[AX25_MAX_BITS];
+    static uint8_t tones[(AX25_MAX_BITS + 7) / 8];   /* packed bitset */
     int nb = ax25_hdlc_nrzi(frame, flen, APRS_TXDELAY_FLAGS, tones);
     if (!nb) return;
 
@@ -1308,7 +1335,7 @@ static KEY_Code_t nav_key(KEY_Code_t k)
 
 /* ---------------------------------------------------------- config screen  */
 enum { F_CALL, F_SSID, F_PATH, F_SYM, F_TEXT, F_INT, F_POPUP, F_AFGAIN, F_SQL,
-       F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_SENDB, F_KISS, F_N };
+       F_BLIGHT, F_BATTXT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_SENDB, F_KISS, F_N };
 
 /* T9-style multi-tap entry (2026-10-11; replaces the original UP/DOWN
  * "cycle through every character" editing -- it left no way to go back and
@@ -1388,6 +1415,8 @@ static void field_str(int f, char *out)
             ? "Squelch fast" : "Squelch stock"); break;
     case F_BLIGHT: strcpy(out, (gAprsCfg.opts & APRS_OPT_BL_DECODE)
         ? "Light on frame" : "Light on RX"); break;
+    case F_BATTXT: strcpy(out, (gAprsCfg.opts & APRS_OPT_BATTXT)
+        ? "BatTx on" : "BatTx off"); break;
     case F_DIGI: {
         static const char *const D[] = { "Digi  off", "Digi  WIDE1",
                                           "Digi  WIDE1+2", "Digi  WIDE1+2+3" };
@@ -1532,6 +1561,7 @@ static void field_step(int f, int dir)
         APRS_ApplySquelch();
         break;
     case F_BLIGHT: gAprsCfg.opts ^= APRS_OPT_BL_DECODE; break;
+    case F_BATTXT: gAprsCfg.opts ^= APRS_OPT_BATTXT;    break;
     case F_KISS:   gAprsCfg.opts ^= APRS_OPT_KISS; APRS_PushConfig(); break;
     case F_DIGI: {
         uint8_t lv = (gAprsCfg.opts & APRS_OPT_DIGI_MASK) >> APRS_OPT_DIGI_SHIFT;

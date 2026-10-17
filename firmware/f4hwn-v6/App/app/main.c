@@ -919,7 +919,10 @@ static void MAIN_Key_STAR(bool bKeyPressed, bool bKeyHeld)
     
     if (!gWasFKeyPressed) // pressed without the F-key
     {   
-        if (gScanStateDir == SCAN_OFF 
+        if (gScanStateDir == SCAN_OFF
+#ifdef ENABLE_FEAT_F4HWN_FULL_WATCH
+            && gEeprom.DUAL_WATCH != DUAL_WATCH_FULL
+#endif
 #ifdef ENABLE_NOAA
             && !IS_NOAA_CHANNEL(gTxVfo->CHANNEL_SAVE)
 #endif

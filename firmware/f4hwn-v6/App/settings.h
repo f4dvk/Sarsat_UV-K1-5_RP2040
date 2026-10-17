@@ -136,8 +136,9 @@ enum ACTION_OPT_t {
     ACTION_OPT_BEACON         = 23,
     ACTION_OPT_APRS           = 24,   /* APRS RP2040 (notre firmware) */
     ACTION_OPT_SARSAT         = 25,   /* SARSAT RP2040 (notre firmware) */
+    ACTION_OPT_TONECALL       = 26,
 
-    ACTION_OPT_LEN            = 26
+    ACTION_OPT_LEN            = 27
 };
 
 #ifdef ENABLE_VOICE
