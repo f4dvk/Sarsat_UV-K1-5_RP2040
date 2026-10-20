@@ -46,6 +46,15 @@ static uint8_t  s_proto;
 static bool     s_dirty;
 static bool     s_screen_open;     /* APP_RunSarsat() is running           */
 
+/* ~1 s header flash (loop is ~20 ms/iter -- see SARSAT_TickDelay(20) below)
+ * when a new frame arrives while this screen is already open, so the user
+ * notices a fresh decode instead of mistaking it for the one they were
+ * already reading (2026-10-20, user request). Not set on the frame that
+ * triggers the auto-popup itself (SARSAT_CMD_CLEAR arrives before
+ * s_screen_open goes true then) -- no ambiguity to flag there. */
+#define SARSAT_NEWFLASH_TICKS 50u
+static uint8_t  s_new_flash;
+
 static uint8_t  s_view;            /* 0 = beacon text, 1 = audio level    */
 static struct {
 	uint16_t peak, rms, dc, amin, amax;
@@ -178,6 +187,8 @@ void SARSAT_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 			s_nlines  = 0;
 			s_scroll  = 0;
 			s_dirty   = true;
+			if (s_screen_open)
+				s_new_flash = SARSAT_NEWFLASH_TICKS;
 			const uint8_t ok = 0;
 			SARSAT_Reply(SARSAT_CMD_CLEAR | 0x8000u, &ok, 1);
 			break;
@@ -325,7 +336,10 @@ static void SARSAT_Draw(void)
 		        s_scroll > 0 ? '^' : ' ',
 		        last < s_nlines ? 'v' : ' ');
 	}
-	UI_PrintStringSmallBold(hdr, 2, 0, 0);
+	if (s_new_flash)
+		UI_PrintStringSmallNormalInverse(hdr, 2, 0, 0);
+	else
+		UI_PrintStringSmallBold(hdr, 2, 0, 0);
 
 	/* rows 1..SARSAT_VIS_ROWS: the visible slice of the line buffer */
 	for (uint8_t r = 0; r < SARSAT_VIS_ROWS; r++)
@@ -626,6 +640,7 @@ void APP_RunSarsat(void)
 	gSarsatShowRequest = false;
 	s_view             = 0;      /* always open on the decode, not the level view */
 	s_dirty            = true;
+	s_new_flash        = 0;      /* this frame triggered the popup itself, no flag needed */
 	s_screen_open      = true;
 	SARSAT_ReplyStatus();        /* let the C-Board know the screen state early */
 
@@ -642,6 +657,8 @@ void APP_RunSarsat(void)
 		while (UART_IsCommandAvailable(UART_PORT_UART))
 			UART_HandleCommand(UART_PORT_UART);
 #endif
+		if (s_new_flash && --s_new_flash == 0 && s_view == 0)
+			s_dirty = true;      /* last tick: redraw once more to clear the flash */
 		if (s_dirty)
 		{
 			s_dirty = false;
@@ -689,8 +706,19 @@ void APP_RunSarsat(void)
 						s_dirty = true;
 						break;
 					}
-					SARSAT_Scroll(d);   /* pas de -d : confirme sur l'air (2026-10-10), un -d
-					                     * en plus ici inversait le sens pour le gain juste au-dessus */
+					/* Teste sur l'air le 2026-10-20 : contrairement a la vue
+					 * gain (ou "haut" doit suivre la compensation SET_NAV,
+					 * comme partout ailleurs dans ce firmware), le sens du
+					 * defilement NE DOIT PAS suivre SET_NAV -- la toute
+					 * premiere version (SARSAT_Scroll(d), d compense) etait
+					 * correcte sur UV-K1 mais inversee sur UV-K5 ; la
+					 * tentative suivante (SARSAT_Scroll(-d)) a corrige
+					 * l'UV-K5 mais inverse l'UV-K1 a son tour -- preuve que
+					 * la touche physique UP/DOWN mappe directement et
+					 * identiquement au sens de defilement sur les deux
+					 * boitiers, sans rapport avec SET_NAV. On ignore donc
+					 * `d` ici et on relit la touche brute. */
+					SARSAT_Scroll(key == KEY_UP ? -1 : +1);
 					break;
 				}
 				case KEY_5:

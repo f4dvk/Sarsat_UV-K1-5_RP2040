@@ -1360,17 +1360,20 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
     }
 }
 
-/* SetNav (menu Service) : confirme sur l'air (2026-10-10) que cet ecran,
- * contrairement au menu principal/scanner/spectrum (qui lisent les touches
- * via un chemin deja compense pour l'UV-K1), lit KEYBOARD_Poll() a travers
- * la boucle bloquante de APP_RunAprs() -- deja compensee en amont pour ce
- * boitier. Inverser ICI EN PLUS, quand SET_NAV est faux (defaut UV-K1),
- * annulait la compensation au lieu de l'appliquer -- d'ou le sens de
- * defilement inverse remonte par l'utilisateur. N'inverser que lorsque
- * SET_NAV est VRAI (K5, qui n'a pas besoin de cette compensation amont). */
+/* SetNav (menu Service) : correction du 2026-10-19 (utilisateur : "les
+ * touches up/down sont inversees dans le menu APRS"). La version precedente
+ * de cette fonction inversait quand SET_NAV etait VRAI -- l'oppose de la
+ * convention suivie PARTOUT ailleurs dans ce firmware : sarsat.c, sonde.c
+ * (`if (!gEeprom.SET_NAV) d = -d;`), scanner.c, app/menu.c, fm.c, main.c,
+ * aircopy.c, foxhunt.c et apps/app_overlay.c (`gEeprom.SET_NAV ? direction :
+ * -direction`) inversent tous quand SET_NAV est FAUX (defaut UV-K1, dont les
+ * touches physiques UP/DOWN sont etiquetees LEFT/RIGHT) et ne touchent a
+ * rien quand SET_NAV est VRAI (K5). KEYBOARD_Poll() lui-meme ne lit jamais
+ * SET_NAV (verifie) : il n'existe pas de "chemin deja compense" en amont --
+ * chaque ecran fait sa propre compensation, et celle-ci etait a l'envers. */
 static KEY_Code_t nav_key(KEY_Code_t k)
 {
-    if (!gEeprom.SET_NAV || (k != KEY_UP && k != KEY_DOWN))
+    if (gEeprom.SET_NAV || (k != KEY_UP && k != KEY_DOWN))
         return k;
     return (k == KEY_UP) ? KEY_DOWN : KEY_UP;
 }
