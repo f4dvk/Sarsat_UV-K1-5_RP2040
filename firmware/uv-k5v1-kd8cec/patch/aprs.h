@@ -28,7 +28,10 @@
                                      * FCS -- we append it and key up on
                                      * channel 170, same as our own beacon)    */
 
-enum { APRS_PATH_NONE, APRS_PATH_W1, APRS_PATH_W2, APRS_PATH_W1W2, APRS_PATH_N };
+/* APRS_PATH_W2_2 appended at the end, not inserted among the others: gAprsCfg
+ * (this field included) is persisted as a raw byte dump -- reordering would
+ * silently reinterpret an already-saved .path value from an older firmware. */
+enum { APRS_PATH_NONE, APRS_PATH_W1, APRS_PATH_W2, APRS_PATH_W1W2, APRS_PATH_W2_2, APRS_PATH_N };
 
 /* The tracker always transmits on this fixed MR channel (170, 1-based / 169
  * 0-based), never on whatever VFO A/B happen to be tuned to -- same channel
@@ -120,6 +123,7 @@ void APRS_Beacon(void);               /* build + transmit one position frame */
 void APRS_TimeSlice(void);            /* call ~1/s from the main loop        */
 void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size);
 void APP_RunAprs(void);               /* blocking config / status screen     */
+void APP_RunGps(void);                /* blocking GPS info screen (GPS-RP)   */
 void APRS_ApplyAfGain(void);          /* push gAprsCfg.af_gain to BK4819 REG_48 */
 void APRS_ResyncAfGainKnob(void);     /* call before APRS_ApplyAfGain() at screen
                                        * entry, so "auto" tracks the knob as of

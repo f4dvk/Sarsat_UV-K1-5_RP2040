@@ -35,6 +35,14 @@ static uint8_t  s_proto;
 static bool     s_dirty;
 static bool     s_screen_open;     /* APP_RunSarsat() is running           */
 
+/* ~1 s header flash (loop is ~20 ms/iter) when a new frame arrives while
+ * this screen is already open, so the user notices a fresh decode instead
+ * of mistaking it for the one they were already reading. Not set on the
+ * frame that triggers the auto-popup itself (SARSAT_CMD_CLEAR arrives
+ * before s_screen_open goes true then). Ported from f4hwn-v6 (2026-10-22). */
+#define SARSAT_NEWFLASH_TICKS 50u
+static uint8_t  s_new_flash;
+
 static uint8_t  s_view;            /* 0 = beacon text, 1 = audio level    */
 static struct {
 	uint16_t peak, rms, dc, amin, amax;
@@ -119,6 +127,8 @@ void SARSAT_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 			s_nlines  = 0;
 			s_scroll  = 0;
 			s_dirty   = true;
+			if (s_screen_open)
+				s_new_flash = SARSAT_NEWFLASH_TICKS;
 			const uint8_t ok = 0;
 			SARSAT_Reply(SARSAT_CMD_CLEAR | 0x8000u, &ok, 1);
 			break;
@@ -292,7 +302,15 @@ static void SARSAT_Draw(void)
 		        last < s_nlines ? 'v' : ' ');
 	}
 	UI_PrintStringSmallNormal(hdr, 1, 0, 0);
-	SARSAT_Hilite(0, hdr);
+	/* Header is normally always inverted (see the ENABLE_SMALL_BOLD=0 note
+	 * above) -- there is no plain "bold" state left to escalate to for a
+	 * new-frame flash, so this briefly does the opposite: skip the
+	 * highlight for ~1 s, so the header looks plain instead of its usual
+	 * inverted self, a visible blip either way. Ported from f4hwn-v6's
+	 * inverse-video flash (2026-10-22), adapted to this header's own
+	 * always-on highlight. */
+	if (!s_new_flash)
+		SARSAT_Hilite(0, hdr);
 
 	/* rows 1..SARSAT_VIS_ROWS: the visible slice of the line buffer */
 	for (uint8_t r = 0; r < SARSAT_VIS_ROWS; r++)
@@ -407,6 +425,7 @@ void APP_RunSarsat(void)
 	gSarsatShowRequest = false;
 	s_view             = 0;      /* always open on the decode, not the level view */
 	s_dirty            = true;
+	s_new_flash        = 0;      /* this frame triggered the popup itself, no flag needed */
 	s_screen_open      = true;
 	SARSAT_ReplyStatus();        /* let the C-Board know the screen state early */
 
@@ -424,6 +443,8 @@ void APP_RunSarsat(void)
 		while (UART_IsCommandAvailable())
 			UART_HandleCommand();
 #endif
+		if (s_new_flash && --s_new_flash == 0 && s_view == 0)
+			s_dirty = true;      /* last tick: redraw once more to clear the flash */
 		if (s_dirty)
 		{
 			s_dirty = false;

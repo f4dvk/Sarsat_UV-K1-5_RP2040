@@ -36,6 +36,9 @@ static const struct { const char *name; void (*run)(void); } RP_ITEMS[] = {
 #ifdef ENABLE_SONDE
     { "SONDE-RP",  &APP_RunSonde  },
 #endif
+#ifdef ENABLE_APRS
+    { "GPS-RP",    &APP_RunGps    },
+#endif
 };
 #define RP_N (sizeof(RP_ITEMS) / sizeof(RP_ITEMS[0]))
 

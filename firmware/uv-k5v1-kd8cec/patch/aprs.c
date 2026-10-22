@@ -309,6 +309,8 @@ static struct {
     uint16_t speed_kmh, course;
     int16_t  alt;
     uint8_t  sats;
+    uint8_t  utc_h, utc_m, utc_s;   /* 0:0:0 until a RP2040 new enough to send
+                                     * them has ever done so (size >= 19)     */
     uint32_t at_10ms;
 } s_gps;
 
@@ -467,6 +469,7 @@ static int APRS_Digi(ax25_addr_t *d)
     case APRS_PATH_W1W2:
         strcpy(d[0].call, "WIDE1"); d[0].ssid = 1;
         strcpy(d[1].call, "WIDE2"); d[1].ssid = 1; return 2;
+    case APRS_PATH_W2_2: strcpy(d[0].call, "WIDE2"); d[0].ssid = 2; return 1;
     default: return 0;
     }
 }
@@ -1220,6 +1223,11 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
         s_gps.course    = (uint16_t)rd16(data + 11);
         s_gps.alt       = rd16(data + 13);
         s_gps.sats      = (size >= 16) ? data[15] : 0;
+        if (size >= 19) {                      /* UTC time, appended 2026-10-22 */
+            s_gps.utc_h = data[16];
+            s_gps.utc_m = data[17];
+            s_gps.utc_s = data[18];
+        }
         s_gps.at_10ms   = millis10();
         return;
     }
@@ -1245,8 +1253,8 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 }
 
 /* ---------------------------------------------------------- config screen  */
-enum { F_CALL, F_SSID, F_PATH, F_SYM, F_TEXT, F_INT, F_POPUP, F_AFGAIN, F_SQL,
-       F_BLIGHT, F_BATTXT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_SENDB, F_KISS, F_N };
+enum { F_CALL, F_SSID, F_PATH, F_SYM, F_TEXT, F_BATTXT, F_INT, F_POPUP, F_AFGAIN, F_SQL,
+       F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_SENDB, F_KISS, F_N };
 
 /* T9-style multi-tap entry (2026-10-11; replaces the original UP/DOWN
  * "cycle through every character" editing -- it left no way to go back and
@@ -1270,14 +1278,14 @@ static const char *t9_group(KEY_Code_t key, bool txt, bool addr)
         " 0", "1", "ABC2", "DEF3", "GHI4", "JKL5", "MNO6", "PQRS7", "TUV8", "WXYZ9"
     };
     if (key == KEY_1) {
-        if (txt)  return "-_./+1";     /* comment: the extra TEXTSET punctuation */
+        if (txt)  return "-_./+*1";    /* comment: the extra TEXTSET punctuation */
         if (addr) return "-1";         /* message "To": ADDRSET's only punctuation */
         return "1";                    /* callsign: no punctuation at all */
     }
     return G[key - KEY_0];
 }
 
-static const char *const PATHS[] = { "none", "WIDE1-1", "WIDE2-1", "WIDE1+2" };
+static const char *const PATHS[] = { "none", "WIDE1-1", "WIDE2-1", "WIDE1+2", "WIDE2-2" };
 /* a few common symbols: code, label */
 static const struct { char t, c; const char *n; } SYMS[] = {
     { '/', '>', "car"    }, { '/', '-', "house"  }, { '/', 'k', "truck" },
@@ -2216,6 +2224,117 @@ void APP_RunAprs(void)
     /* "light on frame" + this was an auto-popup: dim ~1 s after it closed */
     s_bl_off_10ms = (popup && (gAprsCfg.opts & APRS_OPT_BL_DECODE))
                         ? millis10() + 100 : 0;
+
+    GUI_SelectNextDisplay(DISPLAY_MAIN);
+    gUpdateDisplay = true;
+    gUpdateStatus  = true;
+}
+
+/* ------------------------------------------------------- GPS-RP screen  */
+/* "*e5" = degrees * 1e5 (the s_gps.lat_e5/lon_e5 unit). dms: false = decimal
+ * degrees ("N48.11730"), true = degrees/minutes/seconds ("N48 07'02\"").
+ * Integer-only, same style as coord_e5() on the RP2040 side (gps_nmea.c). */
+static void gps_fmt_coord(int32_t e5, bool is_lat, bool dms, char *out)
+{
+    const char hemi = is_lat ? (e5 < 0 ? 'S' : 'N') : (e5 < 0 ? 'W' : 'E');
+    uint32_t   a    = (uint32_t)(e5 < 0 ? -e5 : e5);   /* |degrees| * 1e5 */
+
+    if (!dms) {
+        sprintf(out, "%c%u.%05u", hemi, a / 100000u, a % 100000u);
+        return;
+    }
+    uint32_t deg  = a / 100000u;
+    uint32_t m_e5 = (a % 100000u) * 60u;               /* minutes * 1e5 */
+    uint32_t minw = m_e5 / 100000u;
+    /* whole seconds only, rounded -- a decimal would push a 3-digit
+     * longitude past the 18-glyph line budget; not a precision loss that
+     * matters on a status screen fed by a consumer GPS (~a few m). */
+    uint32_t secw = ((m_e5 % 100000u) * 60u + 50000u) / 100000u;
+    if (secw >= 60) { secw -= 60; minw++; }
+    if (minw >= 60) { minw -= 60; deg++;  }
+    sprintf(out, "%c%u %02u'%02u\"", hemi, deg, minw, secw);
+}
+
+static void gps_draw(bool dms)
+{
+    char s[24];
+    UI_DisplayClear();
+    UI_PrintStringSmallBold("GPS", 2, 0, 0);
+
+    if (!s_gps.seen) {
+        UI_PrintStringSmallNormal("No GPS module", 2, 0, 1);
+        ST7565_BlitFullScreen();
+        return;
+    }
+
+    const bool fresh = (int32_t)(millis10() - s_gps.at_10ms) < 1500; /* 15 s */
+    sprintf(s, "UTC   %02u:%02u:%02u", s_gps.utc_h, s_gps.utc_m, s_gps.utc_s);
+    UI_PrintStringSmallNormal(s, 2, 0, 1);
+    sprintf(s, "Sats  %u%s", s_gps.sats, fresh ? "" : " (old)");
+    UI_PrintStringSmallNormal(s, 2, 0, 2);
+
+    if (s_gps.valid && fresh) {
+        char c[16];
+        gps_fmt_coord(s_gps.lat_e5, true, dms, c);
+        sprintf(s, "Lat   %s", c);
+        UI_PrintStringSmallNormal(s, 2, 0, 3);
+        gps_fmt_coord(s_gps.lon_e5, false, dms, c);
+        sprintf(s, "Lon   %s", c);
+        UI_PrintStringSmallNormal(s, 2, 0, 4);
+        sprintf(s, "Alt   %d m", (int)s_gps.alt);
+        UI_PrintStringSmallNormal(s, 2, 0, 5);
+    } else {
+        UI_PrintStringSmallNormal("No fix", 2, 0, 3);
+    }
+
+    UI_PrintStringSmallNormal(dms ? "* : deg.decimal" : "* : deg min sec",
+                               2, 0, 6);
+    ST7565_BlitFullScreen();
+}
+
+/* Purely informational: reads the GPS fix the C-Board already streams for
+ * the beacon/top-bar symbol (s_gps, above), touches no VFO/RX setting, so
+ * unlike APRS-RP/SARSAT-RP/SONDE-RP there is nothing to borrow or restore.
+ * Still drains UART and blocks the main tick like every other RP screen, so
+ * it must refresh the backlight/keypad-lock timers itself and hand the
+ * display back to DISPLAY_MAIN on the way out. Manual-only (F+7 "GPS-RP" in
+ * rp_menu.c), no auto-popup trigger. Ported from f4hwn-v6 (2026-10-22). */
+void APP_RunGps(void)
+{
+    static bool dms;   /* * toggles; remembered across re-opens this session */
+    bool         dirty    = true;
+    KEY_Code_t   prev_key = KEY_INVALID;
+    bool         armed    = false;
+    bool         run      = true;
+    uint16_t     tick_1s  = 0;   /* redraw every ~1 s (loop is ~20 ms/iter) so
+                                  * the UTC clock and "(old)" staleness flag
+                                  * visibly advance, not just on a key press */
+
+    while (run)
+    {
+#ifdef ENABLE_UART
+        while (UART_IsCommandAvailable())
+            UART_HandleCommand();
+#endif
+        if (++tick_1s >= 50) { tick_1s = 0; dirty = true; }
+        if (dirty) { dirty = false; gps_draw(dms); }
+
+        const KEY_Code_t key = KEYBOARD_Poll();
+        if (key == KEY_INVALID) {
+            armed = true;
+        } else if (armed && key != prev_key) {
+            switch (key) {
+            case KEY_STAR: dms = !dms; dirty = true; break;
+            case KEY_EXIT: run = false;               break;
+            default: break;
+            }
+        }
+        prev_key = key;
+
+        BACKLIGHT_TurnOn();
+        gKeyLockCountdown = 30;
+        SYSTEM_DelayMs(20);
+    }
 
     GUI_SelectNextDisplay(DISPLAY_MAIN);
     gUpdateDisplay = true;
