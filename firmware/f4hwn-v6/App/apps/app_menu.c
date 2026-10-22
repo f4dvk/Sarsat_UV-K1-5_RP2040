@@ -249,7 +249,7 @@ _Static_assert(APP_MENU_SLOT_COUNT <= UINT8_MAX,
                "app menu slot indexes exceed uint8_t");
 
 /* Entrees integrees (notre RP2040) en TETE de liste : A APRS-RP, B SARSAT-RP,
- * C SSTV-RP, D SONDE-RP. Les emplacements d'overlay suivent (leur numero
+ * C SSTV-RP, D SONDE-RP, E GPS-RP. Les emplacements d'overlay suivent (leur numero
  * physique ne change pas, donc le telechargement des applications ne deplace
  * rien). Ces entrees n'ont pas de "slot" physique : elles sont toujours
  * presentes et toujours en premier, independamment de app_scan_slots(). */
@@ -277,7 +277,15 @@ _Static_assert(APP_MENU_SLOT_COUNT <= UINT8_MAX,
 #else
 #define APP_MENU_EXTRA_SONDE 0u
 #endif
-#define APP_MENU_RP_COUNT    (APP_MENU_EXTRA_APRS + APP_MENU_EXTRA_SARSAT + APP_MENU_EXTRA_SSTV + APP_MENU_EXTRA_SONDE)
+/* GPS-RP reuses the GPS fix the C-Board already streams for APRS (s_gps in
+ * aprs.c) -- same ENABLE_APRS gate, no separate feature flag. */
+#ifdef ENABLE_APRS
+#define APP_MENU_GPS_IDX     (APP_MENU_EXTRA_APRS + APP_MENU_EXTRA_SARSAT + APP_MENU_EXTRA_SSTV + APP_MENU_EXTRA_SONDE)
+#define APP_MENU_EXTRA_GPS   1u
+#else
+#define APP_MENU_EXTRA_GPS   0u
+#endif
+#define APP_MENU_RP_COUNT    (APP_MENU_EXTRA_APRS + APP_MENU_EXTRA_SARSAT + APP_MENU_EXTRA_SSTV + APP_MENU_EXTRA_SONDE + APP_MENU_EXTRA_GPS)
 
 static uint8_t app_scan_slots(uint8_t slots[APP_MENU_SLOT_COUNT])
 {
@@ -308,6 +316,9 @@ static void app_run_rp_entry(uint8_t item)
 #ifdef ENABLE_SONDE
     if (item == APP_MENU_SONDE_IDX) { APP_RunSonde(); return; }
 #endif
+#ifdef ENABLE_APRS
+    if (item == APP_MENU_GPS_IDX) { APP_RunGps(); return; }
+#endif
     (void)item;
 }
 
@@ -332,6 +343,10 @@ static void app_draw_rp_entry(uint8_t item, uint8_t fbLine)
 #ifdef ENABLE_SONDE
     if (item == APP_MENU_SONDE_IDX)
     { UI_PrintStringSmallNormal("SONDE-RP", APP_NAME_TEXT_X, 0, fbLine); return; }
+#endif
+#ifdef ENABLE_APRS
+    if (item == APP_MENU_GPS_IDX)
+    { UI_PrintStringSmallNormal("GPS-RP", APP_NAME_TEXT_X, 0, fbLine); return; }
 #endif
 }
 

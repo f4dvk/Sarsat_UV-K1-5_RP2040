@@ -31,7 +31,11 @@
                                      * FCS -- we append it and key up on
                                      * channel 170, same as our own beacon)    */
 
-enum { APRS_PATH_NONE, APRS_PATH_W1, APRS_PATH_W2, APRS_PATH_W1W2, APRS_PATH_N };
+/* APRS_PATH_W2_2 appended at the end, not inserted among the others: gAprsCfg
+ * (this field included) is persisted as a raw byte dump (see APRS_Save()/
+ * APRS_Init()) -- reordering would silently reinterpret an already-saved
+ * .path value from an older firmware. */
+enum { APRS_PATH_NONE, APRS_PATH_W1, APRS_PATH_W2, APRS_PATH_W1W2, APRS_PATH_W2_2, APRS_PATH_N };
 
 /* Same fixed MR channel (170, 1-based / 169 0-based) and convention as the
  * V1 port and KD8CEC's own C-Board project -- see app/afgain.h for why a
@@ -122,6 +126,7 @@ void APRS_TimeSlice(void);            /* call every ~10 ms from the main tick,
                                        * blink -- same as the V1 port.       */
 void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size);
 void APP_RunAprs(void);               /* blocking config / status screen     */
+void APP_RunGps(void);                /* blocking GPS info screen (GPS-RP)   */
 void APRS_SaveConfig(void);           /* persist gAprsCfg to EEPROM          */
 bool APRS_QuietBacklight(void);       /* true => suppress the RX-squelch backlight */
 void APRS_ApplySquelch(void);         /* APRS-band fast-squelch tweak (from tick) */
