@@ -21,6 +21,7 @@ typedef struct {
     uint16_t course_deg;   /* true course over ground, 0..359                 */
     int16_t  alt_m;        /* MSL altitude, m (from GGA; 0 until first GGA)   */
     uint8_t  sats;         /* satellites used (from GGA)                      */
+    uint8_t  utc_h, utc_m, utc_s;  /* UTC time of fix, from RMC's time field  */
     uint32_t seq;          /* bumped on every accepted RMC — lets the caller
                             * tell "fresh fix" from "same fix repeated"       */
 } gps_fix_t;

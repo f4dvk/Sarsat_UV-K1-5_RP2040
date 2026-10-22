@@ -81,6 +81,19 @@ static int split(char *body, char **f, int max)
     return n;
 }
 
+/* "hhmmss" or "hhmmss.ss" -> fix.utc_h/m/s. Left untouched (not zeroed) on a
+ * short/non-numeric field: a receiver that still knows the time of day
+ * without a fix yet should not have that overwritten by a malformed field. */
+static void parse_utc(gps_fix_t *fx, const char *s)
+{
+    if (strlen(s) < 6) return;
+    for (int i = 0; i < 6; i++)
+        if (s[i] < '0' || s[i] > '9') return;
+    fx->utc_h = (uint8_t)((s[0] - '0') * 10 + (s[1] - '0'));
+    fx->utc_m = (uint8_t)((s[2] - '0') * 10 + (s[3] - '0'));
+    fx->utc_s = (uint8_t)((s[4] - '0') * 10 + (s[5] - '0'));
+}
+
 static void do_rmc(gps_t *g, char **f, int nf)
 {
     /* 0:RMC 1:time 2:status 3:lat 4:N/S 5:lon 6:E/W 7:knots 8:course ... */
@@ -88,6 +101,8 @@ static void do_rmc(gps_t *g, char **f, int nf)
     bool a = (f[2][0] == 'A');
     g->fix.valid = a;
     g->fix.seq++;
+    parse_utc(&g->fix, f[1]);      /* a receiver can know the time without a
+                                     * fix yet -- extract it regardless of a */
     if (!a) return;
 
     bool ok1 = false, ok2 = false;

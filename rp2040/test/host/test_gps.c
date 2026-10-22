@@ -34,6 +34,7 @@ int main(void)
         chk("course 84",        g.fix.course_deg == 84);
         chk("sats 8",           g.fix.sats == 8);
         chk("alt 545",          g.fix.alt_m == 545);
+        chk("utc 12:35:19",     g.fix.utc_h == 12 && g.fix.utc_m == 35 && g.fix.utc_s == 19);
     }
 
     /* southern hemisphere, GN talker */
@@ -54,6 +55,8 @@ int main(void)
         feed(&g, "$GPRMC,123520,V,,,,,,,230394,,,N*5B\r\n");
         chk("V status -> not valid", !g.fix.valid);
         chk("seq advanced",         g.fix.seq == 1);
+        chk("utc still extracted without a fix",
+            g.fix.utc_h == 12 && g.fix.utc_m == 35 && g.fix.utc_s == 20);
     }
 
     /* fragmented byte stream + leading garbage -> resync on '$' */

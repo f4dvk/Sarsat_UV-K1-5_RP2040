@@ -1260,7 +1260,7 @@ static void gps_push_to_radio(void)
     if (!gps_present())               /* no module talking -> stay silent    */
         return;
     const bool ok = gps_have_fix();
-    uint8_t p[16];
+    uint8_t p[19];
     p[0] = ok ? 1 : 0;
     aprs_put_i32(p + 1, ok ? g_gps.fix.lat_e5 : 0);
     aprs_put_i32(p + 5, ok ? g_gps.fix.lon_e5 : 0);
@@ -1268,6 +1268,9 @@ static void gps_push_to_radio(void)
     aprs_put_u16(p + 11, g_gps.fix.course_deg);
     aprs_put_u16(p + 13, (uint16_t)g_gps.fix.alt_m);
     p[15] = g_gps.fix.sats;
+    p[16] = g_gps.fix.utc_h;      /* appended, not inserted: radio side guards */
+    p[17] = g_gps.fix.utc_m;      /* older/shorter frames with a size check    */
+    p[18] = g_gps.fix.utc_s;
     radio_send(CMD_APRS_GPS, p, sizeof p);
 }
 #endif /* CFG_GPS_ENABLE */
