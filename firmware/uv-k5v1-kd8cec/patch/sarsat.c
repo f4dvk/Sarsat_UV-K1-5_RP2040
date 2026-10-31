@@ -54,6 +54,21 @@ bool gSarsatShowRequest;
 /* made non-static by patch/app_uart.c.diff */
 extern void SendReply(void *pReply, uint16_t Size);
 
+extern uint32_t millis10(void);     /* scheduler.c (via ceccommon), 10 ms tick */
+
+/* C-Board link presence: see SARSAT_ModulePresent(). 12 s = 2+ missed
+ * SARSAT_CMD_HELLO keepalives (one every ~5 s), same margin as f4hwn-v6's
+ * port of this same mechanism. */
+#define SARSAT_LINK_TIMEOUT_10MS 1200u
+static bool     s_ever_seen;
+static uint32_t s_last_rx_tick10ms;
+
+bool SARSAT_ModulePresent(void)
+{
+	return s_ever_seen &&
+	       (int32_t)(millis10() - s_last_rx_tick10ms) < (int32_t)SARSAT_LINK_TIMEOUT_10MS;
+}
+
 /* Phase 2: answer the RP2040. Reply ID = command | 0x8000, payload = data. */
 static void SARSAT_Reply(uint16_t reply_id, const uint8_t *data, uint8_t dlen)
 {
@@ -110,6 +125,9 @@ static void SARSAT_ReplyStatus(void)
 
 void SARSAT_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 {
+	s_ever_seen        = true;
+	s_last_rx_tick10ms = millis10();
+
 	/* The C-Board's UART TX toggling the radio's mic/data line can register as
 	 * a brief PTT on a TX-capable band (seen as a few-ms key-up right after an
 	 * APRS decode on 144.8). Holding SerialConfigInProgress() for ~1 s over the

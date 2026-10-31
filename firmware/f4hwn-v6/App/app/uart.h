@@ -38,6 +38,10 @@ void UART_ServiceCommands(void);
 void UART_SendAircopy(const uint16_t *data, uint8_t words);
 #endif
 
+#if defined(ENABLE_USB) && defined(ENABLE_FEAT_F4HWN_OVERLAY_APPS)
+extern uint16_t VCP_ReadIndex;   /* the command parser's VCP_RxBuf read index */
+#endif
+
 /* Envoi d une trame de reponse (AB CD | taille | ... | CRC | DC BA), voir uart.c */
 void SendReply(uint32_t Port, void *pReply, uint16_t Size);
 

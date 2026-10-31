@@ -61,8 +61,6 @@ static void app_status_bar(void)
 #define APP_NAME_BOX_END   102u
 #define APP_NAME_TEXT_X    21u
 
-static void app_wait_release(void);
-
 static void app_invert_name(uint8_t line)
 {
     gFrameBuffer[line][APP_NAME_BOX_START] ^= 0x7Fu;
@@ -110,7 +108,7 @@ static KEY_Code_t app_get_key(void)
             {
                 APP_ModalScreenSaverExit();
                 BACKLIGHT_TurnOn();
-                app_wait_release();
+                APP_WaitKeyRelease();
                 return KEY_INVALID;
             }
 
@@ -149,20 +147,6 @@ static KEY_Code_t app_get_key(void)
         else
             held = false;
         SYSTEM_DelayMs(10);
-    }
-}
-
-static void app_wait_release(void)
-{
-    uint8_t stable = 0;
-    while (stable < 10u)
-    {
-        if (!GPIO_IsPttPressed() && KEYBOARD_Poll() == KEY_INVALID)
-            stable++;
-        else
-            stable = 0;
-        SYSTEM_DelayMs(10);
-        APP_ModalBacklightTick(true);
     }
 }
 
@@ -383,7 +367,7 @@ void APP_MenuOpen(void)
     /* Right column: the code size, or the version after KEY_STAR. Kept across
      * menu openings, back to the size at power-on. */
     static bool show_version = false;
-    app_wait_release();
+    APP_WaitKeyRelease();
 
     for (;;)
     {
@@ -491,20 +475,25 @@ void APP_MenuOpen(void)
                 if (sel < APP_MENU_RP_COUNT)
                 {
                     app_run_rp_entry(sel);
-                    app_wait_release();
+                    APP_WaitKeyRelease();
                     break;
                 }
 
                 const uint8_t slot = installed_slots[sel - APP_MENU_RP_COUNT];
-                app_header_t hdr;
-                APP_SlotInfo(slot, &hdr);
                 const uint8_t rc = APP_LaunchOverlay(slot);  /* runs until the app exits */
-                if (rc != APP_OK)
+                /* The last app of a hand-off chain, not always the selected one:
+                 * a target that failed is named, and the app that ended the
+                 * chain picks the screen to return to. */
+                app_header_t hdr;
+                APP_SlotInfo(gAppLastSlot, &hdr);
+                if (rc != APP_OK && rc != APP_CHAIN_ABORTED)
                     app_show_error(&hdr, rc);               /* no longer silent */
-                app_wait_release();
+                APP_WaitKeyRelease();
                 /* Radio apps (BEAM, ...) hand back straight to the radio screen. */
-                if (rc == APP_OK && (hdr.flags & APP_FLAG_EXIT_TO_MAIN))
+                if (rc == APP_OK && ((hdr.flags & APP_FLAG_EXIT_TO_MAIN) | gAppVfoExit)) {
+                    gAppVfoExit = false;
                     return;
+                }
                 break;
             }
             default:

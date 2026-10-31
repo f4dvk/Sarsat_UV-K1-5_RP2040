@@ -51,10 +51,10 @@ static const AddrMapping_t ADDR_MAPPINGS[] = {
     _MK_MAPPING(0x008000, 0x008000, 0x00886E),  // 1024 MR  + 7 VFO Attributes * 2 Bytes (ex 0x002000) 0x008000 -> 0x00880E
                                                 // List name * 4 Bytes 0x00880E -> 0x00886E
 
-    _MK_MAPPING(0x009000, 0x009000, 0x0090E8),  // 14 VFO * 16 Bytes = 0x9000 -> 0x90E0 (the old
+    _MK_MAPPING(0x009000, 0x009000, 0x0090E9),  // 14 VFO * 16 Bytes = 0x9000 -> 0x90E0 (the old
                                                 // 0x90D6 bound was 10 B short: it truncated the
                                                 // 470 MHz VFO1 record at 0x90D0 -> 0x90DF)
-                                                // Fox Hunt / Beacon settings * 8 Bytes 0x90E0 -> 0x90E8
+                                                // Fox Hunt / Beacon settings * 9 Bytes 0x90E0 -> 0x90E9
                                                 // (written directly by app/foxhunt.c; concatenated
                                                 // here so aircopy clones them with the VFOs)
 
@@ -72,6 +72,10 @@ static const AddrMapping_t ADDR_MAPPINGS[] = {
                                                 // Settings Version * 16 Bytes              0x00A160 -> 0x00A170
                                                 // Settings Mixed Scan Lists * 8 Bytes      0x00A170 -> 0x00A178
 
+    _MK_MAPPING(0x00A178, 0x00A178, 0x00A1B0),  /* RP2040: config APRS (56 o) */
+    _MK_MAPPING(0x00A1C0, 0x00A1C0, 0x00A1C8),  /* RP2040: gain AF C-Board (8 o) */
+    _MK_MAPPING(0x00A1B0, 0x00A1B0, 0x00A1B8),  /* RP2040: selection image SSTV (8 o) */
+
     _MK_MAPPING(0x010000, 0x00B000, 0x00B200),  // Calibration 512 Bytes!!!
 
     _MK_MAPPING(0x011000, 0x00C000, 0x00D000),  // Boot Logo sector (4 KB):
@@ -85,9 +89,6 @@ static const AddrMapping_t ADDR_MAPPINGS[] = {
     // 0x018000 -> 0x020000: RX/TX append-only log * 32 KB / 8 sectors
     //                       (ENABLE_FEAT_F4HWN_RXTX_LOG, accessed directly
     //                       by app/rxtx_log.c, not through this layer)
-    _MK_MAPPING(0x00A178, 0x00A178, 0x00A1B0),  /* RP2040: config APRS (56 o) */
-    _MK_MAPPING(0x00A1C0, 0x00A1C0, 0x00A1C8),  /* RP2040: gain AF C-Board (8 o) */
-    _MK_MAPPING(0x00A1B0, 0x00A1B0, 0x00A1B8),  /* RP2040: selection image SSTV (8 o) */
 };
 
 static void AddrTranslate(uint16_t EEPROM_Addr, uint16_t Size, uint32_t *PY25Q16_Addr_out, uint16_t *Size_out, bool *End_out);

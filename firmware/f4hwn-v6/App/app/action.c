@@ -137,14 +137,14 @@ void (*const action_opt_table[ACTION_OPT_LEN])(void) = {
 #if defined(ENABLE_FEAT_F4HWN_BEACON) || defined(ENABLE_FEAT_F4HWN_OVERLAY_APPS)
     [ACTION_OPT_BEACON] = &ACTION_Beacon,
 #endif
+#ifdef ENABLE_FEAT_F4HWN_OVERLAY_APPS
+    [ACTION_OPT_TONECALL] = &ACTION_ToneCall,
+#endif
 #ifdef ENABLE_APRS
     [ACTION_OPT_APRS] = &APP_RunAprs,
 #endif
 #ifdef ENABLE_SARSAT
     [ACTION_OPT_SARSAT] = &APP_RunSarsat,
-#endif
-#ifdef ENABLE_FEAT_F4HWN_OVERLAY_APPS
-    [ACTION_OPT_TONECALL] = &ACTION_ToneCall,
 #endif
 };
 
@@ -525,7 +525,8 @@ void ACTION_Handle(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld)
 /* Open the overlay app holding a shortcut; double beep when none is installed. */
 static void ACTION_LaunchApp(uint8_t shortcut)
 {
-    if (APP_LaunchOverlayShortcut(shortcut) != APP_OK)
+    const uint8_t rc = APP_LaunchOverlayShortcut(shortcut);
+    if (rc != APP_OK && rc != APP_CHAIN_ABORTED)
         gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
 }
 #endif

@@ -201,11 +201,11 @@ extern enum BacklightOnRxTx_t gSetting_backlight_on_tx_rx;
     extern uint8_t            gSetting_set_tot;
     extern uint8_t            gSetting_set_ctr;
     extern bool               gSetting_set_inv;
-    extern bool               gSetting_set_af_inv;   /* REG_47 bit 13, menu AfInv */
     extern uint8_t            gSetting_set_eot;
     extern uint8_t            gSetting_set_lck;
     extern bool               gSetting_set_met;
     extern bool               gSetting_set_gui;
+    extern bool               gSetting_set_af_inv;   /* REG_47 bit 13, menu AfInv */
     #ifdef ENABLE_FEAT_F4HWN_AUDIO
         extern uint8_t            gSetting_set_audio_fm;
         extern uint8_t            gSetting_set_audio_am;
@@ -341,6 +341,7 @@ extern volatile bool         gTxTimeoutReached;
     #endif
     #ifdef ENABLE_FEAT_F4HWN_K5VIEWER
         extern volatile uint8_t  gUART_LockK5Viewer; // lock the K5Viewer stream if Chirp is used
+        #define K5VIEWER_LOCK_HELD 0xFFu              // held, no countdown: an overlay app owns the USB port
         extern bool gUSB_K5ViewerEnabled;
 
         bool K5VIEWER_IsLocked(void);

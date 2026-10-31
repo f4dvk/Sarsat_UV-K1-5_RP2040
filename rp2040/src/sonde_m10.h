@@ -176,6 +176,18 @@ typedef struct {
     bool has_position;
     int32_t lat_e5, lon_e5;
     int32_t alt_m;
+    /* Télémétrie (2026-10-30, d'après rs1729 m10m20mod.c) ; valeurs « n/a » :
+     * temp_c10 = INT16_MIN, rh_pct = 255, vh_dms = 0xFFFF, heading = 0xFFFF,
+     * sats = 255, hh = 255, sn[0] = 0. */
+    uint8_t  type;          /* 0x9F / 0xAF M10, 0x20 M20, 0 inconnu */
+    int16_t  temp_c10;      /* température extérieure, °C × 10 */
+    uint8_t  rh_pct;        /* humidité relative, % (M10 seulement) */
+    uint16_t vh_dms;        /* vitesse horizontale, 0,1 m/s */
+    int16_t  vv_dms;        /* vitesse verticale, 0,1 m/s (+ = montée) */
+    uint16_t heading_deg;   /* cap sol, degrés */
+    uint8_t  sats;          /* satellites (M10) */
+    uint8_t  hh, mm, ss;    /* heure GPS (TOW, UTC à l'offset près) */
+    char     sn[16];        /* numéro de série, chaîne (12 car. utiles) */
 } m10_gps_t;
 
 #define M20_FRAME_BYTES  70   /* M20Decoder.frameLen: frame[0]=0x45=69 payload
@@ -267,5 +279,88 @@ void sonde_m10_hunt_init(sonde_m10_hunt_t *h);
  * returns true with has_position false once the checksum rejects it).
  * Resets to hunting either way. */
 bool sonde_m10_hunt_feed(sonde_m10_hunt_t *h, uint8_t chip, int32_t cell_avg, m10_gps_t *out);
+
+
+/* ============================================================================
+ * Récepteur M10/M20 "à la rs1729" (2026-10-30) -- remplace la chaîne
+ * chipdemod + hunt ci-dessus pour les DONNÉES (la chasse d'en-tête par chips
+ * est conservée comme déclencheur).
+ *
+ * Diagnostic sur un enregistrement réel (32 kHz, 44 s, position connue) :
+ * la chaîne précédente verrouillait l'en-tête mais sortait des octets avec
+ * des bits isolés faux ("E4 9A 20 00" au lieu de "64 9F 20 00") : le
+ * premier bit était forcé à 1 au lieu de 0, et la décision chip par chip
+ * (PLL + moyenne de cellule) glissait de temps en temps. Le décodeur de
+ * référence (github.com/rs1729/RS, demod/mod/m10m20mod.c, GPL-3.0, réécrit
+ * ici d'après sa lecture) ne suit PAS d'horloge : après l'en-tête brut de
+ * 32 symboles, il intègre chaque symbole sur une durée FIXE (fs / 9615),
+ * décide chaque bit sur le signe (2e symbole - 1er symbole), décode en
+ * différentiel (bit de trame = 1 si le bit Manchester est égal au
+ * précédent, premier bit = 0) et valide par la somme de contrôle. Réécrit en
+ * Python sur l'enregistrement : 47 trames valides en 44 s. Ici : capture des
+ * échantillons bruts après le verrouillage, puis essai de 25 décalages
+ * (±12 échantillons, l'en-tête chips n'est aligné qu'à ±1 symbole) × 2
+ * débits (9615 M10, 9600 M20), la somme de contrôle tranche. Le décodage
+ * différentiel est insensible à la polarité du discriminateur ; l'en-tête
+ * est chassé dans les deux polarités.
+ *
+ * ATTENTION cadence : il faut la cadence ADC RÉELLE (ESP32-S3 : 2,5 MHz /
+ * entier, 80 000 demandé -> 80 645 Hz, +0,8 %), sinon 13 symboles de dérive
+ * sur une trame M10.
+ * ========================================================================== */
+#define M10_RX_MAX_BYTES    101                         /* trame M10 standard (0x64 + 1) ; M20 = 0x45 + 1 */
+#define M10_RX_MAX_SYMBOLS  (M10_RX_MAX_BYTES * 16)     /* 1616 symboles (2 par bit) */
+#define M10_RX_PREROLL      32                          /* échantillons gardés avant le verrouillage */
+#define M10_RX_BUF_SAMPLES  (M10_RX_MAX_SYMBOLS * 9 + M10_RX_PREROLL + 32 + 220)   /* fs/baud <= 9 (jusqu'à 86 kHz) */
+#define M10_RX_OFFSET_MAX   12                          /* décalages essayés autour du verrouillage : -12 .. +12 échantillons */
+#define M10_RX_OFFSET_FWD   12                          /* ... puis jusqu'à +220 (≈ 26 symboles) : la chasse par chips
+                                                         * se verrouille souvent trop tôt, sur le préambule périodique */
+
+#define M10_RX_CORR_RING    320                         /* >= 32 symboles × fs/baud (268 à 80,6 kHz) */
+#define M10_RX_CORR_THR     0.62f                       /* seuil sur corr²/(énergie × N) (= corrélation normalisée au carré).
+                                                         * Sur l'air (H28, 2026-10-30) : vraies trames 0,82, faux pics du
+                                                         * préambule alternant jusqu'à 0,61. À 0,50 : 290 pics / 45 s et
+                                                         * seulement 2 trames, chaque faux pic relançant la capture. */
+typedef struct {
+    float    fs;                       /* cadence d'échantillonnage réelle */
+    float    sps;                      /* échantillons par symbole (9615 Bd) */
+    /* corrélateur d'en-tête au niveau échantillon (voir sonde_m10.h, 2026-10-30) :
+     * somme glissante sur un symbole, anneau de ces sommes, 32 accumulations par
+     * échantillon ; normalisé par l'énergie sur la durée de l'en-tête. */
+    int      L;                        /* longueur d'un symbole (arrondi) */
+    int      N;                        /* longueur de l'en-tête en échantillons */
+    int      lag[M10_HEADER_CHIPS];
+    int16_t  xr[16];                   /* anneau des L derniers échantillons */
+    int      xi;
+    int32_t  box;                      /* somme des L derniers échantillons */
+    int32_t  boxring[M10_RX_CORR_RING];
+    int      bi;
+    int32_t  sqr[M10_RX_CORR_RING];    /* carrés des N derniers échantillons (>> 4) */
+    int      si;
+    int64_t  sq;                       /* énergie sur N échantillons */
+    float    prevScore;
+    int64_t  thrN;                     /* seuil entier : M10_RX_CORR_THR × 16 × N (test corr² > thrN × sq sans division) */
+    bool     capturing;
+    int      n, need;
+    int16_t  pre[M10_RX_PREROLL];      /* anneau des derniers échantillons (pré-roll) */
+    int      pre_i;
+    int16_t *buf;                      /* tampon de capture FOURNI (ex. le tampon SARSAT, libre en mode sonde) */
+    int      cap;                      /* sa capacité en échantillons (>= M10_RX_BUF_SAMPLES) */
+    uint8_t  frame[M10_RX_MAX_BYTES];
+    int      frame_len;                /* longueur validée (frame[0]), 0 si aucune */
+    int      last_off;
+    int      last_baud;
+    float    cap_score;                /* score du pic qui a lancé la capture en cours */
+    float    last_score;
+    float    max_score;                /* meilleur score vu depuis la dernière remise à zéro (diagnostic) */
+    uint32_t locks, frames_ok;
+} sonde_m10_rx_t;
+
+void sonde_m10_rx_init(sonde_m10_rx_t *rx, float sample_rate_hz, int16_t *buf, int cap);
+/* true = une capture vient d'être décodée (out->has_position si trame valide
+ * avec position ; rx->frame_len != 0 si la somme de contrôle est bonne). */
+bool sonde_m10_rx_sample(sonde_m10_rx_t *rx, int32_t sample, m10_gps_t *out);
+/* Décodage du tampon capturé (hôte / tests). */
+bool sonde_m10_rx_decode(sonde_m10_rx_t *rx, m10_gps_t *out);
 
 #endif /* SONDE_M10_H */

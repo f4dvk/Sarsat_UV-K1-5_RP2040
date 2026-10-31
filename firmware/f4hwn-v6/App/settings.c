@@ -529,7 +529,11 @@ gEeprom.FreqChannel[1]   = IS_FREQ_CHANNEL(Data16[5]) ? Data16[5] : (FREQ_CHANNE
 
 #ifdef ENABLE_FEAT_F4HWN_CTR
         int ctr_value = Data[5] & 0x0F;
-        gSetting_set_ctr = (ctr_value > 0 && ctr_value < 16) ? ctr_value : 10;
+        /* < 16 -> < 15 (bug F4HWN amont, present en v6.2.0 et v6.3.0) : sur
+         * une EEPROM vierge/effacee, Data[5]=0xFF donne ctr_value=0x0F (15),
+         * qui passait pour une valeur deja reglee -- un poste neuf demarrait
+         * donc a 15, pas au vrai defaut 10 (seul 0 tombait dans l'else). */
+        gSetting_set_ctr = (ctr_value > 0 && ctr_value < 15) ? ctr_value : 10;
 #else
         gSetting_set_ctr = 10;
 #endif

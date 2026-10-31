@@ -2182,6 +2182,7 @@ void APP_RunAprs(void)
         prev = k;
         dirty = true;
         close_at = 0;                         /* a key cancels the auto-close */
+        const KEY_Code_t raw_key = k;         /* field-to-field move: see below */
         k = nav_key(k);                       /* UV-K1 SetNav (see nav_key()) */
 
         /* This loop blocks the main task, whose backlight and auto-keypad-lock
@@ -2233,7 +2234,16 @@ void APP_RunAprs(void)
         }
 
         if (!editing) {
-            switch (k) {
+            /* raw_key, not k/nav_key() (2026-10-26) : neither "k" nor
+             * "swap(k)" worked for UP/DOWN on both UV-K1 and UV-K5 --
+             * field-to-field movement is a list cursor, not a value edit,
+             * same lesson as sarsat.c's text scroll. app_menu.c's own F+7
+             * list (confirmed correct on both boitiers) uses the bare
+             * physical key with no SET_NAV compensation at all; mirrored
+             * here. Every other key here is unaffected: nav_key() only
+             * ever swaps KEY_UP<->KEY_DOWN, so raw_key == k for all of
+             * them. */
+            switch (raw_key) {
             case KEY_UP:   sel = (sel + F_N - 1) % F_N; break;
             case KEY_DOWN: sel = (sel + 1) % F_N;       break;
             case KEY_MENU:

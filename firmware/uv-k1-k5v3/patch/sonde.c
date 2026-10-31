@@ -294,6 +294,18 @@ static void SONDE_ApplyRxProfile(bool dsc)
 	 * patch is ever reverted upstream; it now calls into the same toggle
 	 * rather than duplicating the formula. */
 	BK4819_SetAF(BK4819_AF_FM);
+	/* 2026-10-30 -- LA cause des "en-tête verrouillé mais jamais de somme de
+	 * contrôle valide" de toute l'histoire ci-dessus : AF select 1 (FM) garde
+	 * le FILTRE DE PAROLE du BK4819 (coupure nette ~3 kHz, mesurée depuis
+	 * UVLink sur l'audio du jack : les symboles courts du biphase 9615 Bd, à
+	 * 4,8 kHz, disparaissent). L'appli "Sonde M10" du firmware amont
+	 * (App/apps/sondem10, validée sur le terrain) écrit REG_47 = 0x6942 :
+	 * AF select 9, "bypasses the speech filter, too narrow for 9615 chips/s",
+	 * coupe l'AFC (REG_73 bit 4) et met la FI large REG_43 = 0x7E2C. Reproduit
+	 * dans le mode hôte H28 de benshi-esp32-sim : 50 trames M10 sur 51 pics en
+	 * 45 s sur l'air. On fait pareil ici (écrit APRES BK4819_SetAF, qui
+	 * remettrait AF 1). */
+	BK4819_WriteRegister(BK4819_REG_47, 0x6942);
 	/* TRIED and REVERTED (2026-09-15): AFC forced OFF here, to test against
 	 * real M10 captures (tools/decode_m10_pc.py, off the radio's own audio,
 	 * independent of the RP2040/ADC) locking the header but never validating
@@ -308,9 +320,9 @@ static void SONDE_ApplyRxProfile(bool dsc)
 	 * the stock DSC/RAW behaviour before this test. The drift itself is
 	 * still real and unexplained -- next guess should be a different
 	 * variable, not AFC again. */
-	BK4819_SetRegValue(afcDisableRegSpec, false);
+	BK4819_SetRegValue(afcDisableRegSpec, true);    /* 2026-10-30 : AFC coupe, comme l'appli amont (REG_73 bit 4) */
 	BK4819_WriteRegister(BK4819_REG_3D, 0x2AAB);
-	BK4819_WriteRegister(BK4819_REG_43, 0x3628);   /* back to 7.0 kHz, wider never helped -- see note above */
+	BK4819_WriteRegister(BK4819_REG_43, 0x7E2C);   /* 2026-10-30 : FI large "profil M20/M10" de l'appli amont (etait 0x3628) */
 
 	/* ⚠️ NEW (2026-09-16, sur retour explicite -- "tu peux tester") : REG_54/
 	 * REG_55 ("300Hz AF Response coefficient for Rx" au datasheet Beken) ne

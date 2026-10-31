@@ -7,6 +7,11 @@
 #include "sonde_m10.h"
 
 #include <string.h>
+#include <math.h>
+#include <stdio.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define M10_SLICE_MIN 8   /* same floor as sonde_demod.c's SONDE_SLICE_MIN */
 
@@ -246,7 +251,9 @@ static void bits_to_bytes_msb(const uint8_t *bits, int nbits, uint8_t *out)
     }
 }
 
-#define M10_MAX_HDR_ERR 2   /* out of 32 chips (~6%) */
+#ifndef M10_MAX_HDR_ERR
+#define M10_MAX_HDR_ERR 4   /* sur 32 chips ; un faux verrouillage ne coûte qu'une capture rejetée par la somme de contrôle */
+#endif
 
 bool sonde_m10_hunt_feed(sonde_m10_hunt_t *h, uint8_t chip, int32_t cell_avg, m10_gps_t *out)
 {
@@ -329,5 +336,245 @@ bool sonde_m10_hunt_feed(sonde_m10_hunt_t *h, uint8_t chip, int32_t cell_avg, m1
         if (!out->has_position)
             sonde_m20_parse_gps(h->frame_bytes, (int)sizeof h->frame_bytes, out);
     }
+    return true;
+}
+
+/* ===== Récepteur "intégration à cadence fixe" (voir sonde_m10.h) ========= */
+
+static int16_t clamp16(int32_t v) { return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
+
+void sonde_m10_rx_init(sonde_m10_rx_t *rx, float sample_rate_hz, int16_t *buf, int cap)
+{
+    memset(rx, 0, sizeof *rx);
+    rx->buf = buf; rx->cap = cap;
+    rx->fs  = sample_rate_hz;
+    rx->sps = sample_rate_hz / 9615.0f;
+    rx->L   = (int)(rx->sps + 0.5f);
+    if (rx->L > 16) rx->L = 16;
+    for (int j = 0; j < M10_HEADER_CHIPS; j++)
+        rx->lag[j] = (int)((M10_HEADER_CHIPS - 1 - j) * rx->sps + 0.5f);
+    rx->N = rx->lag[0] + rx->L;
+    if (rx->N > M10_RX_CORR_RING) rx->N = M10_RX_CORR_RING;
+    rx->thrN = (int64_t)(M10_RX_CORR_THR * 16.0f * (float)rx->N + 0.5f);
+    /* on capture pour le débit le plus lent (9600) + marge de décalage */
+    rx->need = (int)(M10_RX_MAX_SYMBOLS * (sample_rate_hz / 9600.0f)) + M10_RX_PREROLL + M10_RX_OFFSET_FWD + 4;
+    if (rx->need > rx->cap) rx->need = rx->cap;
+}
+
+/* Octets lus à partir de `start` (indice dans buf) avec `sps` échantillons
+ * par symbole ; renvoie le nombre d'octets produits (max_bytes au plus). */
+static int m10_rx_bytes(const sonde_m10_rx_t *rx, float start, float sps, uint8_t *out, int max_bytes)
+{
+    float pos = start;
+    int prev = 0, nbytes = 0;
+    uint8_t acc = 0; int nb = 0;
+    const int nbits = max_bytes * 8;
+    for (int k = 0; k < nbits; k++) {
+        int a0 = (int)(pos + 0.5f), a1 = (int)(pos + sps + 0.5f), a2 = (int)(pos + 2 * sps + 0.5f);
+        if (a0 < 0 || a2 > rx->n) break;
+        int32_t s1 = 0, s2 = 0;
+        for (int i = a0; i < a1; i++) s1 += rx->buf[i];
+        for (int i = a1; i < a2; i++) s2 += rx->buf[i];
+        int bit = (s2 - s1) >= 0 ? 1 : 0;
+        int fb = (k == 0) ? 0 : (bit == prev ? 1 : 0);   /* différentiel ; 1er bit = 0 (MSB de 0x64 / 0x45) */
+        prev = bit;
+        acc = (uint8_t)((acc << 1) | fb);
+        if (++nb == 8) { out[nbytes++] = acc; acc = 0; nb = 0; }
+        pos += 2 * sps;
+    }
+    return nbytes;
+}
+
+static int32_t be_i16(const uint8_t *p) { return (int16_t)(((uint16_t)p[0] << 8) | p[1]); }
+
+/* Température extérieure (thermistance Shibaura PB5-41E), rs1729 get_Temp :
+ * T/K = 1/(p0 + p1 ln R + p2 ln²R + p3 ln³R), R = Rs/(x - Rs/Rp), x = (4095-ADC)/ADC. */
+static bool m10_temp(uint8_t scT, int adc, int16_t *out_c10)
+{
+    static const float Rs[3] = { 12.1e3f, 36.5e3f, 475.0e3f };
+    static const float Rp[3] = { 1e20f, 330.0e3f, 2000.0e3f };
+    const float p0 = 1.07303516e-03f, p1 = 2.41296733e-04f, p2 = 2.26744154e-06f, p3 = 6.52855181e-08f;
+    if (scT > 2 || adc <= 0 || adc >= 4095) return false;
+    float x = (4095.0f - (float)adc) / (float)adc;
+    float R = Rs[scT] / (x - Rs[scT] / Rp[scT]);
+    if (R <= 0) return false;
+    float l = logf(R);
+    float T = 1.0f / (p0 + p1 * l + p2 * l * l + p3 * l * l * l) - 273.15f;
+    if (T < -120.0f || T > 60.0f) return false;
+    *out_c10 = (int16_t)lroundf(T * 10.0f);
+    return true;
+}
+
+static void m10_telemetry(const uint8_t *fr, int flen, m10_gps_t *out)
+{
+    out->temp_c10 = INT16_MIN; out->rh_pct = 255; out->vh_dms = 0xFFFF; out->vv_dms = 0;
+    out->heading_deg = 0xFFFF; out->sats = 255; out->hh = out->mm = out->ss = 255; out->sn[0] = 0;
+    uint8_t type = fr[1];
+    out->type = type;
+    float vscale; int pvE, pvN, pvU;
+    if (type == 0x20) { vscale = 100.0f; pvE = 0x0B; pvN = 0x0D; pvU = 0x18; }
+    else              { vscale = 200.0f; pvE = 0x04; pvN = 0x06; pvU = 0x08; }
+    if (flen > pvU + 1) {
+        float vx = be_i16(fr + pvE) / vscale, vy = be_i16(fr + pvN) / vscale, vz = be_i16(fr + pvU) / vscale;
+        float vh = sqrtf(vx * vx + vy * vy);
+        float dir = atan2f(vx, vy) * 180.0f / (float)M_PI; if (dir < 0) dir += 360.0f;
+        out->vh_dms = (uint16_t)lroundf(vh * 10.0f);
+        out->vv_dms = (int16_t)lroundf(vz * 10.0f);
+        out->heading_deg = (uint16_t)lroundf(dir) % 360;
+    }
+    if (type == 0x20) {
+        if (flen > 0x11) {                        /* heure : 3 octets BE en secondes de la semaine */
+            uint32_t t = ((uint32_t)fr[0x0F] << 16) | ((uint32_t)fr[0x10] << 8) | fr[0x11];
+            t %= 86400; out->hh = t / 3600; out->mm = (t % 3600) / 60; out->ss = t % 60;
+        }
+        if (flen > 0x05) {                        /* température : ADC 16 bits LE avec échelle dans les bits hauts */
+            int adc = ((int)fr[0x5] << 8) | fr[0x4]; uint8_t scT = 0;
+            if (adc > 8191) { scT = 2; adc -= 8192; } else if (adc > 4095) { scT = 1; adc -= 4096; }
+            m10_temp(scT, adc, &out->temp_c10);
+        }
+        if (flen > 0x14) {                        /* numéro de série M20 */
+            uint32_t sn24 = ((uint32_t)fr[0x14] << 16) | ((uint32_t)fr[0x13] << 8) | fr[0x12];
+            uint8_t ym = sn24 & 0x7F;
+            snprintf(out->sn, sizeof out->sn, "%u%02u-%u-%u%04u", ym / 12, (ym % 12) + 1,
+                     (unsigned)(((sn24 >> 7) & 0x7) + 1), (unsigned)((sn24 >> 23) & 1), (unsigned)((sn24 >> 10) & 0x1FFF));
+        }
+    } else {
+        if (flen > 0x1E) {                        /* heure GPS : TOW en ms, BE, à 0x0A ; satellites à 0x1E */
+            uint32_t tow = ((uint32_t)fr[0x0A] << 24) | ((uint32_t)fr[0x0B] << 16) | ((uint32_t)fr[0x0C] << 8) | fr[0x0D];
+            uint32_t t = (tow / 1000) % 86400; out->hh = t / 3600; out->mm = (t % 3600) / 60; out->ss = t % 60;
+            out->sats = fr[0x1E];
+        }
+        if (flen > 0x40) {                        /* température : échelle à 0x3E, ADC LE à 0x3F/0x40 moins 0xA000 */
+            uint8_t scT = fr[0x3E];
+            int adc = (int)((uint16_t)(((uint16_t)fr[0x40] << 8) | fr[0x3F]) - 0xA000);
+            bool ok = m10_temp(scT, adc, &out->temp_c10);
+            if (ok && flen > 0x37) {              /* humidité : rapport des comptages 555 (RH / référence 55 %) */
+                uint32_t cRH = fr[0x35] | ((uint32_t)fr[0x36] << 8) | ((uint32_t)fr[0x37] << 16);
+                uint32_t c55 = fr[0x32] | ((uint32_t)fr[0x33] << 8) | ((uint32_t)fr[0x34] << 16);
+                if (c55 > 0 && cRH > 0) {
+                    float T = out->temp_c10 / 10.0f;
+                    float rh = ((float)cRH / (float)c55 - 0.8955f) / 0.002f;
+                    if (T < 0.0f)   rh += 0.0f - T / 5.5f;
+                    if (T < -30.0f) rh *= 1.0f + (-30.0f - T) / 75.0f;
+                    if (rh < 0) rh = 0;
+                    if (rh > 100) rh = 100;
+                    out->rh_pct = (uint8_t)lroundf(rh);
+                }
+            }
+        }
+        if (flen > 0x61) {                        /* numéro de série M10 (5 octets à 0x5D) */
+            const uint8_t *r = fr + 0x5D;
+            unsigned b = r[3] | ((unsigned)r[4] << 8);
+            snprintf(out->sn, sizeof out->sn, "%1X%02u-%1X-%1u%04u", (r[2] >> 4) & 0xF, r[2] & 0xF, r[0] & 0xF, (b >> 13) & 0x7, b & 0x1FFF);
+        }
+    }
+}
+
+static bool m10_rx_fill_gps(const uint8_t *fr, int flen, m10_gps_t *out)
+{
+    double lat, lon, alt;
+    uint8_t type = fr[1];
+    m10_telemetry(fr, flen, out);
+    if (type == 0x20) {                     /* M20 : 0x45 0x20 */
+        if (flen < 0x24) return false;
+        lat = be_i32(fr + 0x1C) / 1e6; lon = be_i32(fr + 0x20) / 1e6;
+        alt = (double)(int32_t)(((uint32_t)fr[0x08] << 16) | ((uint32_t)fr[0x09] << 8) | fr[0x0A]) / 100.0;
+    } else if (type == 0x9F || type == 0xAF || type == 0x8F) {   /* M10, M10+, M2K2 */
+        if (flen < 0x1A) return false;
+        lat = be_i32(fr + 0x0E) / M10_BAM_SCALE; lon = be_i32(fr + 0x12) / M10_BAM_SCALE;
+        alt = be_i32(fr + 0x16) / 1000.0;
+    } else return false;                    /* 0x49 (double trame) : pas de position ici */
+    out->lat_e5 = (int32_t)(lat * 100000.0);
+    out->lon_e5 = (int32_t)(lon * 100000.0);
+    out->alt_m  = (int32_t)alt;
+    out->has_position = !(lat == 0.0 && lon == 0.0) &&
+                        lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0 &&
+                        out->alt_m >= -1000 && out->alt_m <= 80000;
+    return out->has_position;
+}
+
+bool sonde_m10_rx_decode(sonde_m10_rx_t *rx, m10_gps_t *out)
+{
+    static const int bauds[2] = { 9615, 9600 };
+    uint8_t fr[M10_RX_MAX_BYTES];
+    memset(out, 0, sizeof *out);
+    rx->frame_len = 0;
+    for (int b = 0; b < 2; b++) {
+        float sps = rx->fs / (float)bauds[b];
+        for (int off = -M10_RX_OFFSET_MAX; off <= M10_RX_OFFSET_FWD; off++) {
+            float start = (float)(M10_RX_PREROLL - rx->L / 2 + off);   /* le pic du corrélateur tombe ~1/2 symbole après le début des données */
+            if (m10_rx_bytes(rx, start, sps, fr, 1) < 1) continue;
+            int flen = fr[0];
+            if (flen != 0x64 && flen != 0x45 && flen != 0x76 && flen != 0x43) continue;   /* M10, M20, M10 aux, M20 court */
+            int nbytes = flen + 1;
+            if (nbytes > M10_RX_MAX_BYTES) continue;
+            if (m10_rx_bytes(rx, start, sps, fr, nbytes) < nbytes) continue;
+            uint16_t want = (uint16_t)((fr[flen - 1] << 8) | fr[flen]);
+            if (sonde_m20_checksum(fr, flen - 1) != want) continue;
+            memcpy(rx->frame, fr, (size_t)nbytes);
+            rx->frame_len = flen; rx->last_off = off; rx->last_baud = bauds[b];
+            rx->frames_ok++;
+            m10_rx_fill_gps(fr, flen, out);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void m10_rx_start_capture(sonde_m10_rx_t *rx)
+{
+    rx->locks++;
+    for (int i = 0; i < M10_RX_PREROLL; i++)
+        rx->buf[i] = rx->pre[(rx->pre_i + i) % M10_RX_PREROLL];
+    rx->n = M10_RX_PREROLL;
+    rx->capturing = true;
+}
+
+bool sonde_m10_rx_sample(sonde_m10_rx_t *rx, int32_t sample, m10_gps_t *out)
+{
+    int16_t s16 = clamp16(sample);
+    rx->pre[rx->pre_i] = s16;
+    rx->pre_i = (rx->pre_i + 1) % M10_RX_PREROLL;
+
+    /* ---- corrélateur d'en-tête (tourne en permanence, capture comprise) ---- */
+    rx->box += s16 - rx->xr[rx->xi];
+    rx->xr[rx->xi] = s16;
+    if (++rx->xi >= rx->L) rx->xi = 0;
+    int32_t q = ((int32_t)s16 * s16) >> 4;
+    rx->sq += q - rx->sqr[rx->si];
+    rx->sqr[rx->si] = q;
+    if (++rx->si >= rx->N) rx->si = 0;
+    rx->boxring[rx->bi] = rx->box;
+    int64_t corr = 0;
+    for (int j = 0; j < M10_HEADER_CHIPS; j++) {
+        int idx = rx->bi - rx->lag[j];
+        if (idx < 0) idx += M10_RX_CORR_RING;
+        corr += M10_RAWHEADER_BITS[j] ? rx->boxring[idx] : -rx->boxring[idx];
+    }
+    if (++rx->bi >= M10_RX_CORR_RING) rx->bi = 0;
+    /* corr² / (énergie × N) avec énergie = sq << 4. Tout en entier par
+     * échantillon (pas de division, pas de double : 80 k/s sur un S3 à
+     * 160 MHz ou un RP2040 sans FPU) ; le score flottant n'est calculé
+     * qu'au-dessus du seuil, pour situer le pic. */
+    int64_t c2 = corr * corr;
+    float score = 0.0f;
+    if (rx->sq > 0 && c2 > rx->thrN * rx->sq)
+        score = (float)c2 / ((float)rx->sq * 16.0f * (float)rx->N);
+    if (score > rx->max_score) rx->max_score = score;
+    bool peak = rx->prevScore > 0.0f && score < rx->prevScore;
+    rx->prevScore = score;
+    /* Le pic était à l'échantillon précédent : données à partir d'ici. Pendant
+     * une capture, seul un pic NETTEMENT meilleur la relance (un faux pic ne
+     * doit pas jeter la vraie trame en cours). */
+    if (peak && (!rx->capturing || rx->prevScore > rx->cap_score + 0.05f)) {
+        rx->last_score = rx->prevScore;
+        rx->cap_score  = rx->prevScore;
+        m10_rx_start_capture(rx);
+    }
+    if (!rx->capturing) return false;
+    rx->buf[rx->n++] = s16;
+    if (rx->n < rx->need) return false;
+    rx->capturing = false;
+    sonde_m10_rx_decode(rx, out);
     return true;
 }

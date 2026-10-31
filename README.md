@@ -109,6 +109,38 @@ de trame 2G + BCH(250,202) portable sur MCU est conservé non compilé sous
   --no-pdf-header-footer --print-to-pdf=docs/notice_utilisation.pdf
   docs/notice_utilisation.html` pour la régénérer après modification).
 
+## Compiler — firmware radio f4hwn-v6 (UV-K1 / UV-K5 V3)
+
+```
+cd firmware/f4hwn-v6
+./compile-firmware.sh Fusion \
+  -DENABLE_FEAT_F4HWN_OVERLAY_APPS=ON \
+  -DENABLE_APRS=ON -DENABLE_SARSAT=ON -DENABLE_SSTV=ON -DENABLE_SONDE=ON \
+  -DENABLE_BYP_RAW_DEMODULATORS=ON \
+  -DENABLE_SPECTRUM=OFF -DENABLE_FMRADIO=OFF \
+  -DENABLE_FEAT_F4HWN_K5VIEWER=OFF -DENABLE_FEAT_F4HWN_RXTX_LOG=OFF \
+  -DENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER=OFF
+# -> build/Fusion/f4hwn.fusion.bin  (2026-10-30 soir : 117 796 o, 97,5 % de flash)
+```
+
+- `ENABLE_APRS / SARSAT / SSTV / SONDE` : les quatre écrans RP (`App/CMakeLists.txt`,
+  `enable_feature`), **jamais activés par un preset** : sans ces `-D`, le menu
+  F+7 existe mais sans A APRS-RP / B SARSAT-RP / C SSTV-RP / D SONDE-RP.
+- `ENABLE_FEAT_F4HWN_OVERLAY_APPS` : le menu F+7 lui-même (sinon F+7 = VOX) ;
+  exige `MULTIBOOT_OVERLAY`, présent dans `Fusion` mais pas dans `Custom`.
+- `ENABLE_BYP_RAW_DEMODULATORS` : `MODULATION_RAW`, utilisé par l'écran Sonde, et
+  `MODULATION_BYP`. **Depuis le 2026-10-30, BYP = profil « audio plat »** de
+  l'écran Sonde et du mode hôte H28 : AF select 9 (REG_47 = 0x6942, seul moyen
+  de couper le filtre de parole ~3 kHz du BK4819, les bits de REG_2B ne
+  suffisent pas), FI large REG_43 = 0x7E2C, AFC coupée (rendue en quittant le
+  mode). Un VFO ordinaire en BYP livre donc sur le jack l'audio brut qu'il faut
+  aux décodeurs externes (UVLink, RP2040) sans ouvrir d'écran dédié. RAW reste
+  le profil stock (REG_2B seul, AFC à plage minimale). Fichier :
+  `App/driver/bk4829.c`, `BK4819_EnterBypass` / `BK4819_ExitBypass`.
+- Extras coupés pour tenir dans les 118 Ko : spectre, radio FM broadcast,
+  K5Viewer, journal RX/TX (`Fusion` complet + écrans RP déborde de 14 Ko).
+  Docker requis ; sans TTY, envelopper dans `script -q -c "…" /dev/null`.
+
 ## Compiler — firmware RP2040
 
 ```sh

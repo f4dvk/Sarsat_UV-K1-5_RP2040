@@ -6,6 +6,9 @@
 #include "driver/bk4819.h"
 #include "driver/eeprom.h"
 #include "settings.h"
+#ifdef ENABLE_SARSAT
+#include "app/sarsat.h"      /* SARSAT_ModulePresent() -- is the C-Board there? */
+#endif
 
 /* EEPROM: 8 bytes at 0x0A170, the unclaimed tail of the "Settings" PY25Q16
  * sector (0x00A000-0x00A170 is the last mapped byte per
@@ -91,7 +94,15 @@ void AFGAIN_Apply(void)
     if (s_stock_volgain == 0xFF)
         s_stock_volgain = gEeprom.VOLUME_GAIN;
 
-    const uint8_t v = gAfGain;
+    uint8_t v = gAfGain;
+#ifdef ENABLE_SARSAT
+    if (!SARSAT_ModulePresent())
+        v = 0;   /* no C-Board seen: fall back to the firmware's own default
+                  * gain rather than a level tuned for a module that isn't
+                  * connected (2026-10-31, user request). gAfGain itself is
+                  * left untouched, so the configured level resumes on its
+                  * own as soon as the C-Board is heard from again. */
+#endif
     if (v < 1 || v > 78) {                        /* auto = stock RX behaviour */
         gEeprom.VOLUME_GAIN = s_stock_volgain;
         gEeprom.DAC_GAIN    = 0x0F;

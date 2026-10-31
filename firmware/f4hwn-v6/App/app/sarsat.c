@@ -27,6 +27,7 @@
 #include "functions.h"
 #include "settings.h"
 #include "misc.h"
+#include "scheduler.h"       /* SCHEDULER_GetTick10ms(), for SARSAT_ModulePresent() */
 #include "app/afgain.h"     /* shared C-Board AF-gain setting (gAfGain) */
 #ifdef ENABLE_APRS
 	#include "app/aprs.h"
@@ -54,6 +55,13 @@ static bool     s_screen_open;     /* APP_RunSarsat() is running           */
  * s_screen_open goes true then) -- no ambiguity to flag there. */
 #define SARSAT_NEWFLASH_TICKS 50u
 static uint8_t  s_new_flash;
+
+/* C-Board link presence: see SARSAT_ModulePresent(). 12 s = 2+ missed
+ * SARSAT_CMD_HELLO keepalives (one every ~5 s), same margin as the C-Board's
+ * own symmetric timeout for the host link (rp2040/src/main.c). */
+#define SARSAT_LINK_TIMEOUT_10MS 1200u
+static bool     s_ever_seen;
+static uint32_t s_last_rx_tick10ms;
 
 static uint8_t  s_view;            /* 0 = beacon text, 1 = audio level    */
 static struct {
@@ -168,8 +176,17 @@ static void SARSAT_ReplyStatus(void)
 	SARSAT_Reply(SARSAT_CMD_HELLO | 0x8000u, p, sizeof(p));
 }
 
+bool SARSAT_ModulePresent(void)
+{
+	return s_ever_seen &&
+	       (int32_t)(SCHEDULER_GetTick10ms() - s_last_rx_tick10ms) < (int32_t)SARSAT_LINK_TIMEOUT_10MS;
+}
+
 void SARSAT_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
 {
+	s_ever_seen        = true;
+	s_last_rx_tick10ms = SCHEDULER_GetTick10ms();
+
 	/* The C-Board's UART TX toggling the radio's mic/data line can register as
 	 * a brief PTT on a TX-capable band (seen as a few-ms key-up right after an
 	 * APRS decode on 144.8). Holding SerialConfigInProgress() for ~1 s over the

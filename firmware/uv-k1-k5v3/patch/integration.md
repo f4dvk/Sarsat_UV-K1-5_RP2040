@@ -1847,3 +1847,35 @@ même s'il existe dans la liste plate `MenuList[]`. Deux endroits à corriger :
 Build vert, 0 warning : `FLASH 112848/120832 o (93,39 %)` (+~2,1 Ko, la
 correction dBm UHF mesurée par l'utilisateur ci-dessus est incluse dans ce
 même build). `.bin` régénéré. **Non testé sur l'air.**
+
+## Écran Sonde : chaîne AF vraiment brute, décodeur M10/M20 réparé (2026-10-30)
+
+Depuis le début, le mode sonde verrouillait l'en-tête M10 mais ne validait
+jamais une somme de contrôle (voir l'historique dans `sonde.c`). Diagnostic
+fait depuis le projet UVLink (ESP32 sur la même C-Board, anneau ADC à
+80 kHz, sonde M10 à -31 dBm) : l'audio du jack restait coupé net à ~3 kHz,
+les symboles courts du biphase 9615 Bd (4,8 kHz) disparaissaient, alors que
+la même chaîne de décodage valide 47/47 trames sur un enregistrement SDR.
+`BK4819_SetAF(BK4819_AF_FM)` (AF select 1) garde le **filtre de parole** du
+BK4819 ; les bits de REG_2B ne le coupent pas. L'appli « Sonde M10 » du
+firmware amont (`App/apps/sondem10`, validée sur le terrain) écrit
+`REG_47 = 0x6942` (AF select 9, « bypasses the speech filter, too narrow for
+9615 chips/s »), coupe l'AFC (REG_73 bit 4) et met la FI large
+`REG_43 = 0x7E2C`. `sonde.c` fait maintenant pareil (REG_47 écrit après
+`BK4819_SetAF`, `afcDisableRegSpec` à `true`, REG_43 0x7E2C au lieu de
+0x3628). Résultat avec le même réglage en mode hôte (H28) : 50 trames sur
+51 pics en 45 s.
+
+Côté RP2040, `sonde_m10.[ch]` est remplacé par un récepteur « à la rs1729 »
+(corrélateur d'en-tête au niveau échantillon, intégration à cadence fixe,
+différentiel, somme de contrôle, champs M10 et M20), capture dans `g_audio`
+(fenêtre SARSAT, libre en mode sonde). Validé hors cible à 96 kHz : 46
+trames sur l'enregistrement SDR. Voir `docs/protocol.md` et UVLink/README.md.
+
+**Même correctif dans le firmware principal `firmware/f4hwn-v6`** (v6.3.0,
+`App/app/sonde.c`, `SONDE_ApplyRxProfile`) : `RADIO_SetModulation(RAW)` y
+laissait aussi AF select 1 via `BK4819_EnterRaw()`, et la fin de la fonction
+remettait l'AFC et REG_43 = 0x3628. Désormais REG_47 = 0x6942, AFC coupé,
+REG_43 = 0x7E2C, écrits en dernier. Sans ce reflash du poste, le nouveau
+décodeur RP2040 ne voit toujours qu'un audio coupé à 3 kHz.
+

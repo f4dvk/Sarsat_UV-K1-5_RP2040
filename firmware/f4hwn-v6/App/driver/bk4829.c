@@ -1191,8 +1191,19 @@ void BK4819_EnterBypass(void)
     reg2b |= (1u << 10) | (1u << 9) | (1u << 8) | (1u << 2) | (1u << 1) | (1u << 0);
     BK4819_WriteRegister(BK4819_REG_2B, reg2b);
 
-    // Keep AGC/AFC behavior aligned with FM-like bypass experiments.
-    BK4819_SetRegValue(afcDisableRegSpec, false);
+    /* 2026-10-30 (demande de l'operateur) : BYP = le profil "audio plat" de
+     * l'ecran Sonde (app/sonde.c) et du mode hote H28. Les bits de REG_2B
+     * ci-dessus ne coupent PAS le filtre de parole du BK4819 (coupure nette
+     * ~3 kHz mesuree sur le jack) : seule la selection AF 9 (REG_47 = 0x6942,
+     * "bypasses the speech filter", appli sondem10 du firmware amont) le fait.
+     * FI large REG_43 = 0x7E2C, AFC coupee (remise a l'etat normal par
+     * BK4819_ExitBypass). Ecrit en DERNIER, apres BK4819_SetAF qui remettrait
+     * AF 1. Un VFO en BYP est donc directement utilisable pour decoder des
+     * radiosondes / SARSAT sur le jack (UVLink, RP2040) sans passer par un
+     * ecran dedie ; RAW reste le profil stock (REG_2B seul, AFC plage mini). */
+    BK4819_WriteRegister(BK4819_REG_47, 0x6942);
+    BK4819_WriteRegister(BK4819_REG_43, 0x7E2C);
+    BK4819_SetRegValue(afcDisableRegSpec, true);
 }
 
 void BK4819_EnterRaw(void)
@@ -1234,6 +1245,10 @@ void BK4819_ExitBypass(void)
     uint16_t reg2b = BK4819_ReadRegister(BK4819_REG_2B);
     reg2b &= ~((1u << 10) | (1u << 9) | (1u << 8) | (1u << 2) | (1u << 1) | (1u << 0));
     BK4819_WriteRegister(BK4819_REG_2B, reg2b);
+    // BYP coupe l'AFC (profil audio plat) : on la rend a la phonie. REG_43 est
+    // reecrit par BK4819_SetFilterBandwidth (RADIO_SetupRegisters), REG_47 par
+    // BK4819_SetAF ci-dessus puis par la modulation normale.
+    BK4819_SetRegValue(afcDisableRegSpec, false);
 #endif
 
     // Keep existing REG_7E logic from your current implementation.

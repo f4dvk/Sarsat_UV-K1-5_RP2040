@@ -234,8 +234,8 @@ static uint32_t g_sstv_racc;        /* row apportioning accumulator, see above *
  * baud chain above, which stays wired to the older header-only detector
  * that already proved itself on air; this one is additive, not a
  * replacement, until the 9600 baud path gets its own on-air mileage). */
-static sonde_m10_chipdemod_t g_sonde_demod_m10;
-static sonde_m10_hunt_t g_m10_hunt;
+static sonde_m10_rx_t g_m10_rx;   /* récepteur M10/M20 à cadence fixe (2026-10-30, voir sonde_m10.h) ;
+                                  * capture dans g_audio (tampon SARSAT, libre en mode sonde) */
 static uint32_t         g_sonde_m10_gps_ok, g_sonde_m10_gps_bad;
 static absolute_time_t  g_sonde_next_m10_gps_push;
 static absolute_time_t  g_sonde_next_diag_dump;   /* throttle for the frame:/
@@ -1811,8 +1811,8 @@ static void sonde_mode_enter(void)
      * drift by the end of a full ~1600-chip M10 frame -- a very plausible
      * contributor to the "decode confidence drops toward the end of the
      * frame" pattern chased at length elsewhere in this codebase. */
-    sonde_m10_chipdemod_init(&g_sonde_demod_m10, CFG_SONDE_SAMPLE_RATE_HZ, 9615);
-    sonde_m10_hunt_init(&g_m10_hunt);
+    /* ADC RP2040 : 48 MHz / (clkdiv+1) entier -> 96 000 Hz exacts. */
+    sonde_m10_rx_init(&g_m10_rx, (float)CFG_SONDE_SAMPLE_RATE_HZ, (int16_t *)g_audio, (int)(sizeof g_audio / sizeof(int16_t)));
     g_sonde_rd = 0;
     g_sonde_rs41_ok = g_sonde_rs41_bad = g_sonde_m10_hits = 0;
     g_sonde_m10_gps_ok = g_sonde_m10_gps_bad = 0;
@@ -1895,10 +1895,11 @@ static void sonde_push_m10_gps(const m10_gps_t *g)
     g_sonde_next_m10_gps_push = make_timeout_time_ms(2000);
 
     char l0[SARSAT_LINE_CHARS], l1[SARSAT_LINE_CHARS], l2[SARSAT_LINE_CHARS];
-    const char *lines[3] = { l0, l1, l2 };
+    char l3[SARSAT_LINE_CHARS], l4[SARSAT_LINE_CHARS], l5[SARSAT_LINE_CHARS];
+    const char *lines[6] = { l0, l1, l2, l3, l4, l5 };
     int n;
 
-    snprintf(l0, sizeof l0, "RADIOSONDE M10/M20");
+    snprintf(l0, sizeof l0, "RADIOSONDE %s", g->type == 0x20 ? "M20" : "M10");
     snprintf(l1, sizeof l1, "%.4f,%.4f",
              g->lat_e5 / 100000.0, g->lon_e5 / 100000.0);
     n = 2;
@@ -1910,6 +1911,25 @@ static void sonde_push_m10_gps(const m10_gps_t *g)
         aprs_geo(my_lat, my_lon, g->lat_e5, g->lon_e5, &dist_m, &brg)) {
         snprintf(l2, sizeof l2, "%.1fkm  %03u deg", dist_m / 1000.0, brg);
         n = 3;
+    }
+    /* 2026-10-30 : télémétrie (sonde_m10.c, d'après rs1729) -- même contenu que
+     * les écrans Sonde M10/M20 du firmware amont : altitude + T/RH, VS/HS/cap,
+     * numéro de série + heure GPS. 6 lignes max à l'écran. */
+    {
+        char *dst = (char *)lines[n]; int k = snprintf(dst, SARSAT_LINE_CHARS, "alt %ldm", (long)g->alt_m);
+        if (g->temp_c10 != INT16_MIN) k += snprintf(dst + k, SARSAT_LINE_CHARS - k, " T%.1fC", g->temp_c10 / 10.0);
+        if (g->rh_pct != 255)         k += snprintf(dst + k, SARSAT_LINE_CHARS - k, " RH%u%%", g->rh_pct);
+        n++;
+        if (g->vh_dms != 0xFFFF && n < 6) {
+            snprintf((char *)lines[n], SARSAT_LINE_CHARS, "VS%+.1f HS%.0f %03u", g->vv_dms / 10.0, g->vh_dms / 10.0, g->heading_deg);
+            n++;
+        }
+        if ((g->sn[0] || g->hh != 255) && n < 6) {
+            dst = (char *)lines[n]; k = 0;
+            if (g->sn[0])     k += snprintf(dst + k, SARSAT_LINE_CHARS - k, "%s", g->sn);
+            if (g->hh != 255) k += snprintf(dst + k, SARSAT_LINE_CHARS - k, "%s%02u:%02u", k ? " " : "", g->hh, g->mm);
+            n++;
+        }
     }
 
     LOG("[sonde]  M10/M20 GPS  %.5f %.5f alt=%ld\n",
@@ -1975,63 +1995,21 @@ static void sonde_service(void)
             }
         }
 
-        uint8_t bit9600;
-        int32_t cell_avg9600;
-        if (sonde_m10_chipdemod_sample(&g_sonde_demod_m10, sample, &bit9600, &cell_avg9600)) {
+        /* M10/M20 : corrélateur d'en-tête au niveau échantillon + intégration à
+         * cadence fixe + somme de contrôle (voir sonde_m10.h, 2026-10-30). Validé
+         * hors cible sur un enregistrement réel : 47 trames / 44 s. */
+        {
             m10_gps_t g;
-            if (sonde_m10_hunt_feed(&g_m10_hunt, bit9600, cell_avg9600, &g)) {
-                /* diagnostic: a hex dump of every capture (good or bad) --
-                 * the fastest way to re-derive the real M10/M20 field
-                 * offsets from an on-air capture is to compare several of
-                 * these against each other/known values, same technique
-                 * this project's SDR forensics already used offline (see
-                 * the radiosonde plan notes), but now from the exact
-                 * on-target pipeline instead of a Python reimplementation.
-                 *
-                 * THROTTLED (2026-09-11): this used to fire unconditionally
-                 * on every completed capture window, good or bad -- on real
-                 * noise the header correlator can re-lock and re-fill the
-                 * 1680-chip window far faster than ~1800 individual blocking
-                 * printf() calls (one per byte/cell) can drain over USB CDC.
-                 * That stalls this very loop -- the one draining the ADC
-                 * ring -- for what real-world testing measured as tens of
-                 * ms at a time; the ring is only ~170 ms deep, so a bad
-                 * enough stall makes sonde_service() silently skip ahead
-                 * past real audio it never got to read. On the wire that is
-                 * indistinguishable from a genuine mid-burst RF dropout,
-                 * and is a strong suspect for exactly that symptom seen in
-                 * on-air captures this session (a single, bit-exact-flat
-                 * ~80 ms run of raw ADC samples in the middle of an
-                 * otherwise-good M10/M20 frame). Capped to once per ~3 s --
-                 * still far more than enough to catch every real ~1 Hz
-                 * burst, but can no longer pile up on itself. */
-                if (time_reached(g_sonde_next_diag_dump)) {
+            if (sonde_m10_rx_sample(&g_m10_rx, sample, &g)) {
+                if (g_m10_rx.frame_len && time_reached(g_sonde_next_diag_dump)) {
                     g_sonde_next_diag_dump = make_timeout_time_ms(3000);
-                    LOG("[sonde]  M10/M20 frame:");
-                    for (int i = 0; i < (int)sizeof g_m10_hunt.frame_bytes; i++)
-                        LOG(" %02X", g_m10_hunt.frame_bytes[i]);
-                    LOG("\n");
-                    /* raw (pre-Manchester) chip-cell averages behind that hex
-                     * dump -- lets an offline pass re-try the alignment/decode
-                     * with full flexibility against a REAL capture instead of
-                     * this project's earlier from-a-downloaded-WAV Python
-                     * reimplementation (see the radiosonde plan notes).
-                     * Decimal, not bits, since sonde_m10_bits_from_cells()
-                     * needs the actual magnitudes (fifth-pass demodulator,
-                     * see sonde_m10.h) -- a 0/1 dump would lose that. */
-                    LOG("[sonde]  M10/M20 rawcells: ");
-                    for (int i = 0; i < (int)(sizeof g_m10_hunt.raw_cells / sizeof g_m10_hunt.raw_cells[0]); i++)
-                        LOG("%ld,", (long)g_m10_hunt.raw_cells[i]);
+                    LOG("[sonde]  M10/M20 trame (len %02X, decalage %d, %d Bd) :", g_m10_rx.frame[0], g_m10_rx.last_off, g_m10_rx.last_baud);
+                    for (int i = 0; i <= g_m10_rx.frame_len && i < M10_RX_MAX_BYTES; i++)
+                        LOG(" %02X", g_m10_rx.frame[i]);
                     LOG("\n");
                 }
-
                 if (g.has_position) { g_sonde_m10_gps_ok++;  sonde_push_m10_gps(&g); }
-                else                  g_sonde_m10_gps_bad++;   /* header bit-
-                                                                 * matched, fields
-                                                                 * implausible --
-                                                                 * false lock or
-                                                                 * alignment still
-                                                                 * off, stay quiet */
+                else                  g_sonde_m10_gps_bad++;   /* capture sans trame valide (faux pic) ou trame sans position (0x49) */
             }
         }
     }

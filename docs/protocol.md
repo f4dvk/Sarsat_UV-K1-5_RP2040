@@ -84,13 +84,24 @@ Décodage (`rp2040/src/sonde_sync.h` pour le détail) :
   CRC par bloc, extraction du bloc GPS (position/altitude). Poussé en
   `SONDE_TEXT` comme un résultat SARSAT (lignes déjà mises en forme par le
   RP2040).
-- **M10/M20** : **détection seulement**. Le débit (4800 bauds) et l'en-tête
-  de trame (`5A 4A 93`, + un quartet) sont confirmés bit-exact sur une
-  capture réelle, mais la structure des champs au-delà (position GPS,
-  contrôle) n'est publiquement documentée nulle part hors de sources GPL-3.0
-  évitées pour compatibilité de licence (voir l'en-tête de `sonde_rs41.h`
-  pour la même contrainte appliquée au RS41). L'écran affiche donc juste
-  « détectée », sans position, tant que cette structure n'est pas perçée.
+- **M10/M20** : **décodage complet** (position GPS, altitude) depuis le
+  2026-10-30. Le récepteur 9615 bauds (`sonde_m10.c`, `sonde_m10_rx_t`)
+  reproduit l'algorithme du décodeur de référence rs1729/RS
+  (`demod/mod/m10m20mod.c`, GPL-3.0, réécrit d'après lecture) : corrélateur
+  d'en-tête brut de 32 symboles au niveau échantillon, intégration de chaque
+  symbole à cadence FIXE (pas de PLL), bit = signe (2e symbole − 1er),
+  décodage différentiel, somme de contrôle M10/M20, puis champs M10 (0x64 9F :
+  lat/lon en 2^30/90, alt en mm) ou M20 (0x45 20 : lat/lon ×1e-6, alt en
+  cm). Validé hors cible sur un enregistrement réel de 44 s (position
+  connue) : 46 trames valides à 96 kHz, là où la chaîne précédente
+  (PLL chip par chip + décision par cellule) verrouillait l'en-tête mais ne
+  validait jamais une trame (premier bit forcé à 1, glissements de chips).
+  Le tampon de capture (~16 k échantillons) réutilise `g_audio` (fenêtre
+  SARSAT, libre en mode sonde). L'ancien détecteur d'en-tête 4800 bauds
+  (`sonde_sync.c`) reste pour l'affichage « détectée ». Télémétrie (2026-10-30,
+  d'après rs1729) envoyée en lignes `SONDE_TEXT` supplémentaires : altitude +
+  température (thermistance, Steinhart-Hart) + humidité (comptages 555, M10),
+  vitesses verticale/sol et cap, numéro de série et heure GPS — 6 lignes max.
 - **DFM** : non câblé. Transmission continue (pas de rafale comme
   RS41/M10) et mot de synchro toujours inconnu publiquement — voir les notes
   du projet sur les radiosondes pour l'historique d'analyse.

@@ -122,11 +122,11 @@ enum BacklightOnRxTx_t gSetting_backlight_on_tx_rx;
     uint8_t       gSetting_set_tot = 0;
     uint8_t       gSetting_set_ctr = 10;
     bool          gSetting_set_inv = false;
-    bool          gSetting_set_af_inv = true;   /* comportement actuel (Inverse) tant que l'EEPROM n'a pas ete relue */
     uint8_t       gSetting_set_eot = 0;
     uint8_t       gSetting_set_lck = SET_LCK_KEYS;
     bool          gSetting_set_met = 0;
     bool          gSetting_set_gui = 0;
+    bool          gSetting_set_af_inv = true;   /* comportement actuel (Inverse) tant que l'EEPROM n'a pas ete relue */
     #ifdef ENABLE_FEAT_F4HWN_AUDIO
         uint8_t       gSetting_set_audio_fm = 0;
         uint8_t       gSetting_set_audio_am = 0;
@@ -640,7 +640,11 @@ void MR_PrintCacheStats(void)
     bool K5VIEWER_IsLocked(void) 
     {
         if (gUART_LockK5Viewer > 0) {
-            gUART_LockK5Viewer--;
+#if defined(ENABLE_USB) && defined(ENABLE_FEAT_F4HWN_OVERLAY_APPS)
+            // Released by the overlay loader when the app returns
+            if (gUART_LockK5Viewer != K5VIEWER_LOCK_HELD)
+#endif
+                gUART_LockK5Viewer--;
             return true;
         }
         

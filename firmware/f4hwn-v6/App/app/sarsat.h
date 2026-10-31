@@ -55,5 +55,14 @@ void APP_RunSarsat(void);
  * monitoring. */
 bool SARSAT_ScreenOpen(void);
 
+/* true once the C-Board has been heard from recently. SARSAT_CMD_HELLO is a
+ * keepalive the C-Board sends every ~5 s regardless of which screen (SARSAT/
+ * APRS/Sonde) is open on the radio, so this reflects link presence in
+ * general, not just the SARSAT screen. False before the first frame ever
+ * arrives, or after a few missed keepalives. Used by afgain.c to fall back
+ * to the firmware's own default AF gain when no C-Board is plugged in
+ * (2026-10-31, user request). */
+bool SARSAT_ModulePresent(void);
+
 #endif /* ENABLE_SARSAT */
 #endif /* APP_SARSAT_H */
