@@ -113,21 +113,72 @@ de trame 2G + BCH(250,202) portable sur MCU est conservé non compilé sous
 
 ```
 cd firmware/f4hwn-v6
-./compile-firmware.sh Fusion \
+./compile-firmware.sh Labs \
   -DENABLE_FEAT_F4HWN_OVERLAY_APPS=ON \
   -DENABLE_APRS=ON -DENABLE_SARSAT=ON -DENABLE_SSTV=ON -DENABLE_SONDE=ON \
   -DENABLE_BYP_RAW_DEMODULATORS=ON \
   -DENABLE_SPECTRUM=OFF -DENABLE_FMRADIO=OFF \
   -DENABLE_FEAT_F4HWN_K5VIEWER=OFF -DENABLE_FEAT_F4HWN_RXTX_LOG=OFF \
-  -DENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER=OFF
-# -> build/Fusion/f4hwn.fusion.bin  (2026-10-30 soir : 117 796 o, 97,5 % de flash)
+  -DENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER=OFF \
+  -DENABLE_FEAT_F4HWN_RESCUE_OPS=OFF -DENABLE_AIRCOPY=OFF \
+  -DENABLE_FEAT_F4HWN_EXT_FLASH_RW=ON \
+  -DENABLE_FEAT_F4HWN_OVERLAY_BEAM=ON -DENABLE_FEAT_F4HWN_OVERLAY_INFO=ON \
+  -DENABLE_SWD=OFF -DENABLE_FEAT_F4HWN_QRCODE=OFF
+# -> build/Labs/f4hwn.labs.bin  (2026-11-01 : 118 840 o, 98,35 % de flash --
+#    1 992 o de marge restante, voir plus bas pourquoi EXT_FLASH_RW/OVERLAY_BEAM/
+#    OVERLAY_INFO sont requis, et pourquoi SWD/QRCODE sont coupés mais pas LOGO)
 ```
 
+- Preset **`Labs`** et non `Fusion` depuis le 2026-11-01 : UV Studio n'affiche
+  l'onglet **Apps** (installation des apps overlay) que si le firmware réussit
+  DEUX sondes UART au démarrage de la connexion -- `apps` (commande `0x0730`,
+  app slot info) ET `externalFlash` (commande `0x0738`, lecture brute) --
+  code source : `uvstudio/js/flash.js`, `detectNavigationCapabilities()` /
+  `applyNavigationCapabilities()` (dépôt `armel/armel.github.io`). Si l'une des
+  deux échoue, UV Studio remet **les deux** capacités à `false` (sauf pour les
+  firmwares `Service`/v7+, hors sujet ici) et affiche le badge "Labs only" --
+  même si les apps overlay fonctionnent réellement sur la radio. D'où
+  `ENABLE_FEAT_F4HWN_EXT_FLASH_RW=ON` obligatoire ci-dessus, pas seulement
+  `EDITION_STRING=Labs` : sans lui, la sonde `externalFlash` (commandes UART
+  `0x0738-0x073F`, dump/restore brut de la flash externe + factory reset côté
+  UV Studio) échoue et désactive aussi l'onglet Apps par effet de bord, même si
+  `ENABLE_FEAT_F4HWN_OVERLAY_APPS` (commandes `0x0730-0x0737`) est bien actif.
+- `ENABLE_FEAT_F4HWN_OVERLAY_BEAM` / `ENABLE_FEAT_F4HWN_OVERLAY_INFO` : une fois
+  l'onglet Apps débloqué, certaines apps du catalogue officiel (dépôt
+  `armel/uv-k1-k5v3-firmware-custom`, `archive/apps/v<base>/`) restaient
+  refusées au lancement sur la radio avec `APP_ERR_CAP` ("non supportée par ce
+  firmware", `app_overlay.c:967` : `required_caps & ~APP_AVAILABLE_CAPS`).
+  Vérifié en lisant l'en-tête réel (`required_caps`, offset 56) des `.app`
+  officiels : `SystemInfo.app` et `SSTV.app` demandent `APP_CAP_SYSINFO`
+  (0x08, dépend de `OVERLAY_INFO`), `Scan406.app` demande `APP_CAP_BEAM2`
+  (0x10, dépend de `OVERLAY_BEAM`) -- tous deux activés ci-dessus pour ces
+  trois apps (`EPIRB406.app`, lui, ne demande aucune capacité et marchait déjà).
+  Coût mesuré des deux flags : ~836 o (118 476 → 119 312 o).
+- `ENABLE_SWD` / `ENABLE_FEAT_F4HWN_QRCODE` : coupés le 2026-11-01 pour regagner
+  de la marge flash (mesuré : 484 o pour QRCODE, SWD lui-même proche de 0 o car
+  c'est surtout une config GPIO), sans perte fonctionnelle pour ce projet --
+  sonde de debug SWD inutile sur un binaire de release, QR code de canal
+  purement cosmétique.
+- `ENABLE_FEAT_F4HWN_LOGO` / `LOGO_SAV` restent **`ON`**, volontairement :
+  d'abord coupés par erreur en les croyant purement cosmétiques (logo de
+  démarrage), puis rétablis -- le logo personnalisé uploadé via UV Studio
+  (`LOGO_FLASH_ADDR = 0x011000`, flash externe) sert aussi d'image source à
+  l'app SSTV du catalogue officiel pour transmettre une image personnalisée.
+  Sans confusion avec le sélecteur photo/logo ADRASEC de notre propre écran
+  SSTV résident (`App/app/sstv_tx.c`), qui lui n'a aucun rapport : deux images
+  de test figées, compilées en dur côté RP2040 (`rp2040/src/sstv_master_image*.h`),
+  sans lien avec `ENABLE_FEAT_F4HWN_LOGO`.
+  D'autres extras F4HWN génériques coûtent plus cher mais touchent à de vrais
+  conforts radio (scan Progress/Faster/RSSI/Subaudible : ~4 576 o ; menu
+  catégorisé/Action Picker/Full Watch : ~3 420 o ; VOX/PMR/GMRS-FRS-MURS/Audio
+  Scope : ~1 792 o ; Logo/Logo Save : ~1 048 o mais requis pour SSTV.app, voir
+  ci-dessus) -- laissés actifs, à couper seulement si la marge redevient
+  critique.
 - `ENABLE_APRS / SARSAT / SSTV / SONDE` : les quatre écrans RP (`App/CMakeLists.txt`,
   `enable_feature`), **jamais activés par un preset** : sans ces `-D`, le menu
   F+7 existe mais sans A APRS-RP / B SARSAT-RP / C SSTV-RP / D SONDE-RP.
 - `ENABLE_FEAT_F4HWN_OVERLAY_APPS` : le menu F+7 lui-même (sinon F+7 = VOX) ;
-  exige `MULTIBOOT_OVERLAY`, présent dans `Fusion` mais pas dans `Custom`.
+  exige `MULTIBOOT_OVERLAY`, présent dans `Fusion`/`Labs` mais pas dans `Custom`.
 - `ENABLE_BYP_RAW_DEMODULATORS` : `MODULATION_RAW`, utilisé par l'écran Sonde, et
   `MODULATION_BYP`. **Depuis le 2026-10-30, BYP = profil « audio plat »** de
   l'écran Sonde et du mode hôte H28 : AF select 9 (REG_47 = 0x6942, seul moyen
