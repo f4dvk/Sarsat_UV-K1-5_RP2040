@@ -7,25 +7,31 @@
 #include "aprs_rx.h"
 #include <string.h>
 
-/* ---- FIR coefficients (Hamming-windowed, generated for fs = 13200 Hz) ----
- * BPF  900..2500 Hz, 25 taps. Symmetric, so tap order does not matter. */
+/* ---- FIR coefficients (Hamming-windowed sinc, fs = 13200 Hz) ----
+ * BPF 900..2700 Hz, 25 taps, same peak gain as the earlier 900..2500 one.
+ * The wider top (space tone + its first modulation sideband at 2200+600 Hz)
+ * was the single largest gain of the 2026-11 parameter sweep (+2.4 %
+ * packets at 0..10 dB SNR); 2600 / 2800 / 3000 Hz all measured worse.
+ * Symmetric, so tap order does not matter. */
 static const int16_t APRS_BPF_AN[25] = {
-       132,    136,     43,    -76,     75,    468,    202,  -1606,
-     -3993,  -4136,   -321,   5266,   7944,   5266,   -321,  -4136,
-     -3993,  -1606,    202,    468,     75,    -76,     43,    136,
-       132,
+        82,    176,    172,    -47,   -188,    168,    411,   -940,
+     -3733,  -4756,  -1030,   5469,   8751,   5469,  -1030,  -4756,
+     -3733,   -940,    411,    168,   -188,    -47,    172,    176,
+        82,
 };
 
-/* Post-discriminator low-pass: 13-tap Hamming, cut ~1500 Hz (fs 13200). Removes
- * the delay-and-multiply 2f ripple. Half the length of the previous 27-tap FIR:
- * that one spanned ~2.5 bit periods and smeared every bit edge into its
- * neighbours (inter-symbol interference) -- on a strong local signal that still
- * left 1-3 scattered bit errors per frame, enough to corrupt the HDLC framing
- * (erratic frame lengths for one station in the RX diagnostics). Symmetric, so
- * tap order is free. DC gain 8 (taps sum 32768, fir_run >> 12) keeps the old
+/* Post-discriminator low-pass: 21-tap Hamming, cut ~1500 Hz (fs 13200).
+ * Removes the delay-and-multiply 2f ripple. History: a 27-tap version
+ * spanned ~2.5 bits and smeared edges into neighbours (1-3 bit errors per
+ * frame on strong local signals), 13 taps fixed that; with 9 slicers and
+ * the lighter hunting PLL, 21 taps (~1.9 bits) measured +1.3 % packets over
+ * 13 and 17, and 2000 Hz / 1300 Hz cut-offs measured worse. Symmetric, so
+ * tap order is free. DC gain 8 (taps sum ~32768, fir_run >> 12) keeps the
  * scale so env / th / APRS_SLICE_MIN need no retuning. */
-static const int16_t APRS_LPF_AN[13] = {
-    -132, -128, 238, 1652, 4157, 6703, 7788, 6703, 4157, 1652, 238, -128, -132,
+static const int16_t APRS_LPF_AN[21] = {
+        64,     16,   -119,   -382,   -625,   -466,    498,   2361,
+      4686,   6645,   7414,   6645,   4686,   2361,    498,   -466,
+      -625,   -382,   -119,     16,     64,
 };
 
 /* delay-and-multiply lag: ~446 us (pico_tnc DELAY_US), rounded to samples */
@@ -35,16 +41,33 @@ static const int16_t APRS_LPF_AN[13] = {
 #define APRS_CDT_ON        1200
 #define APRS_CDT_OFF        400
 
-/* slicer: hysteresis = env/4, floored so silence does not chatter */
+/* slicer: dead-band = env >> APRS_SLICE_SHIFT (env/8: measured +1.5 %
+ * packets over env/4, env/2 much worse, env/16 slightly worse), floored so
+ * silence does not chatter */
+#define APRS_SLICE_SHIFT   3
 #define APRS_SLICE_MIN     24
 
-/* IF limiter: an FM/AFSK discriminator is amplitude-independent, so hard-slice
- * the band-pass output to a fixed magnitude before the delay-and-multiply. A
- * strong (even ADC-clipped) signal then demodulates exactly like a nominal
- * one, and unlike an AGC there are no gain dynamics to add bit jitter. The BPF
- * ahead of it removes the harmonics a square wave would otherwise raise, and
- * the limiter only runs with a carrier present (never on bare noise). */
-#define APRS_LIM_MAG       6000
+/* Soft clamp of the band-pass output at APRS_LIM_K/16 x its mean magnitude
+ * (~78 ms average). A hard sign-limiter here only lets the discriminator move
+ * at input zero crossings -- every half bit at 1200 Hz -- which spread bit
+ * transitions by +-0.25 bit even on a clean signal: a TX just 0.5 % fast then
+ * lost ~1 packet in 6. The relative clamp keeps the limiter's benefits
+ * (clipped / diode-clamped / twisted audio, noise peaks) without that.
+ * 24/16 measured best (+1 % over 19/16; 14-16 and 32 worse). */
+#define APRS_LIM_K         24
+#define APRS_LIM_MIN       64
+
+/* bit PLL correction on a tone transition: phase *= 1 - 2^-shift
+ * (shift 2 = inertia 0.75, shift 1 = 0.5). Light while hunting so the PLL
+ * locks on the first preamble flags (+3 % packets with a 4-flag TXDELAY,
+ * +4 % on a +1 % fast TX), heavier in a frame so a noisy edge does not
+ * drag it off. Same split as DireWolf (0.5 searching / 0.74 locked). */
+#ifndef APRS_PLL_SHIFT_LOCK
+#define APRS_PLL_SHIFT_LOCK 2
+#endif
+#ifndef APRS_PLL_SHIFT_HUNT
+#define APRS_PLL_SHIFT_HUNT 1
+#endif
 
 /* ------------------------------------------------------------------ FIR ---- */
 static void fir_init(aprs_fir_t *f, const int16_t *a, int n)
@@ -87,35 +110,67 @@ uint16_t aprs_fcs_residue(const uint8_t *data, int len)
 #define HDLC_HUNT 0
 #define HDLC_DATA 1
 
-/* AX.25 has no FEC. Try to repair a single bit error: for each bit position,
- * flip it and re-test the FCS (crc is cheap, and this only runs on a failure).
- * Keeps the flipped byte on success. */
-bool aprs_try_fix(uint8_t *d, int n)
+/* AX.25 has no FEC. Find the single bit flip (if any) that makes the FCS
+ * pass: the CRC is linear, so flipping bit b of byte i changes the residue
+ * by a pattern that depends only on b and on the distance to the end of the
+ * frame. Walk from the last byte backwards, advancing the 8 unit patterns by
+ * one byte (8 shift steps) per position and comparing with the residue
+ * error: O(64 n) shift steps instead of O(64 n^2) for flip-and-recompute --
+ * ~15 ms per 60-byte frame on the RP2040 became ~0.1 ms. CRC-16 has
+ * Hamming distance 4 at these lengths, so at most one position matches.
+ * Returns bit index (byte * 8 + bit), -1 if none (or the FCS is already OK). */
+int aprs_fcs_single_flip(const uint8_t *d, int n)
 {
-    for (int i = 0; i < n; i++) {
+    uint16_t want = aprs_fcs_residue(d, n) ^ 0x0F47;
+    if (!want)
+        return -1;
+    uint16_t u[8];
+    for (int b = 0; b < 8; b++)
+        u[b] = (uint16_t)(1u << b);
+    for (int i = n - 1; i >= 0; i--) {
         for (int b = 0; b < 8; b++) {
-            d[i] ^= (uint8_t)(1u << b);
-            if (aprs_fcs_residue(d, n) == 0x0F47)
-                return true;
-            d[i] ^= (uint8_t)(1u << b);
+            uint16_t c = u[b];
+            for (int k = 0; k < 8; k++)
+                c = (c & 1) ? (uint16_t)((c >> 1) ^ 0x8408) : (uint16_t)(c >> 1);
+            u[b] = c;
+            if (c == want)
+                return i * 8 + b;
         }
     }
-    return false;
+    return -1;
 }
 
-/* sanity-check an AX.25 UI frame: address field is 7-byte blocks ending with
- * the extension bit, then control 0x03 and PID 0xF0. Guards the bit-flip
- * repair against a false FCS match producing a garbage "packet". */
+bool aprs_try_fix(uint8_t *d, int n)
+{
+    int k = aprs_fcs_single_flip(d, n);
+    if (k < 0)
+        return false;
+    d[k >> 3] ^= (uint8_t)(1u << (k & 7));
+    return true;
+}
+
+/* sanity-check an AX.25 UI frame: address field is 7-byte blocks of A-Z /
+ * 0-9 / space callsigns ending with the extension bit, then control 0x03 and
+ * PID 0xF0. Guards the bit-flip repair against a false FCS match producing a
+ * garbage "packet" (the callsign check alone cut those by ~3/4). */
 static bool ax25_looks_like_ui(const uint8_t *d, int len)
 {
-    int pos = 6;                         /* first SSID byte */
+    int pos = 0;                         /* start of the current address */
     for (int blk = 0; blk < 10; blk++) {
-        if (pos >= len)
+        if (pos + 7 > len)
             return false;
-        if (d[pos] & 1) {                /* extension bit -> end of addresses */
-            return pos + 3 <= len && d[pos + 1] == 0x03 && d[pos + 2] == 0xF0;
+        for (int i = 0; i < 6; i++) {    /* callsigns are A-Z, 0-9, space */
+            uint8_t ch = d[pos + i] >> 1;
+            if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == ' ') ||
+                (d[pos + i] & 1))
+                return false;
         }
-        pos += 7;
+        pos += 6;                        /* SSID byte */
+        if (d[pos] & 1) {                /* extension bit -> end of addresses */
+            return blk >= 1 && pos + 3 <= len &&
+                   d[pos + 1] == 0x03 && d[pos + 2] == 0xF0;
+        }
+        pos++;
     }
     return false;
 }
@@ -129,7 +184,7 @@ bool aprs_try_fix_cross(aprs_rx_t *r, int chain, uint8_t *d, int len)
             continue;
         if (r->last_cand[j].len != len)
             continue;
-        /* all 3 chains advance on the same sample clock (independent PLL
+        /* all chains advance on the same sample clock (independent PLL
          * per chain, but fed the same audio) -- a stale candidate from a
          * much earlier, unrelated burst must not be mistaken for a sibling
          * decode of *this* frame. ~50 ms is generous slack for PLL jitter
@@ -169,6 +224,29 @@ bool aprs_try_fix_cross(aprs_rx_t *r, int chain, uint8_t *d, int len)
 #define APRS_DIAG(FR, L, RES, UI) \
     do { if (r->fcb) r->fcb(r->fcb_user, (FR), (L), chain, (RES), (UI)); } while (0)
 
+/* sibling chains close the same frame within a few bits of each other */
+#define APRS_HOLD_SAMPLES  (APRS_RX_SAMPLE_RATE_HZ / 100)
+
+static void aprs_deliver(aprs_rx_t *r, const uint8_t *d, int plen, bool fixed,
+                         int chain, int ui)
+{
+    /* de-dup: the same frame usually decodes on several chains at once */
+    if (r->last_len == plen &&
+        (r->now - r->last_at) < (uint32_t)(APRS_RX_SAMPLE_RATE_HZ * 3 / 2) &&
+        memcmp(r->last, d, (size_t)plen) == 0) {
+        APRS_DIAG(d, plen, APRS_RXR_DEDUP, ui);
+        return;
+    }
+    memcpy(r->last, d, (size_t)plen);
+    r->last_len = plen;
+    r->last_at  = r->now;
+
+    r->n_packets++;
+    APRS_DIAG(d, plen, fixed ? APRS_RXR_FIXED : APRS_RXR_OK, ui);
+    if (r->cb)
+        r->cb(d, plen, fixed, r->user);
+}
+
 static void aprs_output(aprs_rx_t *r, aprs_chan_t *c)
 {
     const int chain = (int)(c - r->ch);
@@ -190,15 +268,14 @@ static void aprs_output(aprs_rx_t *r, aprs_chan_t *c)
     if (!ok) {
         /* repair a single bit error, accepting only a flip that also yields a
          * plausible UI frame (a bare FCS match has a ~1 % false-positive rate) */
-        for (int i = 0; i < len && !ok; i++)
-            for (int b = 0; b < 8 && !ok; b++) {
-                c->data[i] ^= (uint8_t)(1u << b);
-                if (aprs_fcs_residue(c->data, len) == 0x0F47 &&
-                    ax25_looks_like_ui(c->data, len - 2))
-                    ok = true;
-                else
-                    c->data[i] ^= (uint8_t)(1u << b);
-            }
+        int k = aprs_fcs_single_flip(c->data, len);
+        if (k >= 0) {
+            c->data[k >> 3] ^= (uint8_t)(1u << (k & 7));
+            if (ax25_looks_like_ui(c->data, len - 2))
+                ok = true;
+            else
+                c->data[k >> 3] ^= (uint8_t)(1u << (k & 7));
+        }
         if (!ok)
             ok = aprs_try_fix_cross(r, chain, c->data, len);
         if (ok)
@@ -224,21 +301,21 @@ static void aprs_output(aprs_rx_t *r, aprs_chan_t *c)
 
     const int plen = len - 2;                          /* strip the FCS */
 
-    /* de-dup: the same frame usually decodes on several chains at once */
-    if (r->last_len == plen &&
-        (r->now - r->last_at) < (uint32_t)(APRS_RX_SAMPLE_RATE_HZ * 3 / 2) &&
-        memcmp(r->last, c->data, (size_t)plen) == 0) {
-        APRS_DIAG(c->data, plen, APRS_RXR_DEDUP, ui);
+    if (res == APRS_RXR_FIXED) {
+        if (r->pend_valid && (r->pend_len != plen ||
+                              memcmp(r->pend, c->data, (size_t)plen) != 0)) {
+            r->pend_valid = false;     /* two repairs disagree: one is wrong */
+            return;
+        }
+        memcpy(r->pend, c->data, (size_t)plen);
+        r->pend_len   = plen;
+        r->pend_chain = chain;
+        r->pend_at    = r->now;
+        r->pend_valid = true;
         return;
     }
-    memcpy(r->last, c->data, (size_t)plen);
-    r->last_len = plen;
-    r->last_at  = r->now;
-
-    r->n_packets++;
-    APRS_DIAG(c->data, plen, res, ui);
-    if (r->cb)
-        r->cb(c->data, plen, r->user);
+    r->pend_valid = false;             /* an intact copy beats any repair */
+    aprs_deliver(r, c->data, plen, false, chain, ui);
 }
 
 #ifdef APRS_RX_DEBUG
@@ -300,14 +377,14 @@ void aprs_rx_init(aprs_rx_t *r, int sample_rate_hz,
 
     r->dc = (int32_t)2048 << 8;
     fir_init(&r->bpf, APRS_BPF_AN, 25);
-    fir_init(&r->lpf, APRS_LPF_AN, 13);
+    fir_init(&r->lpf, APRS_LPF_AN, 21);
 
-    /* slice at -3/8, 0, +3/8 of the envelope -- an AC-coupled / diode-clamped
-     * feed (the C-Board) makes the discriminator output asymmetric, so the
-     * best decision point is often not zero. */
-    static const int32_t bias[APRS_RX_SLICERS] = { -3, 0, 3 };
+    /* slice at bias levels spread symmetrically around 0 (default 3 chains at
+     * -3/8, 0, +3/8 of the envelope) -- an AC-coupled / diode-clamped feed
+     * (the C-Board) makes the discriminator output asymmetric, so the best
+     * decision point is often not zero. */
     for (int i = 0; i < APRS_RX_SLICERS; i++) {
-        r->ch[i].bias_num = (i < (int)(sizeof bias / sizeof bias[0])) ? bias[i] : 0;
+        r->ch[i].bias_num = (i - (APRS_RX_SLICERS - 1) / 2) * APRS_RX_BIAS_STEP;
         r->ch[i].state    = HDLC_HUNT;
     }
 }
@@ -342,6 +419,11 @@ void aprs_rx_sample(aprs_rx_t *r, uint16_t adc12)
     int32_t raw = adc12 & 0x0FFF;
     r->now++;
 
+    if (r->pend_valid && r->now - r->pend_at >= APRS_HOLD_SAMPLES) {
+        r->pend_valid = false;
+        aprs_deliver(r, r->pend, r->pend_len, true, r->pend_chain, 1);
+    }
+
     r->n_samp++;
     if (raw <= 1 || raw >= 4094)                    /* ADC rail = input clipping */
         r->n_clip++;
@@ -364,9 +446,14 @@ void aprs_rx_sample(aprs_rx_t *r, uint16_t adc12)
     if (!r->cdt)
         return;
 
-    /* band-pass, then HARD-limit (sign slice), then delay-and-multiply */
+    /* band-pass, then soft clamp, then delay-and-multiply */
     int32_t v = fir_run(&r->bpf, s);                 /* ~ +-16000 */
-    v = (v > 0) ? APRS_LIM_MAG : (v < 0) ? -APRS_LIM_MAG : 0;
+    r->lim_env += ((v < 0 ? -v : v) - r->lim_env) >> 10;
+    int32_t lim = (r->lim_env * APRS_LIM_K) >> 4;
+    if (lim < APRS_LIM_MIN)
+        lim = APRS_LIM_MIN;
+    if (v > lim)       v = lim;
+    else if (v < -lim) v = -lim;
 
     int32_t d = r->delay_line[r->delay_idx];
     r->delay_line[r->delay_idx] = v;
@@ -391,7 +478,7 @@ void aprs_rx_sample(aprs_rx_t *r, uint16_t adc12)
 
     int32_t mag = lpc < 0 ? -lpc : lpc;
     r->env += (mag - r->env) >> 6;
-    int32_t th = r->env >> 2;
+    int32_t th = r->env >> APRS_SLICE_SHIFT;
     if (th < APRS_SLICE_MIN)
         th = APRS_SLICE_MIN;
 
@@ -413,7 +500,12 @@ void aprs_rx_sample(aprs_rx_t *r, uint16_t adc12)
             c->nrzi = c->bit;
         }
         if (c->bit != c->pval) {
-            c->pll -= (uint32_t)((int32_t)c->pll >> 2);
+            /* nudge the phase toward the transition: a light PLL while
+             * hunting (locks on the first preamble flags), a heavier one once
+             * in a frame (rides over noisy edges) -- DireWolf 0.5 / 0.75 */
+            int sh = (c->state == HDLC_DATA) ? APRS_PLL_SHIFT_LOCK
+                                             : APRS_PLL_SHIFT_HUNT;
+            c->pll -= (uint32_t)((int32_t)c->pll >> sh);
             c->pval = c->bit;
         }
     }

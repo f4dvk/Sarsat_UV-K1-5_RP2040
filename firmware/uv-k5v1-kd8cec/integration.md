@@ -674,6 +674,11 @@ réutilise entièrement la file digipeat**.
   le RP2040 n'envoie pas de `0x06D3`/`0x06D2` en KISS).
 - **`draw_config()`** : en-tête `KISS TNC  host USB` quand actif.
 - Pas besoin de garder un écran ouvert : le tick suffit. Un VFO sur 144.800 FM.
+- **Champ menu `RP2040 bootsel`** (`F_BOOT`, dernier, 2026-11-05) : MENU deux
+  fois en moins de 3 s (`s_boot_arm`, 150 ticks de 20 ms ; le libellé passe à
+  `Bootsel? MENU=OK`, toute autre touche désarme) envoie `0x06D7`
+  (`APRS_CMD_BOOTSEL`, sans charge) : la C-Board redémarre dans son chargeur
+  UF2 ROM, à reflasher par glisser-déposer sans toucher à son bouton.
 
 Build V1 vert, 0 warning : **`text 60988 o`** (+168 o, marge ~450 o). Le
 dispatch `0x06D6` était déjà câblé (digipeater), rien à changer dans `build.sh`.

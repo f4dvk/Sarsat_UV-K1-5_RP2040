@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
+#include "pico/bootrom.h"
 #include "hardware/adc.h"
 #include "hardware/dma.h"
 #include "hardware/uart.h"
@@ -82,6 +83,79 @@ static const uint8_t *sstv_image_pd120(void)
  * field -> a flag in CMD_APRS_CONFIG). */
 static bool       g_kiss;
 static kiss_dec_t g_kiss_rx;
+
+/* KISS output queue, drained one byte per CFG_KISS_BYTE_US from the main
+ * loop (see decoder_config.h for why the stream must be paced). */
+static uint8_t  g_kiss_txq[CFG_KISS_TXQ_SIZE];
+static uint32_t g_kiss_txq_head, g_kiss_txq_tail;   /* head = next out */
+static uint32_t g_kiss_txq_dropped;
+
+static uint32_t kiss_txq_count(void) { return g_kiss_txq_tail - g_kiss_txq_head; }
+
+static void kiss_txq_push_frame(const uint8_t *b, int n)
+{
+    if (n <= 0) return;
+    if (kiss_txq_count() + (uint32_t)n > CFG_KISS_TXQ_SIZE) { g_kiss_txq_dropped++; return; }
+    for (int i = 0; i < n; i++)
+        g_kiss_txq[g_kiss_txq_tail++ % CFG_KISS_TXQ_SIZE] = b[i];
+}
+
+static void kiss_txq_service(void)
+{
+    if (kiss_txq_count() == 0) return;
+#if CFG_KISS_BYTE_US
+    static uint64_t next_us;
+    uint64_t now = time_us_64();
+    if (now < next_us) return;
+    next_us = now + CFG_KISS_BYTE_US;
+    putchar_raw(g_kiss_txq[g_kiss_txq_head++ % CFG_KISS_TXQ_SIZE]);
+#else
+    while (kiss_txq_count())
+        putchar_raw(g_kiss_txq[g_kiss_txq_head++ % CFG_KISS_TXQ_SIZE]);
+#endif
+}
+
+
+/* USB-CDC "modem lines" for legacy hosts (2026-11-05).
+ * UI-View32's KISS mode greys out the handshaking choice and drives the
+ * port with hardware handshaking: it waits for CTS before writing anything.
+ * TinyUSB never sends the CDC SERIAL_STATE notification, so Windows reports
+ * CTS/DSR/DCD low forever and UI-View sits on an hourglass (AGWPE and PuTTY
+ * ignore those lines). usbser.sys raises CTS whenever DSR is set, so we
+ * assert DSR+DCD on the notification endpoint once the device is
+ * configured and again on every line-state change (= port open). The
+ * notification endpoint is 0x81 and the comm interface is 0 in the SDK's
+ * stdio_usb descriptors. Both callbacks run inside tud_task(), which the
+ * SDK serialises with its stdio mutex, so the endpoint claim can't race. */
+#include "tusb.h"
+#include "device/usbd_pvt.h"
+
+static void usb_cdc_assert_modem_lines(void)
+{
+    static uint8_t notif[10] __attribute__((aligned(4))) = {
+        0xA1, 0x20,          /* class/interface, IN ; SERIAL_STATE         */
+        0x00, 0x00,          /* wValue                                     */
+        0x00, 0x00,          /* wIndex  = CDC comm interface 0              */
+        0x02, 0x00,          /* wLength = 2                                 */
+        0x03, 0x00,          /* bmUartState: bit0 DCD (RxCarrier), bit1 DSR */
+    };
+    if (!tud_mounted())
+        return;
+    if (!usbd_edpt_claim(0, 0x81))       /* previous one still in flight */
+        return;
+    usbd_edpt_xfer(0, 0x81, notif, (uint16_t)sizeof notif);
+}
+
+void tud_mount_cb(void)
+{
+    usb_cdc_assert_modem_lines();
+}
+
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+{
+    (void)itf; (void)dtr; (void)rts;
+    usb_cdc_assert_modem_lines();
+}
 
 #if SARSAT_LOG
 #define LOG(...)  do { if (!g_kiss) printf(__VA_ARGS__); } while (0)
@@ -809,6 +883,13 @@ static void link_poll(void)
                     memset(&g_kiss_rx, 0, sizeof g_kiss_rx);
                 }
             }
+        } else if (id == CMD_RP_BOOTSEL) {
+            /* The radio's APRS menu asked for the UF2 loader (double MENU on
+             * "RP2040 bootsel"). Never returns: the board re-enumerates as a
+             * mass-storage drive until it is reset or a UF2 is dropped on it. */
+            LOG("[link]   BOOTSEL requested by the radio -- rebooting into the UF2 loader\n");
+            sleep_ms(50);                          /* let that line out */
+            reset_usb_boot(0, 0);
         } else if (id == CMD_SSTV_START && dl >= 1) {
             if (d[0] == SSTV_STREAM_MODE_SCOTTIE1)
                 sstv_stream_scottie1();
@@ -855,6 +936,11 @@ static void link_poll(void)
 #if CFG_TX_HEXDUMP
             LOG("[link]   ACK 0x%04X status=%u\n", id & 0x7FFF, dl ? d[0] : 0);
 #endif
+        } else {
+            /* 2026-11-05: a radio command this build does not know (or a
+             * stale one) used to vanish silently -- say so, it is the first
+             * thing to look at when a new menu action "does nothing". */
+            LOG("[link]   unhandled radio command 0x%04X (%u B)\n", id, (unsigned)dl);
         }
     }
 }
@@ -1288,8 +1374,10 @@ static void my_position(int32_t *lat, int32_t *lon)
 
 /* WIDEn-N digipeat: attempted on every valid frame regardless of whether its
  * info field parses for display (a digipeater repeats the whole packet, it
- * does not need to understand it). See aprs_digi.h for the decision rule. */
-static void aprs_try_digipeat(const uint8_t *ax25, int len)
+ * does not need to understand it). See aprs_digi.h for the decision rule.
+ * A bit-repaired frame is never repeated: a wrong repair passes the FCS, and
+ * relaying it would put a corrupted packet back on the air. */
+static void aprs_try_digipeat(const uint8_t *ax25, int len, bool fixed)
 {
     if (g_aprs_digi_level == APRS_DIGI_OFF || len <= 0 || len > 256)
         return;
@@ -1303,6 +1391,11 @@ static void aprs_try_digipeat(const uint8_t *ax25, int len)
                                  g_aprs_my_call, g_aprs_my_ssid);
     if (!nlen)
         return;
+    if (fixed) {
+        LOG("[digi]   #%lu needed a bit repair -- not repeated\n",
+            (unsigned long)g_aprs_pkts);
+        return;
+    }
 
     uint32_t now_ms = to_ms_since_boot(get_absolute_time());
     if (aprs_digi_seen_recently(d, nlen, now_ms))
@@ -1384,21 +1477,24 @@ static void aprs_auto_ack(const char *sender, const char *num)
 /* Called from aprs_rx on a full FCS-valid AX.25 frame. Parse the APRS info and
  * push a structured 0x06D3 to the radio (falls back to 0x06D2 raw text if the
  * info field wasn't understood). */
-static void aprs_on_packet(const uint8_t *ax25, int len, void *user)
+static void aprs_on_packet(const uint8_t *ax25, int len, bool fixed, void *user)
 {
     (void)user;
     g_aprs_pkts++;
 
     if (g_kiss) {   /* KISS TNC: the host is the AX.25 stack -- hand it the raw
-                     * frame and do nothing else (no digipeat, no display) */
+                     * frame and do nothing else (no digipeat, no display).
+                     * KISS can't flag a bit-repaired frame and the host may
+                     * digipeat it, so those are withheld. */
+        if (fixed)
+            return;
         static uint8_t kb[KISS_MAX_FRAME * 2 + 4];
         int kn = kiss_encode(kb, (int)sizeof kb, ax25, len);
-        for (int i = 0; i < kn; i++)
-            putchar_raw(kb[i]);
+        kiss_txq_push_frame(kb, kn);     /* paced out by kiss_txq_service() */
         return;
     }
 
-    aprs_try_digipeat(ax25, len);
+    aprs_try_digipeat(ax25, len, fixed);
 
     aprs_info_t ai;
     bool parsed = aprs_parse(ax25, len, &ai);
@@ -2075,6 +2171,7 @@ int main(void)
 
     LOG("\n=== SARSAT 406 MHz 1G decoder (RP2040) ===\n");
     LOG("board      : " PICO_BOARD "\n");
+    LOG("build      : " __DATE__ " " __TIME__ "\n");   /* which UF2 is this? */
     LOG("audio in   : GP%d / ADC%d, %d Hz, %d samples/bit, window %d ms (%d smp)\n",
         CFG_ADC_GPIO, CFG_ADC_CHANNEL, CFG_SAMPLE_RATE_HZ,
         CFG_SAMPLE_RATE_HZ / 400, CFG_WINDOW_MS, WINDOW_SAMPLES);
@@ -2181,6 +2278,7 @@ int main(void)
                     if (fl >= 16 && fl <= 256)
                         radio_send(CMD_APRS_DIGI, g_kiss_rx.frame, (size_t)fl);
                 }
+                kiss_txq_service();      /* one paced byte of RX KISS, if due */
                 sleep_us(300);
                 continue;
             }

@@ -3,10 +3,12 @@
  *
  * Streaming: feed one ADC sample at a time (12-bit, raw, DC not removed) at
  * APRS_RX_SAMPLE_RATE_HZ. On a complete, FCS-valid AX.25 frame the packet
- * callback fires with the frame minus the 2 FCS bytes.
+ * callback fires with the frame minus the 2 FCS bytes. `fixed` = it only
+ * passed after a bit repair (then held ~10 ms, and dropped if another chain
+ * decodes the frame intact meanwhile) -- it may still be wrong.
  *
  * DSP chain (ported from JN1DFF pico_tnc, BSD-3):
- *   raw ADC -> DC removal -> carrier detect -> band-pass FIR -> hard limiter
+ *   raw ADC -> DC removal -> carrier detect -> band-pass FIR -> soft clamp
  *   -> delay-and-multiply discriminator -> short boxcar low-pass    (shared)
  *   -> [ N parallel slicers at different bias levels
  *        -> DireWolf-style bit PLL -> NRZI -> HDLC de-frame ]      (per chain)
@@ -25,9 +27,19 @@
 
 #define APRS_RX_SAMPLE_RATE_HZ 13200      /* 1200 * 11                        */
 #define APRS_RX_MAX_FRAME      330        /* AX.25 addr+ctl+pid+info+fcs      */
-#define APRS_RX_SLICERS        3          /* parallel decode chains           */
+/* 9 decision levels at -4/8 .. +4/8 of the envelope (DireWolf's "+" profile).
+ * Measured vs 3 levels at -3/8, 0, +3/8: +6 % packets at 0..10 dB SNR, up to
+ * +20 % on twisted (pre/de-emphasised) audio, ~1 dB on a +1 % fast TX; costs
+ * ~4 kB RAM and a few % CPU. */
+#ifndef APRS_RX_SLICERS
+#define APRS_RX_SLICERS        9          /* parallel decode chains           */
+#endif
+#ifndef APRS_RX_BIAS_STEP
+#define APRS_RX_BIAS_STEP      1          /* slice level spacing, in env/8    */
+#endif
 
-typedef void (*aprs_rx_packet_cb)(const uint8_t *ax25, int len, void *user);
+typedef void (*aprs_rx_packet_cb)(const uint8_t *ax25, int len, bool fixed,
+                                  void *user);
 
 typedef struct {
     const int16_t *a;
@@ -61,6 +73,7 @@ typedef struct {
     int32_t  cdt_lvl;
     bool     cdt;
     aprs_fir_t bpf, lpf;
+    int32_t  lim_env;            /* mean |band-pass out|, sets the soft clamp */
     int32_t  delay_line[16];
     int      delay_idx;
     int32_t  lp_hi, lp_lo;       /* peak-tracking slicer rails               */
@@ -71,7 +84,7 @@ typedef struct {
     aprs_chan_t ch[APRS_RX_SLICERS];
 
     /* last frame candidate delivered/attempted by each chain (post any
-     * single-bit repair), for aprs_try_fix_cross(): 3 independent slicers
+     * single-bit repair), for aprs_try_fix_cross(): the independent slicers
      * of the same audio usually agree on most of a frame and diverge only
      * at the few byte positions where one of them mis-sliced a bit -- a
      * chain that still fails its own FCS check can often be rescued by
@@ -82,6 +95,13 @@ typedef struct {
         uint32_t at;
         bool     valid;
     } last_cand[APRS_RX_SLICERS];
+
+    /* repaired frame waiting for a possible intact copy from another chain */
+    uint8_t  pend[APRS_RX_MAX_FRAME];
+    int      pend_len;
+    int      pend_chain;
+    uint32_t pend_at;
+    bool     pend_valid;
 
     /* de-dup: suppress the same frame from more than one chain */
     uint8_t  last[APRS_RX_MAX_FRAME];
@@ -137,8 +157,10 @@ void aprs_rx_levels(const aprs_rx_t *r, int32_t *cdt_lvl, int32_t *env, int *car
 /* FCS-16/X.25 residue: run over frame incl. the 2 FCS bytes, == 0x0F47 if OK. */
 uint16_t aprs_fcs_residue(const uint8_t *data, int len);
 
-/* Single-bit-error repair: flip each bit in turn, keep the flip that makes the
- * FCS residue valid. Returns true (and leaves `d` fixed) on success. */
+/* Single-bit-error repair: find the one bit flip (CRC linearity, O(n)) that
+ * makes the FCS residue valid. aprs_fcs_single_flip() returns its index
+ * (byte * 8 + bit) or -1; aprs_try_fix() applies it to `d` and returns true. */
+int      aprs_fcs_single_flip(const uint8_t *d, int len);
 bool     aprs_try_fix(uint8_t *d, int len);
 
 /* Cross-channel repair: try swapping in chain `sibling`'s cached bytes (see

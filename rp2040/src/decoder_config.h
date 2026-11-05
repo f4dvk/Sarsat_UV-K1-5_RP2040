@@ -164,6 +164,13 @@
                                       /* aprs_digi.h) and it is not a recent    */
                                       /* duplicate -- OR, in KISS mode, for     */
                                       /* every frame the host asks to send.     */
+#define CMD_RP_BOOTSEL       0x06D7   /* radio -> RP2040: no payload. Reboot    */
+                                      /* into the ROM UF2 loader (BOOTSEL) so a */
+                                      /* boxed-in C-Board can be reflashed by   */
+                                      /* drag-and-drop without touching its     */
+                                      /* button. Replaces the SDK's 1200 Bd     */
+                                      /* trick, disabled in CMakeLists (a KISS  */
+                                      /* host may legitimately pick 1200 Bd).   */
 
 /* ---- Radiosondes (RS41 full decode, M10/M20 full GPS decode) ----------- */
 /* MODE_SONDE is a THIRD, explicitly-opened capture mode alongside SARSAT and
@@ -486,6 +493,19 @@ _Static_assert((1u << SONDE_RING_BITS) == SONDE_RING_SAMPLES * 2,
 /* mode auto-selects from the radio's reported RX frequency (HELLO reply):     */
 #define CFG_APRS_BAND_LO_10HZ  14400000u  /* 144.0 MHz : >= this -> APRS mode   */
 #define CFG_APRS_BAND_HI_10HZ  14800000u  /* 148.0 MHz : <= this -> APRS mode   */
+
+/* KISS TNC mode: optional pacing of the KISS stream to the host, one byte
+ * per USB packet like a 9600 Bd serial TNC (2026-11-05, UI-View32 chase).
+ * Measured on Windows: a frame written back-to-back leaves the board as
+ * 5..16 USB packets and usbser.sys raises one "character received" event per
+ * packet, not per byte. Pacing at 1500 us/byte was tried against UI-View32's
+ * direct KISS mode and did NOT make it receive (it still does under Wine and
+ * in UI-View's terminal mode; AGWPE and PuTTY always worked). Left in,
+ * disabled, as the only remaining device-side knob; UI-View is used through
+ * AGWPE instead. Non-zero = microseconds per byte (1500 = 667 B/s, well above
+ * the ~150 B/s 1200 Bd air rate); 0 = burst. */
+#define CFG_KISS_BYTE_US     0u
+#define CFG_KISS_TXQ_SIZE    2048u   /* ~6 max-size frames */
 
 #define SARSAT_LVL_OK        0
 #define SARSAT_LVL_CLIP      1

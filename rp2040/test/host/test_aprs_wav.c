@@ -26,7 +26,7 @@
 
 static int g_pkts;
 
-static void on_packet(const uint8_t *ax25, int len, void *user)
+static void on_packet(const uint8_t *ax25, int len, bool fixed, void *user)
 {
     (void)user;
     g_pkts++;
@@ -41,7 +41,8 @@ static void on_packet(const uint8_t *ax25, int len, void *user)
         if (ssid) { src[k++] = '-'; src[k++] = (char)('0' + ssid); }
         src[k] = 0;
     }
-    printf("  >>> PACKET #%d  len=%d  src=%s\n", g_pkts, len, src);
+    printf("  >>> PACKET #%d  len=%d  src=%s%s\n", g_pkts, len, src,
+           fixed ? "  (repaired, not digipeated)" : "");
 }
 
 static void frame_cb(void *u, const uint8_t *f, int len, int ch, int res, int ui)

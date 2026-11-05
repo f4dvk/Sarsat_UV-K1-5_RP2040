@@ -41,7 +41,14 @@ add_executable(sarsat_rp2040
     src/sonde_dfm.c
     src/sonde_m10.c
     src/sstv_demod.c
+    src/usb_desc_fix.c
 )
+
+# The SDK's CDC notification endpoint is 8 bytes wide, too small for the
+# 10-byte SERIAL_STATE notification main.c sends for legacy KISS hosts
+# (UI-View32). usb_desc_fix.c re-declares it at 16 bytes and takes over the
+# configuration-descriptor callback through the linker (see that file).
+target_link_options(sarsat_rp2040 PRIVATE "LINKER:--wrap=tud_descriptor_configuration_cb")
 
 target_include_directories(sarsat_rp2040 PRIVATE src)
 
@@ -57,6 +64,14 @@ target_compile_definitions(sarsat_rp2040 PRIVATE SARSAT_VERBOSE=0)
 # don't let a slow / stalled serial monitor block the ADC sample pump: a
 # console write gives up after 1 ms instead of the 500 ms default.
 target_compile_definitions(sarsat_rp2040 PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=1000)
+# AGWPE opens the COM port without raising DTR, and by default the SDK then
+# ignores the port both ways (no KISS RX out, no KISS TX in): treat a mounted
+# USB as connected instead.
+target_compile_definitions(sarsat_rp2040 PRIVATE PICO_STDIO_USB_CONNECTION_WITHOUT_DTR=1)
+# The SDK reboots into BOOTSEL when a host selects 1200 Bd -- the natural
+# setting for a 1200 Bd KISS TNC in UI-View/AGWPE. The COM port would simply
+# vanish. picotool still resets through its vendor interface.
+target_compile_definitions(sarsat_rp2040 PRIVATE PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE=0)
 if(SARSAT_SLICER_DOUBLE)
     target_compile_definitions(sarsat_rp2040 PRIVATE SARSAT_SLICER_DOUBLE=1)
 endif()

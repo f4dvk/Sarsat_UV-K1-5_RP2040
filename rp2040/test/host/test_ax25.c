@@ -13,17 +13,20 @@
 static int fail;
 #define CHECK(c) do { if (!(c)) { printf("  FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); fail = 1; } } while (0)
 
+#define TONE_BIT(tones, i) (((tones)[(i) >> 3] >> ((i) & 7)) & 1u)
+
 /* decode a tone stream back to frame bytes; returns len or -1.
  * un-NRZI + HDLC de-frame (LSB-first, de-stuff, flag = 0x7E). */
 static int hdlc_decode(const uint8_t *tones, int nb, uint8_t *out, int outcap)
 {
-    int prev = tones[0];
+    int prev = (int)TONE_BIT(tones, 0);
     int len = 0, acc = 0, nbit = 0, ones = 0;
     bool sync = false;
 
     for (int i = 1; i < nb; i++) {
-        int b = (tones[i] == prev) ? 1 : 0;   /* NRZI: same tone -> 1 */
-        prev = tones[i];
+        int t = (int)TONE_BIT(tones, i);
+        int b = (t == prev) ? 1 : 0;          /* NRZI: same tone -> 1 */
+        prev = t;
 
         if (ones == 6 && b == 0) {             /* 0111 1110 -> flag boundary */
             if (sync && len >= 16) return len;               /* closing flag */
@@ -67,7 +70,7 @@ int main(void)
     CHECK(strncmp(got, "F4ABC ", 6) == 0);
 
     /* HDLC + NRZI, then decode back */
-    uint8_t tones[AX25_MAX_BITS];
+    uint8_t tones[(AX25_MAX_BITS + 7) / 8];
     int nb = ax25_hdlc_nrzi(frame, flen, 24, tones);
     printf("HDLC/NRZI: %d bit cells (%d ms @ 1200 bd)\n", nb, nb * 1000 / 1200);
     CHECK(nb > 0);

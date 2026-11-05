@@ -325,6 +325,18 @@ static void APRS_PushConfig(void)
     SendReply(UART_PORT_UART, b, sizeof(b));
 }
 
+/* "RP2040 bootsel" menu row (2026-11-05): reboot the C-Board into its ROM UF2
+ * loader so it can be reflashed by drag-and-drop while boxed in. Guarded by a
+ * second MENU press within ~3 s (s_boot_arm counts this screen's 20 ms
+ * ticks); any other key disarms. No payload, no ACK -- the RP2040 is gone. */
+static uint8_t s_boot_arm;
+
+static void APRS_SendBootsel(void)
+{
+    uint8_t b[4] = { APRS_CMD_BOOTSEL & 0xFF, APRS_CMD_BOOTSEL >> 8, 0, 0 };
+    SendReply(UART_PORT_UART, b, sizeof(b));
+}
+
 /* ------------------------------------------- GPS fix from the C-Board (0x06D5) */
 static struct {
     bool     seen;         /* at least one 0x06D5 frame ever received         */
@@ -1388,7 +1400,8 @@ static KEY_Code_t nav_key(KEY_Code_t k)
 
 /* ---------------------------------------------------------- config screen  */
 enum { F_CALL, F_SSID, F_PATH, F_SYM, F_TEXT, F_BATTXT, F_INT, F_POPUP, F_AFGAIN, F_SQL,
-       F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_SENDB, F_KISS, F_N };
+       F_BLIGHT, F_DIGI, F_POS, F_LAT, F_LON, F_MSGTO, F_SEND, F_SENDB, F_KISS,
+       F_BOOT, F_N };
 
 /* T9-style multi-tap entry (2026-10-11; replaces the original UP/DOWN
  * "cycle through every character" editing -- it left no way to go back and
@@ -1532,6 +1545,9 @@ static void field_str(int f, char *out)
     case F_KISS:
         strcpy(out, (gAprsCfg.opts & APRS_OPT_KISS) ? "KISS TNC on"
                                                     : "KISS TNC off");
+        break;
+    case F_BOOT:
+        strcpy(out, s_boot_arm ? "Bootsel? MENU=OK" : "RP2040 bootsel");
         break;
     }
 }
@@ -2175,6 +2191,7 @@ void APP_RunAprs(void)
         }
 
         if (t9_hold) t9_hold--;   /* multi-tap commit window, decays every tick */
+        if (s_boot_arm && !--s_boot_arm) dirty = true;   /* bootsel confirm expired */
 
         KEY_Code_t k = KEYBOARD_Poll();
         if (k == KEY_INVALID) { armed = true; prev = k; APRS_TickDelay(20); continue; }
@@ -2184,6 +2201,7 @@ void APP_RunAprs(void)
         close_at = 0;                         /* a key cancels the auto-close */
         const KEY_Code_t raw_key = k;         /* field-to-field move: see below */
         k = nav_key(k);                       /* UV-K1 SetNav (see nav_key()) */
+        if (k != KEY_MENU) s_boot_arm = 0;    /* anything else disarms bootsel */
 
         /* This loop blocks the main task, whose backlight and auto-keypad-lock
          * countdowns then never tick -- so nothing turns them back on. Refresh
@@ -2253,6 +2271,11 @@ void APP_RunAprs(void)
                 }
                 if (sel == F_SENDB) {         /* confirm + send the SARSAT beacon */
                     if (s_bcn.valid && APRS_MsgCanSend()) s_wiz = 3;
+                    break;
+                }
+                if (sel == F_BOOT) {          /* 2nd MENU within ~3 s -> BOOTSEL */
+                    if (s_boot_arm) { s_boot_arm = 0; APRS_SendBootsel(); }
+                    else            s_boot_arm = 150;   /* 150 x 20 ms */
                     break;
                 }
                 editing = 1; callcur = 0; s_klen = 0;

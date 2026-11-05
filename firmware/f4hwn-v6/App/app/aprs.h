@@ -30,6 +30,9 @@
                                      * digipeat (addr..ctrl..pid..info, no
                                      * FCS -- we append it and key up on
                                      * channel 170, same as our own beacon)    */
+#define APRS_CMD_BOOTSEL  0x06D7u   /* radio -> RP2040: no payload -- reboot
+                                     * the C-Board into its UF2 loader (menu
+                                     * "RP2040 bootsel", double MENU)          */
 
 /* APRS_PATH_W2_2 appended at the end, not inserted among the others: gAprsCfg
  * (this field included) is persisted as a raw byte dump (see APRS_Save()/
