@@ -39,8 +39,10 @@ Le firmware radio (Phase 3/4) ajoute un gestionnaire pour les ID ci-dessous dans
 | `0x06D2` | `APRS_RXTEXT` | `line:u8, ascii[0..18]` | RP2040 → radio : une ligne d'un paquet APRS 144.8 MHz décodé, utilisée seulement quand le champ info n'a **pas** pu être parsé. `line = 0xFF` efface la vue RX ; `line = 0` est l'indicatif source, `1..3` le champ info enroulé. Sans ACK. |
 | `0x06D3` | `APRS_RXINFO` | décodé structuré (ci-dessous) | RP2040 → radio : un paquet APRS parsé (symbole, lat/lon, cap/vitesse/altitude, distance+azimut vers l'opérateur, source, nom d'objet, chemin digipeater, texte commentaire/statut/message). La radio le rend façon Kenwood avec une icône symbole et une ligne « Direct » / « Via … ». Sans ACK. |
 | `0x06D5` | `APRS_GPS` | `flags:u8, lat_e5:i32, lon_e5:i32, speed_kmh:u16, course_deg:u16, alt_m:i16, sats:u8, utc_h:u8, utc_m:u8, utc_s:u8` LE (19 o) | RP2040 → radio, ~toutes les 3 s : le fix d'un module GPS sur l'en-tête NMEA de la C-Board (UART1 GP5, 9600 8N1, `$GxRMC`/`$GxGGA`). `flags` bit0 = fix valide. `utc_h/m/s` viennent du champ heure de la trame RMC (extraits meme sans fix valide, un recepteur peut connaitre l'heure avant la position) ; tous a 0 si aucune trame RMC n'a encore ete recue. Envoyé seulement une fois qu'un module a été vu. La radio l'utilise pour la balise quand le champ **Pos** de son menu APRS est sur **GPS** (sinon elle balise la lat/lon manuelle), pour l'écran **GPS-RP** (heure UTC, satellites, coordonnées, altitude), et pilote un symbole GPS en barre haute (absent = pas de trames, clignotant = `flags` bit0 à 0, fixe = fix). Le RP2040 utilise aussi son propre fix pour la distance/azimut RX quand il est valide. Les 3 octets UTC sont ajoutés en fin de trame (pas insérés au milieu) : une radio qui lit encore l'ancien format 16 o ignore juste ces octets. Sans ACK. |
-| `0x06D6` | `APRS_DIGI` | trame AX.25 brute : `dst[7] src[7] digi[7]×n ctrl pid info`, **sans FCS** | RP2040 → radio, sans ACK : une trame que le RP2040 a décidé de digipeater (`aprs_digi.h` — WIDEn-N New-N-Paradigm, cf. section dédiée plus bas) et déjà mutée (SSID décrémenté / bit H posé). La radio recalcule le FCS et émet en AFSK sur le canal 170, exactement comme sa propre balise (mêmes conditions CSMA / écran SARSAT). |
+| `0x06D6` | `APRS_DIGI` | trame AX.25 brute : `dst[7] src[7] digi[7]×n ctrl pid info`, **sans FCS** | RP2040 → radio, sans ACK immédiat : une trame que le RP2040 a décidé de digipeater (`aprs_digi.h` — WIDEn-N New-N-Paradigm, cf. section dédiée plus bas) et déjà mutée (SSID décrémenté / bit H posé), un auto-ACK, ou une trame d'un hôte KISS. La radio recalcule le FCS et émet en AFSK sur le canal 170, exactement comme sa propre balise (mêmes conditions CSMA / écran SARSAT). Elle n'a qu'**un emplacement** : le RP2040 n'envoie la trame suivante qu'après `0x06D9 APRS_TXDONE` (voir ci-dessous). 16 à 256 o (hors bornes : refusée par la radio, sans réponse). |
 | `0x06D7` | `RP_BOOTSEL` | — | radio → RP2040, sans ACK : redémarre la C-Board dans son chargeur UF2 ROM (mode BOOTSEL), pour la reflasher par glisser-déposer sans accès au bouton. Menu APRS → champ **`RP2040 bootsel`**, MENU deux fois en moins de 3 s (le champ affiche `Bootsel? MENU=OK` entre les deux ; toute autre touche annule). Remplace l'astuce SDK « 1200 Bd = BOOTSEL », désactivée dans `CMakeLists.txt` parce qu'un hôte KISS peut légitimement choisir 1200 Bd. `picotool reboot -f -u` reste possible depuis un PC. |
+| `0x06D8` | `APRS_CHANNEL` | `busy:u8` (0 libre, 1 occupé) | RP2040 → radio, sans ACK : état du canal vu par la C-Board, envoyé à chaque changement **uniquement quand la radio annonce SQL = 0** (octet 16 de sa réponse HELLO, voir plus bas). Avec le squelch à 0 (monitor), `g_SquelchLost` reste bloqué à « porteuse présente » et la garde CSMA `APRS_CanTransmitNow()` refuserait toute émission (balises, trames AGWPE/KISS, répétitions) ; dans ce cas elle lit cet octet à la place. Le RP2040 le dérive d'un **squelch de bruit logiciel** (`aprs_rx.c`, `aprs_rx_sense_hiss`) : énergie du souffle au-dessus des tonalités AFSK (2ᵉ différence du signal), plancher de repos suivi lentement, occupé sous la moitié du plancher, libre au-dessus des trois quarts. Le décodeur tourne alors en continu (aucun flag perdu). Le RP2040 applique la même garde à ses propres trames `0x06D6` (file d'attente de 8, créneau aléatoire 50-250 ms après libération, remise forcée à la radio après 10 s, trame jetée sans être émise si elle attend depuis 15 s, une seule trame confiée à la radio à la fois, cf. `0x06D9`). Rien n'est envoyé tant que la radio ne signale pas SQL = 0 ; une radio sans C-Board ou un ancien firmware RP2040 → canal considéré libre. 2026-11-05. |
+| `0x06D9` | `APRS_TXDONE` | `status:u8, fcs:u16` LE (3 o) | radio → RP2040, sans ACK : l'emplacement `0x06D6` de la radio est de nouveau libre. `status` 0 = trame émise, 1 = abandonnée (canal resté occupé ~3 s). `fcs` = FCS AX.25 de la trame concernée : le RP2040 ne libère que la trame qu'il attend (une réponse tardive ou inconnue est ignorée). Côté RP2040 (`tx_service()`), une seule trame en vol à la fois ; jamais de renvoi, qu'elle soit émise ou abandonnée. Sans réponse (ancien firmware radio, trame UART perdue), l'emplacement est considéré libre après 3 s + temps d'antenne + 1 s. Avant, une 2ᵉ trame envoyée pendant l'attente de ~300 ms de la radio écrasait la 1ʳᵉ : en rafale, seule la dernière partait. 2026-11-08. |
 | `0x06E0` | `SONDE_CLEAR` | — | efface le tampon d'écran Radiosonde |
 | `0x06E1` | `SONDE_TEXT` | `line:u8, invert:u8, ascii[0..20]` | RP2040 → radio : même forme que `SARSAT_TEXT`, tampon de lignes séparé (écran Radiosonde, `patch/sonde.c`) |
 
@@ -183,7 +185,12 @@ main pour chaque trame décodée :
    plage, ou chemin déjà entièrement satisfait) : la trame n'est **pas**
    répétée.
 
-Une trame acceptée est mise en file (1 emplacement) côté radio plutôt
+Le RP2040 garde la file d'attente (8 trames, canal libre + créneau aléatoire,
+cf. `0x06D8`) et ne confie à la radio qu'**une trame à la fois** : la
+suivante attend `0x06D9 APRS_TXDONE` (émise ou abandonnée, identifiée par son
+FCS). Une trame n'est jamais renvoyée, et une trame qui attend depuis 15 s est
+jetée plutôt qu'émise en retard (par exemple au retour en mode APRS).
+Côté radio, une trame acceptée est mise en file (1 emplacement) plutôt
 qu'émise immédiatement, puis envoyée en AFSK dès que le canal est **vraiment**
 libre — retentée à chaque tick (~10 ms) *et* à chaque itération de la boucle
 du popup RX (qui bloquerait sinon `APRS_TimeSlice()` tout du long), avec un
@@ -327,9 +334,12 @@ sur le même fil :
   / détecter un lien mort ou mal câblé.
 - **Statut** : la radio répond à `SARSAT_HELLO` (`0x06CF | 0x8000`) avec
   `vfo:u8, modulation:u8, rx_freq:u32 (unités de 10 Hz), sarsat_screen:u8,
-  proto_ver:u8, my_lat_e5:i32, my_lon_e5:i32` (16 octets ; la position finale est
+  proto_ver:u8, my_lat_e5:i32, my_lon_e5:i32, sql:u8` (17 octets ; la position est
   0/absente sur les vieux builds radio — le RP2040 accepte aussi une réponse de
-  8 octets). `my_lat/lon` est la position APRS manuelle de la radio, ou son fix
+  8 octets). `sql` (octet 16, 2026-11-05) vaut `0x80 | niveau SQL du menu radio` ;
+  le bit 7 marque le champ valide (un vieux build envoie 16 octets). **SQL = 0**
+  (monitor) fait basculer le RP2040 sur son squelch de bruit logiciel et le rend
+  responsable de la garde CSMA de la radio via `0x06D8` (voir ce code). `my_lat/lon` est la position APRS manuelle de la radio, ou son fix
   GPS en direct quand le champ **Pos** du menu APRS est sur **GPS** et qu'un fix
   est à jour. `sarsat_screen` = **0 fermé / 1 vue décodage / 2 vue niveau** ; sur
   `2` le RP2040 bascule sur des fenêtres de capture courtes pour que la barre de

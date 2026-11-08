@@ -122,39 +122,59 @@ static void kiss_txq_service(void)
  * TinyUSB never sends the CDC SERIAL_STATE notification, so Windows reports
  * CTS/DSR/DCD low forever and UI-View sits on an hourglass (AGWPE and PuTTY
  * ignore those lines). usbser.sys raises CTS whenever DSR is set, so we
- * assert DSR+DCD on the notification endpoint once the device is
- * configured and again on every line-state change (= port open). The
- * notification endpoint is 0x81 and the comm interface is 0 in the SDK's
- * stdio_usb descriptors. Both callbacks run inside tud_task(), which the
- * SDK serialises with its stdio mutex, so the endpoint claim can't race. */
+ * keep DSR asserted on the notification endpoint (0x81, comm interface 0 in
+ * the SDK's stdio_usb descriptors) from mount on.
+ * DCD carries the APRS channel sense (2026-11-06): set while aprs_rx sees a
+ * carrier, like a hardware TNC's DCD line -- it used to be stuck on, so
+ * hosts showing CD (APRS_Live) saw a permanent carrier. A change that finds
+ * the previous notification still in flight is retried on the next call. */
 #include "tusb.h"
 #include "device/usbd_pvt.h"
 
-static void usb_cdc_assert_modem_lines(void)
+static bool    g_modem_dcd;               /* wanted DCD = channel busy          */
+static uint8_t g_modem_sent = 0xFF;       /* last bmUartState sent, 0xFF = none */
+
+static void usb_cdc_send_modem_lines(void)
 {
     static uint8_t notif[10] __attribute__((aligned(4))) = {
         0xA1, 0x20,          /* class/interface, IN ; SERIAL_STATE         */
         0x00, 0x00,          /* wValue                                     */
         0x00, 0x00,          /* wIndex  = CDC comm interface 0              */
         0x02, 0x00,          /* wLength = 2                                 */
-        0x03, 0x00,          /* bmUartState: bit0 DCD (RxCarrier), bit1 DSR */
+        0x02, 0x00,          /* bmUartState: bit0 DCD (RxCarrier), bit1 DSR */
     };
-    if (!tud_mounted())
+    uint8_t state = (uint8_t)(0x02 | (g_modem_dcd ? 0x01 : 0x00));
+    if (state == g_modem_sent || !tud_mounted())
         return;
-    if (!usbd_edpt_claim(0, 0x81))       /* previous one still in flight */
-        return;
-    usbd_edpt_xfer(0, 0x81, notif, (uint16_t)sizeof notif);
+    /* Called from tud_task() (callbacks) and from the main loop; tud_task
+     * otherwise runs in the SDK's low-priority USB IRQ on this same core,
+     * so masking interrupts makes claim + xfer atomic against it. */
+    uint32_t irq = save_and_disable_interrupts();
+    if (usbd_edpt_claim(0, 0x81)) {      /* fails while the last one is in flight */
+        notif[8] = state;
+        if (usbd_edpt_xfer(0, 0x81, notif, (uint16_t)sizeof notif))
+            g_modem_sent = state;
+    }
+    restore_interrupts(irq);
+}
+
+static void usb_cdc_set_dcd(bool on)
+{
+    g_modem_dcd = on;
+    usb_cdc_send_modem_lines();
 }
 
 void tud_mount_cb(void)
 {
-    usb_cdc_assert_modem_lines();
+    g_modem_sent = 0xFF;
+    usb_cdc_send_modem_lines();
 }
 
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 {
     (void)itf; (void)dtr; (void)rts;
-    usb_cdc_assert_modem_lines();
+    g_modem_sent = 0xFF;                 /* port (re)opened: resend */
+    usb_cdc_send_modem_lines();
 }
 
 #if SARSAT_LOG
@@ -201,6 +221,10 @@ static uint16_t g_aprs_ring[APRS_RING_SAMPLES]
     __attribute__((aligned(APRS_RING_SAMPLES * 2)));
 static uint32_t g_aprs_rd;
 static aprs_rx_t g_aprs;
+static bool      g_chan_busy;     /* last channel state from aprs_rx_carrier(),
+                                   * see tx_service() */
+static void radio_send(uint16_t cmd, const uint8_t *data, size_t len);
+static void tx_radio_done(uint8_t status, uint16_t fcs);   /* CMD_APRS_TXDONE */
 static uint32_t  g_aprs_pkts;
 static int32_t   g_my_lat_e5, g_my_lon_e5;   /* operator position (HELLO reply) */
 static uint8_t   g_radio_mod = 0xFF;         /* last modulation from a HELLO reply */
@@ -861,6 +885,24 @@ static void link_poll(void)
                 g_my_lon_e5 = (int32_t)(d[12] | (d[13] << 8) |
                                         (d[14] << 16) | ((uint32_t)d[15] << 24));
             }
+            /* byte 16 (2026-11-05): 0x80 | the radio's SQL level. SQL 0
+             * (monitor) switches aprs_rx to the open-squelch channel sense
+             * and makes us the radio's CSMA eyes (CMD_APRS_CHANNEL). Older
+             * radio firmware sends 16 bytes -> unchanged behaviour. */
+            if (dl >= 17 && (d[16] & 0x80)) {
+                bool open = (d[16] & 0x7F) == 0;
+                if (open != aprs_rx_sql_open(&g_aprs)) {
+                    aprs_rx_set_sql_open(&g_aprs, open);
+                    LOG("[aprs]   radio squelch %s -> channel sense: %s\n",
+                        open ? "0 (monitor)" : "closed",
+                        open ? "hiss quieting, decoder always on" : "audio energy gate");
+                    g_chan_busy = aprs_rx_carrier(&g_aprs);
+                    if (open) {
+                        uint8_t b = g_chan_busy ? 1 : 0;
+                        radio_send(CMD_APRS_CHANNEL, &b, 1);
+                    }
+                }
+            }
         } else if (id == CMD_APRS_CONFIG && dl >= 11) {
             /* {call[6], ssid, path, sym_table, sym_code, digi_level, [flags]} */
             memcpy(g_aprs_my_call, d, 6);
@@ -883,6 +925,9 @@ static void link_poll(void)
                     memset(&g_kiss_rx, 0, sizeof g_kiss_rx);
                 }
             }
+        } else if (id == CMD_APRS_TXDONE && dl >= 3) {
+            /* {status, fcs:u16 LE}: the radio's 0x06D6 slot is free again */
+            tx_radio_done(d[0], (uint16_t)(d[1] | (d[2] << 8)));
         } else if (id == CMD_RP_BOOTSEL) {
             /* The radio's APRS menu asked for the UF2 loader (double MENU on
              * "RP2040 bootsel"). Never returns: the board re-enumerates as a
@@ -957,6 +1002,140 @@ static void radio_send(uint16_t cmd, const uint8_t *data, size_t len)
     for (size_t i = 0; i < n; i++) LOG(" %02X", frame[i]);
     LOG("\n");
 #endif
+}
+
+/* Frames we ask the radio to transmit (CMD_APRS_DIGI: digipeats, auto-acks,
+ * KISS host frames) wait here until the channel is free (2026-11-05). The
+ * radio keeps its own CSMA gate, but with its squelch at 0 (monitor) that
+ * gate is blind -- see CMD_APRS_CHANNEL -- so the channel sense from
+ * aprs_rx (energy gate, or hiss quieting in open-squelch mode) is applied
+ * here too: hold while busy, then a random 50..250 ms slot once the channel
+ * clears (p-persistence, cheap version). A frame never waits more than
+ * TXQ_MAX_HOLD_US: after that it goes out anyway and the radio decides.
+ *
+ * One frame at a time (2026-11-08): the radio has a single 0x06D6 slot, so a
+ * frame handed over while the previous one is still waiting there (its own
+ * ~300 ms settle delay, or a busy channel) used to overwrite it -- in a burst
+ * only the last frame went out. Now the next frame waits for the radio's
+ * CMD_APRS_TXDONE {status, fcs} (sent or dropped), matched by FCS so a late
+ * answer can never release a different frame. Every frame is handed over
+ * once, never retried: the radio dropping it (busy channel) is final. No
+ * answer at all (older radio firmware, lost UART frame) -> after
+ * tx_inflight_max_us() the slot is free anyway (radio 3 s limit + air time).
+ * A frame still queued TXQ_MAX_AGE_US after it was heard is dropped, never
+ * sent late: e.g. one left over from before a trip to SARSAT mode must not
+ * go out the moment APRS resumes. 15 s + the radio's 3 s stays well inside
+ * the ~30 s duplicate window other digipeaters keep. */
+#define TXQ_N            8
+#define TXQ_FRAME_MAX    256           /* the radio's own 0x06D6 limit: a longer
+                                        * frame would be refused, unanswered */
+#define TXQ_FRAME_MIN    16            /* idem, shorter is refused too       */
+#define TXQ_MAX_HOLD_US  10000000ull
+#define TXQ_MAX_AGE_US   15000000ull
+static struct { uint8_t f[TXQ_FRAME_MAX]; int len; uint64_t t; } g_txq[TXQ_N];
+static int      g_txq_head, g_txq_n;
+static uint64_t g_chan_free_at_us;           /* when it last turned free          */
+static uint32_t g_tx_gap_us;                 /* slot to wait after that           */
+static bool     g_tx_inflight;               /* handed to the radio, no TXDONE yet */
+static uint16_t g_tx_inflight_fcs;           /* its AX.25 FCS (TXDONE match)      */
+static int      g_tx_inflight_len;
+static uint64_t g_tx_inflight_at;            /* when it was handed over           */
+
+/* Longest the radio can keep a frame in its slot: up to 3 s waiting for a
+ * free channel (APRS_DIGI_MAX_AGE_10MS), then the air time -- 40 TXDELAY
+ * flags + frame + FCS + closing flags, worst-case bit stuffing (x6/5) at
+ * 1200 Bd = 8 ms per byte -- plus 1 s of margin (key-up, UART). */
+static uint64_t tx_inflight_max_us(int len)
+{
+    return 3000000ull + (uint64_t)(len + 44) * 8000ull + 1000000ull;
+}
+
+/* CMD_APRS_TXDONE from the radio: its slot is free again. */
+static void tx_radio_done(uint8_t status, uint16_t fcs)
+{
+    if (!g_tx_inflight || fcs != g_tx_inflight_fcs) {
+        LOG("[tx]     radio done with fcs %04X -- not the frame in flight, ignored\n", fcs);
+        return;
+    }
+    uint64_t now = time_us_64();
+    g_tx_inflight = false;
+    if (status == 0)
+        LOG("[tx]     radio sent it (%d B, %lu ms after hand-over)\n", g_tx_inflight_len,
+            (unsigned long)((now - g_tx_inflight_at) / 1000));
+    else
+        LOG("[tx]     radio dropped it (%d B): channel stayed busy -- not retried\n",
+            g_tx_inflight_len);
+    g_chan_free_at_us = now;                 /* gap before the next one */
+    g_tx_gap_us = 150000u;
+}
+
+static void tx_enqueue(const uint8_t *f, int len)
+{
+    if (len < TXQ_FRAME_MIN || len > TXQ_FRAME_MAX)
+        return;
+    if (g_txq_n >= TXQ_N) {
+        LOG("[tx]     queue full -- frame dropped (%d B)\n", len);
+        return;
+    }
+    int i = (g_txq_head + g_txq_n) % TXQ_N;
+    memcpy(g_txq[i].f, f, (size_t)len);
+    g_txq[i].len = len;
+    g_txq[i].t   = time_us_64();
+    g_txq_n++;
+}
+
+
+static void tx_service(void)
+{
+    bool     busy = aprs_rx_carrier(&g_aprs);
+    uint64_t now  = time_us_64();
+
+    if (busy != g_chan_busy) {
+        g_chan_busy = busy;
+        if (!busy) {
+            g_chan_free_at_us = now;
+            g_tx_gap_us = 50000u + (uint32_t)(now % 200000u);   /* 50..250 ms */
+        }
+        if (aprs_rx_sql_open(&g_aprs)) {     /* the radio's gate relies on us */
+            uint8_t b = busy ? 1 : 0;
+            radio_send(CMD_APRS_CHANNEL, &b, 1);
+        }
+    }
+    /* too old to be worth sending: drop (FIFO, so the head is the oldest) */
+    while (g_txq_n && now - g_txq[g_txq_head].t >= TXQ_MAX_AGE_US) {
+        LOG("[tx]     %d B frame waited %lu ms -- too old, dropped\n",
+            g_txq[g_txq_head].len, (unsigned long)((now - g_txq[g_txq_head].t) / 1000));
+        g_txq_head = (g_txq_head + 1) % TXQ_N;
+        g_txq_n--;
+    }
+    if (g_tx_inflight) {
+        if (now - g_tx_inflight_at < tx_inflight_max_us(g_tx_inflight_len))
+            return;                          /* radio still holds the previous one */
+        g_tx_inflight = false;               /* no TXDONE: its slot is free by now */
+        LOG("[tx]     no TXDONE from the radio (older firmware?) -- slot assumed free\n");
+    }
+    if (!g_txq_n)
+        return;
+    uint64_t held = now - g_txq[g_txq_head].t;
+    if (held < TXQ_MAX_HOLD_US) {
+        if (busy)
+            return;
+        if (now - g_chan_free_at_us < g_tx_gap_us)
+            return;
+    }
+    const uint8_t *f   = g_txq[g_txq_head].f;
+    int            len = g_txq[g_txq_head].len;
+    LOG("[tx]     channel %s, sending %d B (held %lu ms)\n",
+        busy ? "BUSY (hold expired)" : "free", len, (unsigned long)(held / 1000));
+    radio_send(CMD_APRS_DIGI, f, (size_t)len);
+    /* aprs_fcs_residue() over a frame without its FCS = that frame's FCS,
+     * the same value the radio computes (ax25_fcs()) and quotes in TXDONE */
+    g_tx_inflight     = true;
+    g_tx_inflight_fcs = aprs_fcs_residue(f, len);
+    g_tx_inflight_len = len;
+    g_tx_inflight_at  = now;
+    g_txq_head = (g_txq_head + 1) % TXQ_N;   /* out of the queue: never resent */
+    g_txq_n--;
 }
 
 static void radio_send_level(const audio_stats_t *st)
@@ -1403,8 +1582,7 @@ static void aprs_try_digipeat(const uint8_t *ax25, int len, bool fixed)
 
     LOG("[digi]   repeating #%lu (%d -> %d bytes)\n",
         (unsigned long)g_aprs_pkts, len, nlen);
-    radio_send(CMD_APRS_DIGI, d, (size_t)nlen);
-    link_poll();
+    tx_enqueue(d, nlen);                   /* out when the channel is free */
 }
 
 /* base callsign (before '-' / space), case-insensitive, up to 6 chars */
@@ -1470,8 +1648,7 @@ static void aprs_auto_ack(const char *sender, const char *num)
     if (fl <= 0)
         return;
     LOG("[aprs]   auto-ack -> %s  ack%s\n", sender, num);
-    radio_send(CMD_APRS_DIGI, f, (size_t)fl);
-    link_poll();
+    tx_enqueue(f, fl);                     /* out when the channel is free */
 }
 
 /* Called from aprs_rx on a full FCS-valid AX.25 frame. Parse the APRS info and
@@ -2266,6 +2443,17 @@ int main(void)
         /* -------- APRS mode: stream the ADC ring through the AFSK demod ---- */
         if (g_mode == MODE_APRS) {
             aprs_service();
+            tx_service();                /* channel sense -> radio, queued TX */
+        }
+        usb_cdc_set_dcd(g_mode == MODE_APRS && aprs_rx_carrier(&g_aprs));
+        if (g_mode == MODE_APRS) {
+
+            if (time_reached(next_lvl) && aprs_rx_sql_open(&g_aprs)) {
+                int32_t hf = 0, fl = 0;
+                aprs_rx_noise_levels(&g_aprs, &hf, &fl);
+                LOG("[aprs]   open-squelch sense: hiss=%ld floor=%ld -> %s\n",
+                    (long)hf, (long)fl, aprs_rx_carrier(&g_aprs) ? "BUSY" : "free");
+            }
 
             if (g_kiss) {
                 /* KISS TNC: RX frames go out as KISS from aprs_on_packet();
@@ -2276,7 +2464,7 @@ int main(void)
                 while ((c = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
                     int fl = kiss_decode_byte(&g_kiss_rx, (uint8_t)c);
                     if (fl >= 16 && fl <= 256)
-                        radio_send(CMD_APRS_DIGI, g_kiss_rx.frame, (size_t)fl);
+                        tx_enqueue(g_kiss_rx.frame, fl);   /* when the channel is free */
                 }
                 kiss_txq_service();      /* one paced byte of RX KISS, if due */
                 sleep_us(300);

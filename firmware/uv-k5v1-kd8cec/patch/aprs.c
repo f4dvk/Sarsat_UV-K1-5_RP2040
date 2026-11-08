@@ -315,6 +315,10 @@ static void APRS_PushConfig(void)
  * ticks); any other key disarms. No payload, no ACK -- the RP2040 is gone. */
 static uint8_t s_boot_arm;
 
+/* channel busy/free as sensed by the C-Board (APRS_CMD_CHANNEL), used by
+ * APRS_CanTransmitNow() when SQL = 0 -- see there */
+static uint8_t s_chan_busy;
+
 static void APRS_SendBootsel(void)
 {
     uint8_t b[4] = { APRS_CMD_BOOTSEL & 0xFF, APRS_CMD_BOOTSEL >> 8, 0, 0 };
@@ -581,6 +585,14 @@ static bool APRS_CanTransmitNow(void)
      * "mid-reception" for as long as the popup stayed open. g_SquelchLost
      * stays live in both contexts (main tick, or the popup's own inline
      * mini-squelch poll). */
+    /* SQL 0 (monitor, 2026-11-05): with the squelch thresholds at zero the
+     * "squelch lost" IRQ fires once and "found" never, so g_SquelchLost is
+     * stuck true and would veto every TX. The C-Board watches the channel
+     * instead (hiss-quieting detector on the discriminator audio, pushed as
+     * APRS_CMD_CHANNEL on every change -- rp2040/src/aprs_rx.c). No C-Board
+     * or nothing reported yet -> free. */
+    if (gEeprom.SQUELCH_LEVEL == 0)
+        return !s_chan_busy;
     if (g_SquelchLost)
         return false;
     return true;
@@ -846,9 +858,10 @@ static void APRS_MsgCheckAck(const char *addressee, const char *text)
  * (confirmed on air: the RP2040 logged "repeating", nothing went out).
  * APRS_Beacon() dodges this by being retried every ~3 s from
  * APRS_TimeSlice() until the channel clears -- queue the digipeat frame the
- * same way instead of firing it once from APRS_HandleUART(). One slot is
- * enough: digipeat bursts are sparse relative to the ~3 s beacon retry
- * cadence this reuses. */
+ * same way instead of firing it once from APRS_HandleUART(). One slot only:
+ * the RP2040 keeps the queue and hands frames over one at a time, waiting
+ * for APRS_CMD_TXDONE (sent below once this slot is free again) before the
+ * next -- a second 0x06D6 arriving early would overwrite this one. */
 static struct {
     uint8_t  data[APRS_DIGI_MAX_FRAME - 2];
     uint16_t len;
@@ -878,30 +891,37 @@ static void APRS_Digipeat(const uint8_t *data, uint16_t size)
     s_digi_pending.queued_at_10ms = millis10();
 }
 
-/* Called every ~10 ms from APRS_TimeSlice(), unconditionally. */
+/* Called every ~10 ms from APRS_TimeSlice(), unconditionally. Once the slot
+ * is done with -- sent, or dropped after ~3 s of busy channel (a stale
+ * repeat is worse than none) -- answers APRS_CMD_TXDONE {status, fcs} so
+ * the RP2040 may hand over its next frame; the FCS tells it which frame
+ * this answer is about. Never retried either way. */
 static void APRS_DigipeatTimeSlice(void)
 {
     if (!s_digi_pending.pending)
         return;
     int32_t age = (int32_t)(millis10() - s_digi_pending.queued_at_10ms);
-    if (age > APRS_DIGI_MAX_AGE_10MS) {
-        s_digi_pending.pending = false;   /* channel stayed busy too long: a
-                                           * stale repeat is worse than none */
-        return;
+    uint8_t status = 1;                   /* 1 = dropped, channel stayed busy */
+    if (age <= APRS_DIGI_MAX_AGE_10MS) {
+        if (age < APRS_DIGI_MIN_DELAY_10MS || !APRS_CanTransmitNow())
+            return;                       /* settling / busy: try next tick */
+        status = 0;                       /* 0 = sent */
     }
-    if (age < APRS_DIGI_MIN_DELAY_10MS)
-        return;                           /* still settling, try again next tick */
-    if (!APRS_CanTransmitNow())
-        return;                           /* try again next tick */
 
     s_digi_pending.pending = false;
-    uint8_t frame[APRS_DIGI_MAX_FRAME];
-    memcpy(frame, s_digi_pending.data, s_digi_pending.len);
-    uint16_t fcs = ax25_fcs(frame, s_digi_pending.len);
-    frame[s_digi_pending.len]     = (uint8_t)(fcs & 0xFF);
-    frame[s_digi_pending.len + 1] = (uint8_t)(fcs >> 8);
+    uint16_t len = s_digi_pending.len;
+    uint16_t fcs = ax25_fcs(s_digi_pending.data, len);
+    if (status == 0) {
+        uint8_t frame[APRS_DIGI_MAX_FRAME];
+        memcpy(frame, s_digi_pending.data, len);
+        frame[len]     = (uint8_t)(fcs & 0xFF);
+        frame[len + 1] = (uint8_t)(fcs >> 8);
+        APRS_TxFrame(frame, len + 2);
+    }
 
-    APRS_TxFrame(frame, s_digi_pending.len + 2);
+    uint8_t b[4 + 3] = { APRS_CMD_TXDONE & 0xFF, APRS_CMD_TXDONE >> 8, 3, 0,
+                         status, (uint8_t)(fcs & 0xFF), (uint8_t)(fcs >> 8) };
+    SendReply(b, sizeof(b));
 }
 
 /* SmartBeaconing profiles -- {low, high, slow, fast, turn_min, turn_slope,
@@ -1196,6 +1216,12 @@ void APRS_HandleUART(uint16_t id, const uint8_t *data, uint16_t size)
     /* suppress a spurious mic-line PTT while the C-Board pushes the packet
      * (a few-ms key-up was seen right after an APRS decode on 144.8) */
     gSerialConfigCountDown_500ms = 2;
+
+    if (id == APRS_CMD_CHANNEL) {          /* {busy:u8} -- CSMA eyes at SQL 0 */
+        if (size >= 1)
+            s_chan_busy = data[0] ? 1 : 0;
+        return;
+    }
 
     if (id == APRS_CMD_RXINFO && size >= 22) {
         const uint8_t *p = data, *end = data + size;

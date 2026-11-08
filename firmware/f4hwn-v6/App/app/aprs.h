@@ -33,6 +33,14 @@
 #define APRS_CMD_BOOTSEL  0x06D7u   /* radio -> RP2040: no payload -- reboot
                                      * the C-Board into its UF2 loader (menu
                                      * "RP2040 bootsel", double MENU)          */
+#define APRS_CMD_CHANNEL  0x06D8u   /* RP2040 -> radio: {busy:u8} -- channel
+                                     * sense (hiss quieting) used by the CSMA
+                                     * gate when SQL = 0, where g_SquelchLost
+                                     * is stuck "open" and would block all TX */
+#define APRS_CMD_TXDONE   0x06D9u   /* radio -> RP2040: {status:u8, fcs:u16} --
+                                     * the 0x06D6 slot is free again (status 0
+                                     * sent, 1 dropped: channel busy ~3 s);
+                                     * fcs = that frame's AX.25 FCS            */
 
 /* APRS_PATH_W2_2 appended at the end, not inserted among the others: gAprsCfg
  * (this field included) is persisted as a raw byte dump (see APRS_Save()/

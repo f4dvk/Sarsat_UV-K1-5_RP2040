@@ -1424,6 +1424,7 @@ void UART_HandleCommand(uint32_t Port)
         case APRS_CMD_RXINFO:
         case APRS_CMD_GPS:
         case APRS_CMD_DIGI:
+        case APRS_CMD_CHANNEL:
             APRS_HandleUART(pUART_Command->Header.ID,
                             pUART_Command->Buffer + sizeof(Header_t),
                             pUART_Command->Header.Size);

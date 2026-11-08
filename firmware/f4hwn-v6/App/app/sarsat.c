@@ -90,7 +90,14 @@ extern void SendReply(uint32_t Port, void *pReply, uint16_t Size);
 /* Phase 2: answer the RP2040. Reply ID = command | 0x8000, payload = data. */
 static void SARSAT_Reply(uint16_t reply_id, const uint8_t *data, uint8_t dlen)
 {
-	uint8_t buf[4 + 12];
+	/* The HELLO status reply is the longest payload (17 bytes, see
+	 * SARSAT_ReplyStatus()). 2026-11-06: this buffer was [4 + 12] -- the
+	 * 16-byte HELLO already spilled 4 bytes past it and the 17-byte one 5,
+	 * smashing the stack frame on the very first HELLO, i.e. the moment the
+	 * C-Board is plugged in (V1 froze, keys dead). Sized for it + clamped. */
+	uint8_t buf[4 + 20];
+	if (dlen > sizeof(buf) - 4)
+		dlen = sizeof(buf) - 4;
 	buf[0] = reply_id & 0xFF; buf[1] = reply_id >> 8;
 	buf[2] = dlen;            buf[3] = 0;
 	if (data && dlen)
@@ -161,7 +168,7 @@ static void SARSAT_ReplyStatus(void)
 		screen_state = 4;
 #endif
 
-	uint8_t p[16] = {
+	uint8_t p[17] = {
 		(uint8_t)(gEeprom.TX_VFO & 1),
 		wire_mod,
 		(uint8_t)(f      ), (uint8_t)(f >>  8),
@@ -172,6 +179,10 @@ static void SARSAT_ReplyStatus(void)
 		(uint8_t)(my_lat >> 16), (uint8_t)(my_lat >> 24),
 		(uint8_t)my_lon, (uint8_t)(my_lon >> 8),
 		(uint8_t)(my_lon >> 16), (uint8_t)(my_lon >> 24),
+		/* byte 16 (2026-11-05): 0x80 | squelch level. SQL 0 = monitor tells
+		 * the C-Board to sense the channel by hiss quieting and to feed our
+		 * CSMA gate (APRS_CMD_CHANNEL) -- see APRS_CanTransmitNow(). */
+		(uint8_t)(0x80u | (gEeprom.SQUELCH_LEVEL & 0x7Fu)),
 	};
 	SARSAT_Reply(SARSAT_CMD_HELLO | 0x8000u, p, sizeof(p));
 }

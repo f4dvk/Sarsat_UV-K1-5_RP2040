@@ -72,6 +72,20 @@ typedef struct {
     int32_t  dc;                 /* raw << 8                                 */
     int32_t  cdt_lvl;
     bool     cdt;
+
+    /* open-squelch channel sense (radio SQL 0 / monitor, 2026-11-05): the
+     * energy gate above sees the permanent FM hiss as a carrier, so in this
+     * mode the decoder runs continuously and "busy" comes from quieting --
+     * the hiss energy above the AFSK tones collapses when any carrier
+     * (packet, voice, dead carrier) lands on the channel. The idle hiss
+     * level is tracked slowly, so the threshold follows the real noise
+     * floor of the place and the AF gain setting instead of a constant. */
+    bool     sql_open;
+    int32_t  hp1, hp2;           /* previous AC samples (2nd difference)      */
+    int32_t  hf_lvl;             /* ~10 ms mean of the hiss (HF) energy       */
+    int32_t  hf_floor;           /* slow-tracked idle-hiss energy             */
+    bool     busy;
+    uint32_t busy_n;             /* samples spent continuously busy           */
     aprs_fir_t bpf, lpf;
     int32_t  lim_env;            /* mean |band-pass out|, sets the soft clamp */
     int32_t  delay_line[16];
@@ -136,7 +150,15 @@ enum {
 void     aprs_rx_init(aprs_rx_t *r, int sample_rate_hz,
                       aprs_rx_packet_cb cb, void *user);
 void     aprs_rx_sample(aprs_rx_t *r, uint16_t adc12);
+/* channel in use: the energy gate normally, the hiss-quieting detector in
+ * open-squelch mode (see the struct) */
 bool     aprs_rx_carrier(const aprs_rx_t *r);
+
+/* open-squelch mode (radio SQL 0): decoder always on, busy = quieting.
+ * Switching modes re-learns the hiss floor from scratch. */
+void     aprs_rx_set_sql_open(aprs_rx_t *r, bool open);
+bool     aprs_rx_sql_open(const aprs_rx_t *r);
+void     aprs_rx_noise_levels(const aprs_rx_t *r, int32_t *hf_lvl, int32_t *hf_floor);
 
 /* ADC input clipping since the last call, in per-mille (0..1000), then resets
  * the counters. > ~20 means the radio AF gain is too high for this tap. */

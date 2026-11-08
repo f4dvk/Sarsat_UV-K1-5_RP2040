@@ -41,6 +41,16 @@ static const int16_t APRS_LPF_AN[21] = {
 #define APRS_CDT_ON        1200
 #define APRS_CDT_OFF        400
 
+/* open-squelch channel sense (see aprs_rx.h): hiss energy is measured on the
+ * 2nd difference of the AC signal, |4 sin^2(pi f/fs)| -- x0.3 at 1200 Hz,
+ * x0.95 at 2200 Hz, x3.5 above 5 kHz at fs = 13.2 kHz -- so the wideband FM
+ * hiss dominates and a quieted channel (even one carrying AFSK) drops well
+ * below half of the idle level. busy below floor/2, free above 3/4 floor.
+ * The floor only tracks while free; after APRS_HISS_STUCK_N samples busy
+ * (60 s) it re-learns slowly, so a lowered AF gain cannot pin "busy". */
+#define APRS_HISS_MIN       2000      /* below this there is no hiss to judge */
+#define APRS_HISS_STUCK_N   (13200u * 60u)
+
 /* slicer: dead-band = env >> APRS_SLICE_SHIFT (env/8: measured +1.5 %
  * packets over env/4, env/2 much worse, env/16 slightly worse), floored so
  * silence does not chatter */
@@ -389,7 +399,56 @@ void aprs_rx_init(aprs_rx_t *r, int sample_rate_hz,
     }
 }
 
-bool aprs_rx_carrier(const aprs_rx_t *r) { return r->cdt; }
+bool aprs_rx_carrier(const aprs_rx_t *r) { return r->sql_open ? r->busy : r->cdt; }
+
+void aprs_rx_set_sql_open(aprs_rx_t *r, bool open)
+{
+    if (open == r->sql_open)
+        return;
+    r->sql_open = open;
+    r->hf_floor = 0;                 /* re-learn the idle hiss from scratch */
+    r->hf_lvl   = 0;
+    r->busy     = false;
+    r->busy_n   = 0;
+    if (!open)
+        r->cdt = false;              /* back to the energy gate, from idle */
+}
+
+bool aprs_rx_sql_open(const aprs_rx_t *r) { return r->sql_open; }
+
+void aprs_rx_noise_levels(const aprs_rx_t *r, int32_t *hf_lvl, int32_t *hf_floor)
+{
+    if (hf_lvl)   *hf_lvl   = r->hf_lvl;
+    if (hf_floor) *hf_floor = r->hf_floor;
+}
+
+/* one AC sample of the open-squelch channel sense (see the defines above) */
+static void aprs_rx_sense_hiss(aprs_rx_t *r, int32_t s)
+{
+    int32_t d2 = s - 2 * r->hp1 + r->hp2;           /* 2nd difference, +-8192 */
+    r->hp2 = r->hp1;
+    r->hp1 = s;
+    r->hf_lvl += ((d2 * d2) - r->hf_lvl) >> 7;      /* ~10 ms */
+
+    if (r->hf_floor < APRS_HISS_MIN) {              /* no reference yet */
+        r->hf_floor += (r->hf_lvl - r->hf_floor) >> 6;
+        r->busy = false;
+        r->busy_n = 0;
+        return;
+    }
+    if (!r->busy) {
+        r->hf_floor += (r->hf_lvl - r->hf_floor) >> 12;   /* ~0.3 s */
+        if (r->hf_lvl < r->hf_floor / 2) {
+            r->busy = true;
+            r->busy_n = 0;
+        }
+    } else {
+        if (++r->busy_n > APRS_HISS_STUCK_N)
+            r->hf_floor += (r->hf_lvl - r->hf_floor) >> 14;
+        if (r->hf_lvl > (r->hf_floor >> 2) * 3)
+            r->busy = false;
+    }
+}
 
 uint32_t aprs_rx_clip_permille(aprs_rx_t *r)
 {
@@ -434,7 +493,10 @@ void aprs_rx_sample(aprs_rx_t *r, uint16_t adc12)
 
     /* carrier detect on short-term energy */
     r->cdt_lvl += ((s * s) - r->cdt_lvl) >> 7;
-    if (!r->cdt && r->cdt_lvl > APRS_CDT_ON) {
+    if (r->sql_open) {
+        aprs_rx_sense_hiss(r, s);                   /* busy/free from quieting */
+        r->cdt = true;                              /* decoder always runs    */
+    } else if (!r->cdt && r->cdt_lvl > APRS_CDT_ON) {
         r->cdt = true;
     } else if (r->cdt && r->cdt_lvl < APRS_CDT_OFF) {
         r->cdt = false;

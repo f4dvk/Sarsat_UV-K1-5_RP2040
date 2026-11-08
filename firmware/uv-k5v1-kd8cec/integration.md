@@ -679,6 +679,22 @@ réutilise entièrement la file digipeat**.
   `Bootsel? MENU=OK`, toute autre touche désarme) envoie `0x06D7`
   (`APRS_CMD_BOOTSEL`, sans charge) : la C-Board redémarre dans son chargeur
   UF2 ROM, à reflasher par glisser-déposer sans toucher à son bouton.
+- **Squelch à 0 et émission** (2026-11-05) : avec SQL = 0 (monitor), le flag
+  `g_SquelchLost` reste bloqué à « porteuse » et `APRS_CanTransmitNow()`
+  refusait tout (balises, trames AGWPE relayées, répétitions). La réponse HELLO
+  gagne un 17ᵉ octet `0x80 | SQUELCH_LEVEL` ; quand il vaut 0 la C-Board
+  bascule son détecteur de canal sur le quieting du souffle (plancher
+  adaptatif, décodeur en continu) et pousse `0x06D8` (`APRS_CMD_CHANNEL`,
+  `busy:u8`) à chaque changement ; la garde lit `s_chan_busy` à la place du
+  flag squelch dans ce seul cas. Dispatch `0x06D8` ajouté dans
+  `app_uart.c.diff`. Sans C-Board : canal considéré libre.
+- **Une trame digipeat à la fois** (2026-11-08) : l'emplacement unique
+  `s_digi_pending` était écrasé quand le RP2040 envoyait la trame suivante
+  pendant l'attente de ~300 ms (en rafale, seule la dernière partait).
+  `APRS_DigipeatTimeSlice()` répond maintenant `0x06D9` (`APRS_CMD_TXDONE`,
+  `{status, fcs:u16}`, 0 émise / 1 abandonnée) dès que l'emplacement est
+  libre ; le RP2040 attend cette réponse avant la trame suivante. Sortie
+  unique émise/abandonnée : **+24 o** (bin 61 384 o, 56 o de marge).
 
 Build V1 vert, 0 warning : **`text 60988 o`** (+168 o, marge ~450 o). Le
 dispatch `0x06D6` était déjà câblé (digipeater), rien à changer dans `build.sh`.

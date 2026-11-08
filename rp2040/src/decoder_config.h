@@ -164,6 +164,24 @@
                                       /* aprs_digi.h) and it is not a recent    */
                                       /* duplicate -- OR, in KISS mode, for     */
                                       /* every frame the host asks to send.     */
+#define CMD_APRS_CHANNEL     0x06D8   /* RP2040 -> radio: {busy:u8}. Channel  */
+                                      /* sense for the radio's CSMA gate when   */
+                                      /* its own squelch is at 0 (monitor): the */
+                                      /* squelch-lost flag is then stuck "open" */
+                                      /* and would block every TX, so the radio */
+                                      /* uses this instead. Sent on each change */
+                                      /* of aprs_rx's hiss-quieting detector,   */
+                                      /* only while the radio reports SQL 0 in  */
+                                      /* its HELLO reply (byte 16, see          */
+                                      /* docs/protocol.md). 2026-11-05.         */
+#define CMD_APRS_TXDONE      0x06D9   /* radio -> RP2040: {status:u8, fcs:u16  */
+                                      /* LE}. Its single 0x06D6 slot is free    */
+                                      /* again: status 0 = sent, 1 = dropped    */
+                                      /* (channel busy ~3 s). fcs = the AX.25   */
+                                      /* FCS of that frame, so a late answer    */
+                                      /* can't release another one. The next    */
+                                      /* 0x06D6 waits for it (tx_service()).    */
+                                      /* 2026-11-08.                            */
 #define CMD_RP_BOOTSEL       0x06D7   /* radio -> RP2040: no payload. Reboot    */
                                       /* into the ROM UF2 loader (BOOTSEL) so a */
                                       /* boxed-in C-Board can be reflashed by   */
