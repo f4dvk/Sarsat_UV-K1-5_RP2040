@@ -1234,6 +1234,40 @@ static void adc_capture_init(void)
     g_dma_chan = dma_claim_unused_channel(true);
 }
 
+/* ---- DMA ADC : relance du compteur de transferts (2026-11-12) -----------
+ * Retour terrain : deux stations APRS (une en KISS, une en digi) muettes
+ * apres 3-4 jours de marche continue. Cause : chaque *_mode_enter() arme le
+ * DMA pour 0xFFFFFFFF transferts, et sur RP2040 ce compteur 32 bits n'est
+ * jamais recharge -- une fois a zero le canal s'arrete sans rien dire,
+ * l'anneau se fige et plus aucun echantillon n'arrive au decodeur (le reste
+ * de la boucle, lien radio et USB, continue normalement). 2^32 echantillons
+ * = 90 h (3,8 jours) a 13,2 kHz en APRS, 74 h a 16 kHz en SARSAT, 25 h a
+ * 48 kHz en SSTV, 12 h a 96 kHz en SONDE. Seul le mode SARSAT le
+ * surveillait, et sa relance remettait l'anneau a zero.
+ *
+ * Relance sans trou : arret du canal (dma_channel_abort() attend que les
+ * transferts en vol soient ecrits), puis redeclenchement via le registre
+ * TRANS_COUNT seul -- WRITE_ADDR n'a pas de valeur de rechargement sur
+ * RP2040, le canal repart donc a l'adresse ou il s'est arrete, pas au debut
+ * de l'anneau : les index de lecture g_*_rd et g_sar_widx restent valides.
+ * L'ADC continue de convertir pendant la coupure (quelques cycles) et sa
+ * FIFO de 4 echantillons (>= 40 us a 96 kHz) la couvre ; IRQ masquees pour
+ * que le traitement USB ne s'intercale pas entre l'arret et la relance.
+ * Sur RP2350, 0xFFFFFFFF met le canal en mode ENDLESS (bits 31:28 = 0xF,
+ * relus tels quels) : la condition ci-dessous n'est jamais vraie.
+ * A appeler au moins une fois par 2^26 echantillons (11 min a 96 kHz) :
+ * chaque *_service() / sarsat_ring_track() le fait a chaque tour. */
+static void adc_dma_renew(void)
+{
+    if (dma_hw->ch[g_dma_chan].transfer_count >= (1u << 26))
+        return;
+    uint32_t irq = save_and_disable_interrupts();
+    dma_channel_abort(g_dma_chan);
+    dma_channel_set_trans_count(g_dma_chan, 0xFFFFFFFFu, true);
+    restore_interrupts(irq);
+    LOG("[link]   ADC DMA transfer count renewed (continuous capture)\n");
+}
+
 /* ---- SARSAT : capture continue en anneau (2026-10-08) ------------------
  * L'ancienne capture remplissait g_adc_raw par fenetres de 1100 ms BOUT A
  * BOUT, puis decodait sans rien capturer : une salve a cheval sur deux
@@ -1288,14 +1322,11 @@ static void sarsat_ring_start(void)
 /* A appeler a chaque tour de boucle en mode SARSAT (au moins une fois par
  * tour d'anneau, 1 s) : compte les echantillons arrives. Relance aussi le DMA
  * avant la fin de son compteur de transferts (2^32 ~ 74 h a 16 kHz) -- sans
- * ca, une station qui ecoute plusieurs jours finirait par se figer. */
+ * ca, une station qui ecoute plusieurs jours finirait par se figer. La
+ * relance est continue (adc_dma_renew()) : l'anneau n'est plus remis a zero. */
 static void sarsat_ring_track(void)
 {
-    if (dma_hw->ch[g_dma_chan].transfer_count < (1u << 24)) {   /* ~17 min restantes */
-        LOG("[link]   SARSAT ring: DMA transfer count renewed\n");
-        sarsat_ring_start();
-        return;
-    }
+    adc_dma_renew();
     uint32_t w = sarsat_ring_widx();
     uint32_t d = (w - g_sar_widx) & (SARSAT_RING_SAMPLES - 1);
     g_sar_widx = w;
@@ -1979,6 +2010,7 @@ static void sstv_clock_report(const sstv_demod_t *d)
 
 static void sstv_service(void)
 {
+    adc_dma_renew();
     uint32_t base = (uint32_t)(uintptr_t)g_aprs_ring;
     uint32_t widx = ((dma_hw->ch[g_dma_chan].write_addr - base) / 2)
                     & (APRS_RING_SAMPLES - 1);
@@ -2234,6 +2266,7 @@ static void sonde_dump_flush(void)
 /* Drain the ADC ring through the demod + sync hunter. */
 static void sonde_service(void)
 {
+    adc_dma_renew();
     uint32_t base = (uint32_t)(uintptr_t)g_sonde_ring;
     uint32_t widx = ((dma_hw->ch[g_dma_chan].write_addr - base) / 2)
                     & (SONDE_RING_SAMPLES - 1);
@@ -2291,6 +2324,7 @@ static void sonde_service(void)
 /* Drain the ADC ring into the AFSK demod. */
 static void aprs_service(void)
 {
+    adc_dma_renew();
     uint32_t base = (uint32_t)(uintptr_t)g_aprs_ring;
     uint32_t widx = ((dma_hw->ch[g_dma_chan].write_addr - base) / 2)
                     & (APRS_RING_SAMPLES - 1);
